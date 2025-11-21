@@ -11,13 +11,11 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 app = Flask(__name__)
-# Open CORS so GitHub Pages frontend can call this backend
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 
 @app.get("/health")
-def health() -> "flask.Response":
-    """Simple health check endpoint."""
+def health():
     return jsonify({
         "status": "ok",
         "time": datetime.utcnow().isoformat() + "Z",
@@ -26,10 +24,6 @@ def health() -> "flask.Response":
 
 
 def parse_size(raw: str):
-    """
-    Parse size strings like '1080x1350', '1080×1350', '1080 x 1350'.
-    Defaults to (1080, 1350) if parsing fails.
-    """
     if not isinstance(raw, str):
         return 1080, 1350
     cleaned = raw.lower().replace(" ", "").replace("×", "x")
@@ -47,11 +41,6 @@ def parse_size(raw: str):
 
 
 def pick_persona_states(product: str, description: str) -> List[Dict]:
-    """
-    Very simple, deterministic persona state generator.
-    In a future version this could be replaced with a model-based persona extractor.
-    For now we always return three states tailored by wording only.
-    """
     base_product = product.strip() or "this service"
     base_desc = (description or "").strip()
 
@@ -76,7 +65,6 @@ def pick_persona_states(product: str, description: str) -> List[Dict]:
         },
     ]
 
-    # Personalize a bit using the product name
     for p in personas:
         p["product"] = base_product
         p["description"] = base_desc
@@ -85,17 +73,10 @@ def pick_persona_states(product: str, description: str) -> List[Dict]:
 
 
 def build_marketing_text(persona: Dict) -> str:
-    """
-    Build a 50-word English marketing paragraph that talks to the persona.
-    Does NOT describe visual shapes or the hybrid object.
-    Ensures exactly 50 words by trimming or padding with soft fillers.
-    """
     product = persona.get("product", "this service")
     goal = persona.get("goal", "clarity")
     opening = persona.get("opening", "Sometimes studying feels heavier than it should be.")
-    name = persona.get("name", "student")
 
-    # Raw text, slightly longer than 50 words
     raw = (
         f"{opening} "
         f"{product} stays patient, organised and focused on what really matters for the exam. "
@@ -109,7 +90,6 @@ def build_marketing_text(persona: Dict) -> str:
     if len(words) > target:
         words = words[:target]
     elif len(words) < target:
-        # pad with soft neutral words that do not change meaning
         fillers = ["calmly", "gently", "clearly", "slowly", "steadily"]
         i = 0
         while len(words) < target:
@@ -119,21 +99,20 @@ def build_marketing_text(persona: Dict) -> str:
     return " ".join(words)
 
 
-def make_placeholder_image(width: int, height: int, copy_text: str) -> bytes:
+def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont):
     """
-    Create a very minimal photographic-style placeholder:
-    - soft gradient-style background
-    - no geometric primitives meant as objects
-    - only the COPY headline in the frame
+    Pillow 10 removed ImageDraw.textsize, so we emulate it via textbbox.
+    """
+    bbox = draw.textbbox((0, 0), text, font=font)
+    width = bbox[2] - bbox[0]
+    height = bbox[3] - bbox[1]
+    return width, height
 
-    This is a TEMPORARY visual implementation until real hybrid-object photos are plugged in.
-    """
-    # Create base image
+
+def make_placeholder_image(width: int, height: int, copy_text: str) -> bytes:
     img = Image.new("RGB", (width, height))
     draw = ImageDraw.Draw(img)
 
-    # Simple vertical color blend using two soft random colors
-    # (not literal shapes, just background atmosphere)
     base_colors = [
         (240, 244, 255),
         (254, 247, 240),
@@ -151,7 +130,6 @@ def make_placeholder_image(width: int, height: int, copy_text: str) -> bytes:
         b = int(top_color[2] * (1 - ratio) + bottom_color[2] * ratio)
         draw.line([(0, y), (width, y)], fill=(r, g, b))
 
-    # Add the COPY text
     try:
         font = ImageFont.truetype("arial.ttf", size=int(height * 0.045))
     except Exception:
@@ -162,7 +140,7 @@ def make_placeholder_image(width: int, height: int, copy_text: str) -> bytes:
     current = ""
     for word in copy_text.split():
         test = (current + " " + word).strip()
-        w, _ = draw.textsize(test, font=font)
+        w, _ = _text_size(draw, test, font)
         if w <= max_text_width:
             current = test
         else:
@@ -172,46 +150,32 @@ def make_placeholder_image(width: int, height: int, copy_text: str) -> bytes:
     if current:
         wrapped.append(current)
 
-    total_text_height = len(wrapped) * (font.size + 4)
+    line_heights = []
+    for line in wrapped:
+        _, h = _text_size(draw, line, font)
+        line_heights.append(h)
+
+    total_text_height = sum(line_heights) + (len(line_heights) - 1) * 4
     start_y = int(height * 0.1)
 
-    for line in wrapped:
-        w, h = draw.textsize(line, font=font)
+    for i, line in enumerate(wrapped):
+        w, h = _text_size(draw, line, font)
         x = (width - w) // 2
         draw.text((x, start_y), line, font=font, fill=(20, 20, 30))
         start_y += h + 4
 
-    # Save to bytes
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=90)
     buf.seek(0)
     return buf.getvalue()
 
 
+from flask import Response
+
 @app.post("/generate")
 def generate():
-    """
-    Main generation endpoint.
-
-    Input JSON (any of these keys):
-        {
-          "product": "...",
-          "description": "...",
-          "size": "1080x1350"
-        }
-
-    Output:
-        ZIP file with:
-          ad_1.jpg, ad_1.txt, ad_2.jpg, ad_2.txt, ad_3.jpg, ad_3.txt
-
-    Current implementation:
-        - Uses ENGINE V0.5 logic for personas + goals + copy + 50-word texts.
-        - Uses minimal photographic-style placeholders for visuals
-          (background + COPY only, no geometric objects).
-    """
     data = request.get_json(silent=True) or {}
 
-    # Try multiple possible key names to avoid breaking existing frontends
     product = (
         data.get("product")
         or data.get("productName")
@@ -240,21 +204,17 @@ def generate():
             copy_text = persona["copy"]
             body_text = build_marketing_text(persona)
 
-            # Create JPG
             img_bytes = make_placeholder_image(width, height, copy_text)
             zf.writestr(f"ad_{idx}.jpg", img_bytes)
-
-            # Create TXT (50-word marketing text)
             zf.writestr(f"ad_{idx}.txt", body_text)
 
     mem_file.seek(0)
-    response = send_file(
+    return send_file(
         mem_file,
         mimetype="application/zip",
         as_attachment=True,
         download_name="ace_ads_package.zip",
     )
-    return response
 
 
 if __name__ == "__main__":
