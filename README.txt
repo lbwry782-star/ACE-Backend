@@ -1,11 +1,13 @@
-ACE Backend (Render, ultra-stable text-only demo)
+ACE Backend (Render, iCount version – marketing text demo)
 
 Endpoints:
 - GET /health  -> simple health check
 - POST /generate -> returns ZIP file with:
-    * 3 small text files (ad_1.txt, ad_2.txt, ad_3.txt)
-    * copy.txt with summary
+    * ad_1.txt
+    * ad_2.txt
+    * ad_3.txt
+    * copy.txt
 
-No Pillow / image generation is used in this demo, to guarantee that the
-endpoint never crashes due to missing native libraries. This is only for
-testing the full payment → builder → ZIP flow.
+Each ad_*.txt contains a different English marketing text variation based on the
+product and description received from the Builder. No images are generated in
+this demo version.

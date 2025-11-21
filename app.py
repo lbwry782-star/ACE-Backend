@@ -6,7 +6,7 @@ from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 
 app = Flask(__name__)
-# Allow all origins so GitHub Pages frontend can always call us
+# Allow all origins so GitHub Pages frontend can always talk to this backend
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 
@@ -20,6 +20,32 @@ def health():
     )
 
 
+def build_copy_variants(product: str, description: str):
+    # Very simple deterministic templates for three English marketing texts.
+    base_desc = description if description else "A smart, ready-to-use solution for busy people who want fast, professional results."
+    p = product or "your product"
+
+    copy1 = (
+        f"Meet {p}, designed for real life. {base_desc} "
+        "Save time, cut the guesswork, and enjoy a smooth experience from the first use. "
+        "Perfect for anyone who cares about quality but refuses to waste hours learning complicated tools."
+    )
+
+    copy2 = (
+        f"Turn everyday moments into something special with {p}. {base_desc} "
+        "Built for modern creators and small teams, it delivers clarity, speed, and confidence. "
+        "Start today and feel the difference of a tool that finally works the way you think."
+    )
+
+    copy3 = (
+        f"{p} gives you an unfair advantage. {base_desc} "
+        "Instead of struggling with scattered tools and messy workflows, you get one focused solution. "
+        "Ideal for ambitious people who want consistent, professional results without hiring an expensive agency."
+    )
+
+    return copy1, copy2, copy3
+
+
 @app.post("/generate")
 def generate():
     data = request.get_json(silent=True) or {}
@@ -27,39 +53,35 @@ def generate():
     description = (data.get("description") or "").strip()
     size_str = (data.get("size") or "1080x1350").strip()
 
-    # We don't actually need the size to build the ZIP in this demo.
-    # Parsing is only to keep compatibility with the frontend.
-    try:
-        width, height = map(int, size_str.lower().split("x"))
-    except Exception:
-        width, height = 1080, 1350
+    copy1, copy2, copy3 = build_copy_variants(product, description)
 
     mem_file = io.BytesIO()
     with zipfile.ZipFile(mem_file, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        # Three simple text placeholders for ads
-        for i in range(1, 4):
-            zf.writestr(
-                f"ad_{i}.txt",
-                (
-                    f"ACE demo – Ad {i}\n"
-                    f"Product: {product}\n"
-                    f"Description: {description}\n"
-                    f"Frame size: {width}x{height}\n"
-                ),
-            )
+        zf.writestr(
+            "ad_1.txt",
+            f"Ad 1 – {product}\n\n{copy1}\n",
+        )
+        zf.writestr(
+            "ad_2.txt",
+            f"Ad 2 – {product}\n\n{copy2}\n",
+        )
+        zf.writestr(
+            "ad_3.txt",
+            f"Ad 3 – {product}\n\n{copy3}\n",
+        )
 
         copy_text = (
             f"ACE demo package for product: {product}\n"
-            f"Short description: {description}\n\n"
-            "This demo ZIP contains three placeholder ads as text files.\n"
-            "In the full ACE engine, each ad would be a photographic hybrid-object visual "
-            "with a 50-word marketing text, according to the official engine rules and "
-            "Terms & Policies.\n"
+            f"Short description from Builder: {description}\n\n"
+            "This demo ZIP contains three simple marketing texts in English.\n"
+            "Each file (ad_1.txt, ad_2.txt, ad_3.txt) is a different variation based on the same product.\n"
+            "In the full ACE engine, each text would be a polished 50-word script paired with a visual ad.\n"
         )
         zf.writestr("copy.txt", copy_text)
 
     mem_file.seek(0)
-    # Very conservative send_file usage, compatible with old Flask versions
+    from flask import Response
+
     response = send_file(mem_file, mimetype="application/zip")
     response.headers["Content-Disposition"] = "attachment; filename=ace_ads_package.zip"
     return response
