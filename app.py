@@ -8,8 +8,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 app = Flask(__name__)
 
-FRONTEND_URL = os.environ.get("FRONTEND_URL", "*")
-CORS(app, resources={r"/*": {"origins": FRONTEND_URL}})
+# CORS – allow all origins to avoid header issues from bad FRONTEND_URL values
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 
 @app.get("/health")
