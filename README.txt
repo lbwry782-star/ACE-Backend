@@ -1,1 +1,1 @@
-ACE Backend ENGINE V0.5 — fixed Pillow text measurement (no textsize).
+ACE Backend ENGINE V0.5 — bigger, centered COPY on soft background.

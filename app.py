@@ -100,9 +100,7 @@ def build_marketing_text(persona: Dict) -> str:
 
 
 def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont):
-    """
-    Pillow 10 removed ImageDraw.textsize, so we emulate it via textbbox.
-    """
+    """Pillow 10 removed ImageDraw.textsize, emulate it via textbbox."""
     bbox = draw.textbbox((0, 0), text, font=font)
     width = bbox[2] - bbox[0]
     height = bbox[3] - bbox[1]
@@ -110,6 +108,11 @@ def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont):
 
 
 def make_placeholder_image(width: int, height: int, copy_text: str) -> bytes:
+    """
+    Create a minimal poster-style placeholder:
+    - soft gradient background (no hard geometric "objects")
+    - COPY headline large and centered
+    """
     img = Image.new("RGB", (width, height))
     draw = ImageDraw.Draw(img)
 
@@ -130,12 +133,13 @@ def make_placeholder_image(width: int, height: int, copy_text: str) -> bytes:
         b = int(top_color[2] * (1 - ratio) + bottom_color[2] * ratio)
         draw.line([(0, y), (width, y)], fill=(r, g, b))
 
+    # Larger font for stronger visual presence
     try:
-        font = ImageFont.truetype("arial.ttf", size=int(height * 0.045))
+        font = ImageFont.truetype("arial.ttf", size=int(min(width, height) * 0.09))
     except Exception:
         font = ImageFont.load_default()
 
-    max_text_width = int(width * 0.8)
+    max_text_width = int(width * 0.9)
     wrapped = []
     current = ""
     for word in copy_text.split():
@@ -150,27 +154,27 @@ def make_placeholder_image(width: int, height: int, copy_text: str) -> bytes:
     if current:
         wrapped.append(current)
 
+    # Compute total text height
     line_heights = []
     for line in wrapped:
         _, h = _text_size(draw, line, font)
         line_heights.append(h)
+    total_text_height = sum(line_heights) + (len(line_heights) - 1) * 8
 
-    total_text_height = sum(line_heights) + (len(line_heights) - 1) * 4
-    start_y = int(height * 0.1)
+    # Center vertically
+    start_y = (height - total_text_height) // 2
 
     for i, line in enumerate(wrapped):
         w, h = _text_size(draw, line, font)
         x = (width - w) // 2
         draw.text((x, start_y), line, font=font, fill=(20, 20, 30))
-        start_y += h + 4
+        start_y += h + 8
 
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=90)
     buf.seek(0)
     return buf.getvalue()
 
-
-from flask import Response
 
 @app.post("/generate")
 def generate():
