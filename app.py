@@ -5,15 +5,8 @@ from datetime import datetime
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 
-# Optional Pillow import
-try:
-    from PIL import Image, ImageDraw, ImageFont  # type: ignore
-    PIL_AVAILABLE = True
-except Exception:
-    PIL_AVAILABLE = False
-
 app = Flask(__name__)
-# Allow all origins so GitHub Pages can always talk to this backend
+# Allow all origins so GitHub Pages frontend can always call us
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 
@@ -23,29 +16,8 @@ def health():
         {
             "status": "ok",
             "time": datetime.utcnow().isoformat() + "Z",
-            "pil_available": PIL_AVAILABLE,
         }
     )
-
-
-def create_placeholder_image(text: str, size=(1080, 1350)):
-    if not PIL_AVAILABLE:
-        return None
-
-    img = Image.new("RGB", size, (17, 24, 39))
-    draw = ImageDraw.Draw(img)
-    w, h = img.size
-    margin = int(min(w, h) * 0.08)
-    draw.rectangle(
-        [margin, margin, w - margin, h - margin],
-        outline=(250, 204, 21),
-        width=4,
-    )
-    msg = text[:60]
-    font = ImageFont.load_default()
-    tw, th = draw.textsize(msg, font=font)
-    draw.text(((w - tw) / 2, (h - th) / 2), msg, fill=(250, 250, 250), font=font)
-    return img
 
 
 @app.post("/generate")
@@ -55,6 +27,8 @@ def generate():
     description = (data.get("description") or "").strip()
     size_str = (data.get("size") or "1080x1350").strip()
 
+    # We don't actually need the size to build the ZIP in this demo.
+    # Parsing is only to keep compatibility with the frontend.
     try:
         width, height = map(int, size_str.lower().split("x"))
     except Exception:
@@ -62,35 +36,30 @@ def generate():
 
     mem_file = io.BytesIO()
     with zipfile.ZipFile(mem_file, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        if PIL_AVAILABLE:
-            for i in range(1, 4):
-                img = create_placeholder_image(f"{product} – Ad {i}", size=(width, height))
-                if img is not None:
-                    img_bytes = io.BytesIO()
-                    img.save(img_bytes, format="JPEG", quality=90)
-                    img_bytes.seek(0)
-                    zf.writestr(f"ad_{i}.jpg", img_bytes.read())
-        else:
-            for i in range(1, 4):
-                zf.writestr(
-                    f"ad_{i}.txt",
-                    f"Placeholder for Ad {i} – in the full engine this would be a JPG image.",
-                )
+        # Three simple text placeholders for ads
+        for i in range(1, 4):
+            zf.writestr(
+                f"ad_{i}.txt",
+                (
+                    f"ACE demo – Ad {i}\n"
+                    f"Product: {product}\n"
+                    f"Description: {description}\n"
+                    f"Frame size: {width}x{height}\n"
+                ),
+            )
 
         copy_text = (
             f"ACE demo package for product: {product}\n"
             f"Short description: {description}\n\n"
-            "This demo ZIP contains three placeholder ads for the ACE demo.\n"
-            "If the environment supports Pillow, you will see three JPG images.\n"
-            "Otherwise you will see three small text files instead of images.\n"
-            "In the full ACE engine each ad would be a photographic hybrid-object visual, "
-            "with three separate 50-word marketing texts in English, "
-            "according to the official engine rules and Terms & Policies.\n"
+            "This demo ZIP contains three placeholder ads as text files.\n"
+            "In the full ACE engine, each ad would be a photographic hybrid-object visual "
+            "with a 50-word marketing text, according to the official engine rules and "
+            "Terms & Policies.\n"
         )
         zf.writestr("copy.txt", copy_text)
 
     mem_file.seek(0)
-    # Use a very simple send_file call compatible with old Flask versions
+    # Very conservative send_file usage, compatible with old Flask versions
     response = send_file(mem_file, mimetype="application/zip")
     response.headers["Content-Disposition"] = "attachment; filename=ace_ads_package.zip"
     return response
