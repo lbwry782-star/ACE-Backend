@@ -1,4 +1,4 @@
-ACE Backend (Render, iCount version – robust /generate)
+ACE Backend (Render, iCount version – robust /generate, simple send_file)
 
 Endpoints:
 - GET /health  -> simple health check + 'pil_available' flag
