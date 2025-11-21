@@ -4,26 +4,45 @@ import zipfile
 from datetime import datetime
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
-from PIL import Image, ImageDraw, ImageFont
+
+# Try to import Pillow; if not available we still return a valid ZIP (text only)
+try:
+    from PIL import Image, ImageDraw, ImageFont  # type: ignore
+    PIL_AVAILABLE = True
+except Exception:  # ImportError or anything else
+    PIL_AVAILABLE = False
 
 app = Flask(__name__)
 
-# CORS – allow all origins to avoid header issues from bad FRONTEND_URL values
+# CORS – allow all origins so frontend on GitHub Pages can always call us
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok", "time": datetime.utcnow().isoformat() + "Z"})
+    return jsonify(
+        {
+            "status": "ok",
+            "time": datetime.utcnow().isoformat() + "Z",
+            "pil_available": PIL_AVAILABLE,
+        }
+    )
 
 
 def create_placeholder_image(text: str, size=(1080, 1350)):
+    if not PIL_AVAILABLE:
+        return None
+
     img = Image.new("RGB", size, (17, 24, 39))  # dark slate background
     draw = ImageDraw.Draw(img)
     w, h = img.size
 
     margin = int(min(w, h) * 0.08)
-    draw.rectangle([margin, margin, w - margin, h - margin], outline=(250, 204, 21), width=4)
+    draw.rectangle(
+        [margin, margin, w - margin, h - margin],
+        outline=(250, 204, 21),
+        width=4,
+    )
 
     msg = text[:60]
     font = ImageFont.load_default()
@@ -47,19 +66,31 @@ def generate():
 
     mem_file = io.BytesIO()
     with zipfile.ZipFile(mem_file, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for i in range(1, 4):
-            img = create_placeholder_image(f"{product} – Ad {i}", size=(width, height))
-            img_bytes = io.BytesIO()
-            img.save(img_bytes, format="JPEG", quality=90)
-            img_bytes.seek(0)
-            zf.writestr(f"ad_{i}.jpg", img_bytes.read())
+        # If Pillow is available, include 3 JPG placeholders
+        if PIL_AVAILABLE:
+            for i in range(1, 4):
+                img = create_placeholder_image(f"{product} – Ad {i}", size=(width, height))
+                if img is not None:
+                    img_bytes = io.BytesIO()
+                    img.save(img_bytes, format="JPEG", quality=90)
+                    img_bytes.seek(0)
+                    zf.writestr(f"ad_{i}.jpg", img_bytes.read())
+        else:
+            # If no Pillow, include tiny text placeholders instead of images
+            for i in range(1, 4):
+                zf.writestr(
+                    f"ad_{i}.txt",
+                    f"Placeholder for Ad {i} – in the full engine this would be a JPG image.",
+                )
 
         copy_text = (
             f"ACE demo package for product: {product}\n"
             f"Short description: {description}\n\n"
-            "This demo ZIP contains three placeholder ad images and a text file.\n"
-            "In the full ACE engine each image would be a photographic hybrid-object ad, "
-            "and this file would include three separate 50-word marketing texts in English, "
+            "This demo ZIP contains three placeholder ads for the ACE demo.\n"
+            "If the environment supports Pillow, you will see three JPG images.\n"
+            "Otherwise you will see three small text files instead of images.\n"
+            "In the full ACE engine each ad would be a photographic hybrid-object visual, "
+            "with three separate 50-word marketing texts in English, "
             "according to the official engine rules and Terms & Policies.\n"
         )
         zf.writestr("copy.txt", copy_text)
