@@ -1,8 +1,6 @@
 import os
 import io
 import zipfile
-import random
-import base64
 from datetime import datetime
 from typing import List, Dict
 
@@ -10,11 +8,10 @@ from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from PIL import Image, ImageDraw, ImageFont
 
-import openai
+from openai import OpenAI
 
-
-# OpenAI configuration (must be set on Render for real photos)
-openai.api_key = os.environ.get("OPENAI_API_KEY", "")
+# OpenAI client (new SDK)
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -27,16 +24,12 @@ def health():
         "status": "ok",
         "time": datetime.utcnow().isoformat() + "Z",
         "engine": "ENGINE_V0.7",
-        "openai_configured": bool(openai.api_key),
+        "openai_configured": bool(os.environ.get("OPENAI_API_KEY")),
     })
 
 
 def parse_size(raw: str):
-    """
-    Parse size strings like:
-      "1080x1350", "1080×1350", "1080 x 1350"
-    Fallback to (1080, 1350) on error.
-    """
+    """Parse size strings like '1080x1350', '1080×1350', '1080 x 1350'."""
     if not isinstance(raw, str):
         return 1080, 1350
     cleaned = raw.lower().replace(" ", "").replace("×", "x")
@@ -53,13 +46,8 @@ def parse_size(raw: str):
         return 1080, 1350
 
 
-def pick_persona_states(product: str, description: str) -> List[Dict]:
-    """
-    Very lightweight persona generator.
-    In a future version this can be replaced by an LLM-based persona extractor.
-
-    For now: three persona states for exam-oriented products.
-    """
+def pick_personas(product: str, description: str) -> List[Dict]:
+    """Simple persona generator for three emotional states."""
     base_product = product.strip() or "this service"
     base_desc = (description or "").strip()
 
@@ -96,7 +84,6 @@ def build_marketing_text(persona: Dict) -> str:
     Build a 50-word English marketing paragraph that:
     - talks to the persona by psychology, not demographics
     - never describes shapes or the hybrid object
-    - may mention the product in words
     """
     product = persona.get("product", "this service")
     goal = persona.get("goal", "clarity")
@@ -125,9 +112,7 @@ def build_marketing_text(persona: Dict) -> str:
 
 
 def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont):
-    """
-    Pillow 10 removed textsize; emulate with textbbox.
-    """
+    """Pillow 10 compatible text size helper (using textbbox)."""
     bbox = draw.textbbox((0, 0), text, font=font)
     width = bbox[2] - bbox[0]
     height = bbox[3] - bbox[1]
@@ -137,40 +122,32 @@ def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont):
 def choose_object_pair(persona: Dict):
     """
     Minimal stand-in for the 100-object library.
-
     We select pairs that are:
-    - real-world objects
-    - naturally photographic
-    - compatible by basic shape metaphor (rectangle / cylinder / etc.)
+    - real-world photographic objects
+    - compatible by basic silhouette metaphor
     """
     goal = (persona.get("goal") or "").lower()
 
-    # clarity → rectangles / clear surfaces
     if "clarity" in goal:
         return "an open history textbook on a desk", "a clean glass window with blue sky outside"
 
-    # confidence → solid, stable shapes
     if "confidence" in goal:
         return "an exam paper graded A plus on a table", "a solid brushed metal shield standing upright"
 
-    # calm before the exam → time + calm landscape
     if "calm" in goal or "exam" in goal:
         return "a glass hourglass standing on a wooden table", "a calm ocean wave at golden hour"
 
-    # default pair
     return "a neat stack of organised study notes", "a quiet warm desk lamp"
 
 
 def generate_photo_with_openai(persona: Dict, width: int, height: int) -> Image.Image:
     """
-    Use OpenAI Images API to generate a balanced commercial photograph
+    Use OpenAI Images API (new SDK) to generate a balanced commercial photograph
     of a hybrid object according to ENGINE V0.7 rules.
 
-    If OPENAI_API_KEY is missing, fall back to a soft gradient background.
+    If OPENAI_API_KEY is missing, fall back to a soft gradient placeholder.
     """
-    if not openai.api_key:
-        # Fallback: simple gradient placeholder (no object),
-        # so /generate still works even without OpenAI.
+    if not os.environ.get("OPENAI_API_KEY"):
         img = Image.new("RGB", (width, height))
         draw = ImageDraw.Draw(img)
         top_color = (240, 244, 255)
@@ -185,7 +162,6 @@ def generate_photo_with_openai(persona: Dict, width: int, height: int) -> Image.
 
     obj_a, obj_b = choose_object_pair(persona)
 
-    # Core visual prompt according to ENGINE V0.7
     prompt = (
         "Balanced commercial photograph with a single clear hybrid object created by shape-based substitution between "
         f"{obj_a} and {obj_b}. "
@@ -198,41 +174,51 @@ def generate_photo_with_openai(persona: Dict, width: int, height: int) -> Image.
         "Mood should be clean but atmospheric, between minimalist tech and elegant advertising."
     )
 
-    # Use legacy Images API compatible with openai==0.28.0
-    response = openai.Image.create(
-        prompt=prompt,
-        n=1,
-        size="1024x1024",
-        response_format="b64_json",
-    )
-    b64 = response["data"][0]["b64_json"]
-    img_bytes = base64.b64decode(b64)
-    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    import base64
+    import io as _io
 
-    # Resize/crop to requested ad size
-    img = img.resize((width, height), Image.LANCZOS)
-    return img
+    try:
+        response = client.images.generate(
+            model="gpt-image-1",
+            prompt=prompt,
+            size="1024x1024"
+        )
+        image_base64 = response.data[0].b64_json
+        img_bytes = base64.b64decode(image_base64)
+        img = Image.open(_io.BytesIO(img_bytes)).convert("RGB")
+        img = img.resize((width, height), Image.LANCZOS)
+        return img
+    except Exception:
+        # Fallback gradient on any error
+        img = Image.new("RGB", (width, height))
+        draw = ImageDraw.Draw(img)
+        top_color = (245, 245, 245)
+        bottom_color = (230, 235, 240)
+        for y in range(height):
+            ratio = y / max(1, height - 1)
+            r = int(top_color[0] * (1 - ratio) + bottom_color[0] * ratio)
+            g = int(top_color[1] * (1 - ratio) + bottom_color[1] * ratio)
+            b = int(top_color[2] * (1 - ratio) + bottom_color[2] * ratio)
+            draw.line([(0, y), (width, y)], fill=(r, g, b))
+        return img
 
 
 def overlay_copy(img: Image.Image, copy_text: str) -> Image.Image:
-    """
-    Add COPY (headline) at the bottom on a dark translucent strip,
-    with no other text in the image.
-    """
+    """Add COPY (headline) at the bottom on a dark translucent strip."""
     img = img.convert("RGBA")
     draw = ImageDraw.Draw(img)
     width, height = img.size
 
-    # Try a large clean sans-serif font
     try:
         font = ImageFont.truetype("arial.ttf", size=int(min(width, height) * 0.08))
     except Exception:
         font = ImageFont.load_default()
 
     max_text_width = int(width * 0.9)
+    words = copy_text.split()
     wrapped = []
     current = ""
-    for word in copy_text.split():
+    for word in words:
         test = (current + " " + word).strip()
         w, _ = _text_size(draw, test, font)
         if w <= max_text_width:
@@ -244,17 +230,15 @@ def overlay_copy(img: Image.Image, copy_text: str) -> Image.Image:
     if current:
         wrapped.append(current)
 
-    # Compute text block height
+    if not wrapped:
+        return img.convert("RGB")
+
     line_heights = []
     for line in wrapped:
         _, h = _text_size(draw, line, font)
         line_heights.append(h)
-    if not line_heights:
-        return img.convert("RGB")
-
     total_text_height = sum(line_heights) + (len(line_heights) - 1) * 8
 
-    # Place near bottom, inside safe area
     start_y = height - int(height * 0.12) - total_text_height
     safe_top = int(height * 0.6)
     if start_y < safe_top:
@@ -263,7 +247,6 @@ def overlay_copy(img: Image.Image, copy_text: str) -> Image.Image:
     padding_x = int(width * 0.06)
     padding_y = 6
 
-    # Determine background box for the text
     max_line_width = 0
     for line in wrapped:
         w, _ = _text_size(draw, line, font)
@@ -276,17 +259,12 @@ def overlay_copy(img: Image.Image, copy_text: str) -> Image.Image:
     box_x1 = box_x0 + box_width
     box_y1 = box_y0 + box_height
 
-    # Draw translucent rectangle
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     overlay_draw = ImageDraw.Draw(overlay)
-    overlay_draw.rectangle(
-        [box_x0, box_y0, box_x1, box_y1],
-        fill=(10, 10, 25, 150),
-    )
+    overlay_draw.rectangle([box_x0, box_y0, box_x1, box_y1], fill=(10, 10, 25, 150))
     img = Image.alpha_composite(img, overlay)
     draw = ImageDraw.Draw(img)
 
-    # Draw the text in light color
     y = start_y
     for line in wrapped:
         w, h = _text_size(draw, line, font)
@@ -300,19 +278,14 @@ def overlay_copy(img: Image.Image, copy_text: str) -> Image.Image:
 @app.post("/generate")
 def generate():
     """
-    Main generation endpoint (ENGINE V0.7).
+    ENGINE V0.7 main endpoint.
 
-    Input JSON (any of these keys):
+    Input JSON:
         {
           "product": "...",
           "description": "...",
           "size": "1080x1350"
         }
-
-    Output: ZIP with:
-        ad_1.jpg, ad_1.txt,
-        ad_2.jpg, ad_2.txt,
-        ad_3.jpg, ad_3.txt
     """
     data = request.get_json(silent=True) or {}
 
@@ -336,7 +309,7 @@ def generate():
     )
     width, height = parse_size(size_raw)
 
-    personas = pick_persona_states(product, description)
+    personas = pick_personas(product, description)
 
     mem_file = io.BytesIO()
     with zipfile.ZipFile(mem_file, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -347,11 +320,11 @@ def generate():
             base_img = generate_photo_with_openai(persona, width, height)
             final_img = overlay_copy(base_img, copy_text)
 
-            img_bytes_io = io.BytesIO()
-            final_img.save(img_bytes_io, format="JPEG", quality=90)
-            img_bytes_io.seek(0)
+            img_bytes = io.BytesIO()
+            final_img.save(img_bytes, format="JPEG", quality=90)
+            img_bytes.seek(0)
 
-            zf.writestr(f"ad_{idx}.jpg", img_bytes_io.read())
+            zf.writestr(f"ad_{idx}.jpg", img_bytes.read())
             zf.writestr(f"ad_{idx}.txt", body_text)
 
     mem_file.seek(0)
