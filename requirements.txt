@@ -3,4 +3,3 @@ flask
 flask-cors
 gunicorn
 Pillow
-openai>=1.0.0
