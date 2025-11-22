@@ -2,11 +2,13 @@
 import os
 import io
 import base64
-import textwrap
+import textwrap as _textwrap
 import uuid
+
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
+from openai import OpenAI
 
 app = Flask(__name__)
 
@@ -14,71 +16,101 @@ app = Flask(__name__)
 frontend_origin = os.getenv("FRONTEND_ORIGIN", "*")
 CORS(app, resources={r"/*": {"origins": frontend_origin}})
 
+# OpenAI client
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
+TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
+
 
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
 
 
-def create_placeholder_image(size_tuple, headline, idx):
-    """Create a simple placeholder image with the headline text."""
-    width, height = size_tuple
-
-    # Background color depends on variation index
-    base_colors = [(28, 40, 72), (20, 60, 80), (60, 35, 90)]
-    bg = base_colors[idx % len(base_colors)]
-
-    img = Image.new("RGB", (width, height), bg)
-    draw = ImageDraw.Draw(img)
-
-    # Draw a simple frame
-    margin = int(min(width, height) * 0.04)
-    draw.rectangle(
-        [margin, margin, width - margin, height - margin],
-        outline=(250, 210, 120),
-        width=max(2, int(min(width, height) * 0.01)),
+def generate_marketing_copy(product_name: str, product_description: str) -> str:
+    """Use OpenAI text model to generate ~50-word marketing copy."""
+    prompt = (
+        "You are an advertising copywriter.\n"
+        f"Product name: {product_name}\n"
+        f"Product description: {product_description}\n\n"
+        "Write a short marketing text in English, exactly 50 words, "
+        "focused on the benefit, promise, or solution. Do not use a headline, "
+        "only one compact paragraph."
     )
 
-    # Text (headline)
-    text = headline or "ACE Ad"
-    wrapped = textwrap.fill(text, width=18)
-
-    # Try to load a basic font; fallback to default
-    try:
-        font = ImageFont.truetype("arial.ttf", size=int(height * 0.06))
-    except Exception:
-        font = ImageFont.load_default()
-
-    # multiline_textbbox is more accurate for newer Pillow
-    try:
-        bbox = draw.multiline_textbbox((0, 0), wrapped, font=font)
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
-    except Exception:
-        text_w, text_h = draw.multiline_textsize(wrapped, font=font)
-
-    x = (width - text_w) / 2
-    y = (height - text_h) / 2
-
-    draw.multiline_text(
-        (x, y),
-        wrapped,
-        fill=(255, 245, 225),
-        font=font,
-        align="center",
+    resp = client.chat.completions.create(
+        model=TEXT_MODEL,
+        messages=[
+            {"role": "system", "content": "You write marketing copy in concise English."},
+            {"role": "user", "content": prompt},
+        ],
     )
 
-    return img
+    text = resp.choices[0].message.content.strip()
+    # As a safeguard, roughly trim to 50 words if needed
+    words = text.split()
+    if len(words) > 55:
+        words = words[:55]
+        text = " ".join(words)
+    return text
 
 
-def image_to_data_url(img):
-    buffer = io.BytesIO()
-    img.save(buffer, format="JPEG", quality=90)
-    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+def size_to_pixels(size_str: str):
+    """Map logical ad size to pixel dimensions acceptable for gpt-image-1."""
+    mapping = {
+        "1200x630": "1200x630",
+        "1080x1350": "1080x1350",
+        "1080x1080": "1080x1080",
+        "1080x1920": "1080x1920",
+    }
+    if size_str not in mapping:
+        return None
+    return mapping[size_str]
+
+
+def generate_ad_image(product_name: str, product_description: str, headline: str, size_str: str) -> bytes:
+    """Generate a photographic ad image using OpenAI gpt-image-1."""
+    size_pixels = size_to_pixels(size_str)
+    if not size_pixels:
+        size_pixels = "1080x1080"
+
+    prompt = (
+        "Photographic advertising image. Minimal clean background. "
+        "Central hybrid object that visually represents the product's benefit. "
+        "No logos, no brands, no celebrities. "
+        f"Product name: {product_name}. "
+        f"Description: {product_description}. "
+        f"Embed this headline text in English clearly in the image: '{headline}'. "
+        "Do not include any other text besides this headline."
+    )
+
+    img_resp = client.images.generate(
+        model=IMAGE_MODEL,
+        prompt=prompt,
+        size=size_pixels,
+        n=1,
+        response_format="b64_json",
+    )
+
+    b64_data = img_resp.data[0].b64_json
+    img_bytes = base64.b64decode(b64_data)
+    return img_bytes
+
+
+def image_bytes_to_data_url(img_bytes: bytes) -> str:
+    # Ensure it's a valid JPEG/PNG data URL. We'll convert to JPEG for consistency.
+    try:
+        img = Image.open(io.BytesIO(img_bytes))
+        out = io.BytesIO()
+        img.convert("RGB").save(out, format="JPEG", quality=90)
+        encoded = base64.b64encode(out.getvalue()).decode("ascii")
+    except Exception:
+        encoded = base64.b64encode(img_bytes).decode("ascii")
     return f"data:image/jpeg;base64,{encoded}"
 
 
-def create_zip_for_variation(image_bytes, copy_text):
+def create_zip_for_variation(image_bytes: bytes, copy_text: str) -> str:
     # Save zip into a temp folder in the container
     tmp_dir = "/tmp/ace_ads"
     os.makedirs(tmp_dir, exist_ok=True)
@@ -114,41 +146,34 @@ def generate():
     if not product_name or not product_description or not size_str:
         return jsonify({"error": "Missing product_name, product_description or size"}), 400
 
-    # Allowed sizes
-    allowed_sizes = {
-        "1200x630": (1200, 630),
-        "1080x1350": (1080, 1350),
-        "1080x1080": (1080, 1080),
-        "1080x1920": (1080, 1920),
-    }
-    if size_str not in allowed_sizes:
-        return jsonify({"error": "Invalid size"}), 400
-
-    width, height = allowed_sizes[size_str]
-
-    # Simple placeholder headlines and copies
-    base_copy = (
-        f"{product_name} stands out with a clear benefit for your audience. "
-        f"This placeholder copy is here so you can visually test the builder page. "
-        f"Replace this engine later with the full ACE hybrid-object logic and real OpenAI text."
-    )
-    copy_words = base_copy.split()
-    if len(copy_words) > 50:
-        copy_words = copy_words[:50]
-    placeholder_copy = " ".join(copy_words)
+    # First generate a single base marketing copy (same for all 3 variations)
+    try:
+        marketing_copy = generate_marketing_copy(product_name, product_description)
+    except Exception as e:
+        # Fallback simple placeholder if OpenAI text fails
+        marketing_copy = (
+            f"{product_name} stands out with a clear benefit for your audience. "
+            f"This placeholder copy is here so you can visually test the builder page even "
+            f"if the text model failed. "
+            f"Replace this engine later with the full ACE hybrid-object logic."
+        )
+        words = marketing_copy.split()
+        if len(words) > 50:
+            words = words[:50]
+            marketing_copy = " ".join(words)
 
     variations = []
     for idx in range(3):
         headline = f"{product_name} – Variation {idx + 1}"
 
-        img = create_placeholder_image((width, height), headline, idx)
-        img_buffer = io.BytesIO()
-        img.save(img_buffer, format="JPEG", quality=90)
-        img_bytes = img_buffer.getvalue()
+        try:
+            img_bytes = generate_ad_image(product_name, product_description, headline, size_str)
+        except Exception as e:
+            # If image generation fails, return an error for now
+            return jsonify({"error": f"Image generation failed: {e}"}), 500
 
-        data_url = image_to_data_url(img)
-
-        zip_filename = create_zip_for_variation(img_bytes, placeholder_copy)
+        data_url = image_bytes_to_data_url(img_bytes)
+        zip_filename = create_zip_for_variation(img_bytes, marketing_copy)
         host = request.host_url.rstrip("/")
         zip_url = f"{host}/download/{zip_filename}"
 
@@ -156,7 +181,7 @@ def generate():
             {
                 "image_data_url": data_url,
                 "headline": headline,
-                "copy": placeholder_copy,
+                "copy": marketing_copy,
                 "zip_url": zip_url,
             }
         )
