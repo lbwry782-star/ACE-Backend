@@ -9,19 +9,17 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from PIL import Image, ImageDraw, ImageFont
 
-# -------- OpenAI client (new SDK) --------
+# OpenAI client (new SDK)
 try:
     from openai import OpenAI
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 except Exception:
-    client = None  # fallback to placeholders only
+    client = None
 
 IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
 TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
 
 app = Flask(__name__)
-
-# CORS
 frontend_origin = os.getenv("FRONTEND_ORIGIN", "*")
 CORS(app, resources={r"/*": {"origins": frontend_origin}})
 
@@ -31,7 +29,7 @@ def health():
     return jsonify({"status": "ok"})
 
 
-# ---------- placeholder helpers ----------
+# --- Placeholder helpers ---
 def create_placeholder_image(size_tuple, headline, idx):
     width, height = size_tuple
     base_colors = [(28, 40, 72), (20, 60, 80), (60, 35, 90)]
@@ -107,7 +105,7 @@ def create_zip_for_variation(image_bytes, copy_text):
     return filename
 
 
-# ---------- OpenAI helpers ----------
+# --- OpenAI helpers ---
 def generate_marketing_copy(product_name, product_description):
     base_fallback = (
         f"{product_name} gives your audience a clear, memorable benefit. "
@@ -151,23 +149,15 @@ def generate_marketing_copy(product_name, product_description):
         return fallback_copy
 
 
-def size_to_pixels_for_openai(size_str):
-    # mapping option 1, as you chose
-    mapping = {
-        "1080x1080": "1024x1024",
-        "1080x1350": "1024x1536",
-        "1080x1920": "1024x1536",
-        "1200x630": "1536x1024",
-    }
-    return mapping.get(size_str, "1024x1024")
+def size_is_valid_for_openai(size_str):
+    return size_str in {"1024x1024", "1024x1536", "1536x1024"}
 
 
 def generate_openai_image(product_name, product_description, headline, size_str):
-    if client is None:
+    if client is None or not size_is_valid_for_openai(size_str):
         return None
 
     try:
-        size_pixels = size_to_pixels_for_openai(size_str)
         prompt = (
             "Photographic advertising image. Minimal, clean background with depth. "
             "Central hybrid object that visually represents the product benefit. "
@@ -180,7 +170,7 @@ def generate_openai_image(product_name, product_description, headline, size_str)
         resp = client.images.generate(
             model=IMAGE_MODEL,
             prompt=prompt,
-            size=size_pixels,
+            size=size_str,
             n=1,
             response_format="b64_json",
         )
@@ -191,7 +181,6 @@ def generate_openai_image(product_name, product_description, headline, size_str)
         return None
 
 
-# ---------- routes ----------
 @app.route("/download/<path:zip_name>", methods=["GET"])
 def download_zip(zip_name):
     tmp_dir = "/tmp/ace_ads"
@@ -209,12 +198,10 @@ def generate():
     if not product_name or not product_description or not size_str:
         return jsonify({"error": "Missing product_name, product_description or size"}), 400
 
-    # logical sizes for placeholder images (frontend layout)
     allowed_sizes = {
-        "1200x630": (1200, 630),
-        "1080x1350": (1080, 1350),
-        "1080x1080": (1080, 1080),
-        "1080x1920": (1080, 1920),
+        "1024x1024": (1024, 1024),
+        "1024x1536": (1024, 1536),
+        "1536x1024": (1536, 1024),
     }
     if size_str not in allowed_sizes:
         return jsonify({"error": "Invalid size"}), 400
@@ -230,7 +217,6 @@ def generate():
         img_bytes = generate_openai_image(product_name, product_description, headline, size_str)
 
         if img_bytes is None:
-            # fallback to placeholder
             img = create_placeholder_image((width, height), headline, idx)
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=90)
