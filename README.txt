@@ -1,33 +1,15 @@
-ACE Backend – ENGINE V0.7 (Hybrid Object Engine, OpenAI new SDK, gpt-image-1)
+ACE Backend (Render, OpenAI image version)
 
-This backend implements the ENGINE V0.7 logic for ACE / ADesk using the new OpenAI Python SDK.
+Endpoints:
+- GET  /health    -> simple health check (also shows engine + model)
+- POST /generate  -> returns JSON with 3 ads, each including base64 image + copy text.
 
-• 3 ads per request (JPG + 50-word TXT each).
-• Hybrid-object photos generated via OpenAI Images (model gpt-image-1) when OPENAI_API_KEY is set.
-• COPY (headline) is rendered onto the image at the bottom in a dark translucent strip.
-• No other text, no logos, no brands, no people, no CGI.
+Environment variables to configure on Render:
 
-Logging
--------
-• If OPENAI_API_KEY is missing, a warning is logged and a gradient fallback image is used.
-• If any OpenAI error occurs during image generation, the exact error is logged with level ERROR,
-  and a gradient fallback image is used so /generate still returns HTTP 200.
+- OPENAI_API_KEY      (required)  Your OpenAI API key for this backend.
+- FRONTEND_URL        (optional)  e.g. https://lbwry782-star.github.io/ACE-Frontend
+- OPENAI_IMAGE_MODEL  (optional)  default: gpt-image-1
+- OPENAI_TEXT_MODEL   (optional)  default: gpt-4.1-mini
 
-Endpoints
----------
-GET /health
-  → { "status": "ok", "engine": "ENGINE_V0.7", "openai_configured": true/false, "image_model": "gpt-image-1" }
-
-POST /generate
-  Input JSON (any combination):
-    {
-      "product": "...",
-      "description": "...",
-      "size": "1080x1350"
-    }
-
-  Output:
-    ZIP containing:
-      ad_1.jpg, ad_1.txt,
-      ad_2.jpg, ad_2.txt,
-      ad_3.jpg, ad_3.txt
+No Stripe is used in this version. Payment is handled by iCount and the user
+is redirected to builder.html according to your iCount configuration.
