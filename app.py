@@ -1,6 +1,7 @@
 import os
 import io
 import zipfile
+import base64
 from datetime import datetime
 from typing import List, Dict
 
@@ -25,6 +26,7 @@ def health():
         "time": datetime.utcnow().isoformat() + "Z",
         "engine": "ENGINE_V0.7",
         "openai_configured": bool(os.environ.get("OPENAI_API_KEY")),
+        "image_model": "gpt-image-latest",
     })
 
 
@@ -140,6 +142,18 @@ def choose_object_pair(persona: Dict):
     return "a neat stack of organised study notes", "a quiet warm desk lamp"
 
 
+def gradient_fallback(width: int, height: int, top_color=(245, 245, 245), bottom_color=(230, 235, 240)) -> Image.Image:
+    img = Image.new("RGB", (width, height))
+    draw = ImageDraw.Draw(img)
+    for y in range(height):
+        ratio = y / max(1, height - 1)
+        r = int(top_color[0] * (1 - ratio) + bottom_color[0] * ratio)
+        g = int(top_color[1] * (1 - ratio) + bottom_color[1] * ratio)
+        b = int(top_color[2] * (1 - ratio) + bottom_color[2] * ratio)
+        draw.line([(0, y), (width, y)], fill=(r, g, b))
+    return img
+
+
 def generate_photo_with_openai(persona: Dict, width: int, height: int) -> Image.Image:
     """
     Use OpenAI Images API (new SDK) to generate a balanced commercial photograph
@@ -149,17 +163,7 @@ def generate_photo_with_openai(persona: Dict, width: int, height: int) -> Image.
     """
     if not os.environ.get("OPENAI_API_KEY"):
         app.logger.warning("OPENAI_API_KEY not set – using gradient fallback.")
-        img = Image.new("RGB", (width, height))
-        draw = ImageDraw.Draw(img)
-        top_color = (240, 244, 255)
-        bottom_color = (238, 246, 250)
-        for y in range(height):
-            ratio = y / max(1, height - 1)
-            r = int(top_color[0] * (1 - ratio) + bottom_color[0] * ratio)
-            g = int(top_color[1] * (1 - ratio) + bottom_color[1] * ratio)
-            b = int(top_color[2] * (1 - ratio) + bottom_color[2] * ratio)
-            draw.line([(0, y), (width, y)], fill=(r, g, b))
-        return img
+        return gradient_fallback(width, height, top_color=(240, 244, 255), bottom_color=(238, 246, 250))
 
     obj_a, obj_b = choose_object_pair(persona)
 
@@ -175,35 +179,21 @@ def generate_photo_with_openai(persona: Dict, width: int, height: int) -> Image.
         "Mood should be clean but atmospheric, between minimalist tech and elegant advertising."
     )
 
-    import base64
-    import io as _io
-
     try:
         response = client.images.generate(
-            model="gpt-image-1",
+            model="gpt-image-latest",
             prompt=prompt,
             size="1024x1024"
         )
         image_base64 = response.data[0].b64_json
         img_bytes = base64.b64decode(image_base64)
-        img = Image.open(_io.BytesIO(img_bytes)).convert("RGB")
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         img = img.resize((width, height), Image.LANCZOS)
         return img
     except Exception as e:
         # Log the exact OpenAI error so we can debug from Render logs
         app.logger.error(f"OpenAI image generation error: {e}")
-        # Fallback gradient on any error
-        img = Image.new("RGB", (width, height))
-        draw = ImageDraw.Draw(img)
-        top_color = (245, 245, 245)
-        bottom_color = (230, 235, 240)
-        for y in range(height):
-            ratio = y / max(1, height - 1)
-            r = int(top_color[0] * (1 - ratio) + bottom_color[0] * ratio)
-            g = int(top_color[1] * (1 - ratio) + bottom_color[1] * ratio)
-            b = int(top_color[2] * (1 - ratio) + bottom_color[2] * ratio)
-            draw.line([(0, y), (width, y)], fill=(r, g, b))
-        return img
+        return gradient_fallback(width, height, top_color=(245, 245, 245), bottom_color=(230, 235, 240))
 
 
 def overlay_copy(img: Image.Image, copy_text: str) -> Image.Image:
