@@ -33,7 +33,7 @@ def model_test():
     try:
         r = client.chat.completions.create(
             model=TEXT_MODEL,
-            messages=[{"role":"user","content":"test"}],
+            messages=[{"role": "user", "content": "test"}],
             max_tokens=5
         )
         results["TEXT_MODEL_OK"] = True
@@ -56,7 +56,7 @@ def model_test():
 
 @app.route("/health")
 def health():
-    return jsonify({"status":"ok"})
+    return jsonify({"status": "ok"})
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT",5000)))
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
