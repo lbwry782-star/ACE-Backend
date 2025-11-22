@@ -1,9 +1,9 @@
-ACE Backend – ENGINE V0.7 (Hybrid Object Engine, OpenAI new SDK, gpt-image-latest)
+ACE Backend – ENGINE V0.7 (Hybrid Object Engine, OpenAI new SDK, gpt-image-1)
 
 This backend implements the ENGINE V0.7 logic for ACE / ADesk using the new OpenAI Python SDK.
 
 • 3 ads per request (JPG + 50-word TXT each).
-• Hybrid-object photos generated via OpenAI Images (model gpt-image-latest) when OPENAI_API_KEY is set.
+• Hybrid-object photos generated via OpenAI Images (model gpt-image-1) when OPENAI_API_KEY is set.
 • COPY (headline) is rendered onto the image at the bottom in a dark translucent strip.
 • No other text, no logos, no brands, no people, no CGI.
 
@@ -16,7 +16,7 @@ Logging
 Endpoints
 ---------
 GET /health
-  → { "status": "ok", "engine": "ENGINE_V0.7", "openai_configured": true/false, "image_model": "gpt-image-latest" }
+  → { "status": "ok", "engine": "ENGINE_V0.7", "openai_configured": true/false, "image_model": "gpt-image-1" }
 
 POST /generate
   Input JSON (any combination):

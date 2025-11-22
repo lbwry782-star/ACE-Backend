@@ -26,7 +26,7 @@ def health():
         "time": datetime.utcnow().isoformat() + "Z",
         "engine": "ENGINE_V0.7",
         "openai_configured": bool(os.environ.get("OPENAI_API_KEY")),
-        "image_model": "gpt-image-latest",
+        "image_model": "gpt-image-1",
     })
 
 
@@ -181,7 +181,7 @@ def generate_photo_with_openai(persona: Dict, width: int, height: int) -> Image.
 
     try:
         response = client.images.generate(
-            model="gpt-image-latest",
+            model="gpt-image-1",   # supported model from your logs
             prompt=prompt,
             size="1024x1024"
         )
