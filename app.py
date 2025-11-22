@@ -145,9 +145,10 @@ def generate_photo_with_openai(persona: Dict, width: int, height: int) -> Image.
     Use OpenAI Images API (new SDK) to generate a balanced commercial photograph
     of a hybrid object according to ENGINE V0.7 rules.
 
-    If OPENAI_API_KEY is missing, fall back to a soft gradient placeholder.
+    If OPENAI_API_KEY is missing, or any error occurs, fall back to a soft gradient placeholder.
     """
     if not os.environ.get("OPENAI_API_KEY"):
+        app.logger.warning("OPENAI_API_KEY not set – using gradient fallback.")
         img = Image.new("RGB", (width, height))
         draw = ImageDraw.Draw(img)
         top_color = (240, 244, 255)
@@ -188,7 +189,9 @@ def generate_photo_with_openai(persona: Dict, width: int, height: int) -> Image.
         img = Image.open(_io.BytesIO(img_bytes)).convert("RGB")
         img = img.resize((width, height), Image.LANCZOS)
         return img
-    except Exception:
+    except Exception as e:
+        # Log the exact OpenAI error so we can debug from Render logs
+        app.logger.error(f"OpenAI image generation error: {e}")
         # Fallback gradient on any error
         img = Image.new("RGB", (width, height))
         draw = ImageDraw.Draw(img)
