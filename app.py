@@ -20,7 +20,7 @@ IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
 TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
 
 app = Flask(__name__)
-# Allow all origins for simplicity (builder on GitHub, etc.)
+# Allow all origins - easier for GitHub Pages builder
 CORS(app)
 
 
@@ -162,32 +162,40 @@ def logical_size_from_openai_size(size_str):
     return mapping.get(size_str, (1024, 1024))
 
 
-def generate_openai_image(product_name, product_description, headline, size_str):
+def generate_openai_images(product_name, product_description, size_str, n=3):
+    """Single API call that asks OpenAI for n variations at once.
+    This prevents gunicorn worker timeout from 3 separate slow calls.
+    """
     if client is None or not size_is_valid_for_openai(size_str):
-        return None
+        return [None] * n
 
     try:
         prompt = (
-            "Photographic advertising image. Minimal, clean background with depth. "
+            "Photographic advertising image for an online ad. Minimal, clean background with depth. "
             "Central hybrid object that visually represents the product benefit. "
             "No logos, no brands, no celebrities, no recognizable IP. "
+            "Leave space for a short headline, but do not render any text. "
             f"Product name: {product_name}. "
-            f"Product description: {product_description}. "
-            f"Embed this headline clearly in the image: '{headline}'. "
-            "Don't include any other text besides this headline."
+            f"Product description: {product_description}."
         )
         resp = client.images.generate(
             model=IMAGE_MODEL,
             prompt=prompt,
             size=size_str,
-            n=1,
+            n=n,
         )
-        b64_data = resp.data[0].b64_json
-        img_bytes = base64.b64decode(b64_data)
-        return img_bytes
+        results = []
+        for i in range(n):
+            try:
+                b64_data = resp.data[i].b64_json
+                img_bytes = base64.b64decode(b64_data)
+                results.append(img_bytes)
+            except Exception:
+                results.append(None)
+        return results
     except Exception as e:
         print("OpenAI image error:", str(e))
-        return None
+        return [None] * n
 
 
 @app.route("/download/<path:zip_name>", methods=["GET"])
@@ -213,11 +221,13 @@ def generate():
     width, height = logical_size_from_openai_size(size_str)
     marketing_copy = generate_marketing_copy(product_name, product_description)
 
+    # Single OpenAI image call for 3 variations
+    images_bytes = generate_openai_images(product_name, product_description, size_str, n=3)
+
     variations = []
     for idx in range(3):
         headline = f"{product_name} – Variation {idx + 1}"
-
-        img_bytes = generate_openai_image(product_name, product_description, headline, size_str)
+        img_bytes = images_bytes[idx]
 
         if img_bytes is None:
             img = create_placeholder_image((width, height), headline, idx)
