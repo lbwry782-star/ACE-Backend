@@ -20,8 +20,8 @@ IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
 TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
 
 app = Flask(__name__)
-frontend_origin = os.getenv("FRONTEND_ORIGIN", "*")
-CORS(app, resources={r"/*": {"origins": frontend_origin}})
+# Allow all origins for simplicity (builder on GitHub, etc.)
+CORS(app)
 
 
 @app.route("/health", methods=["GET"])
@@ -74,7 +74,6 @@ def create_placeholder_image(size_tuple, headline, idx):
 
 
 def image_to_data_url_from_bytes(img_bytes):
-    # Convert raw image bytes (from OpenAI) into JPEG data URL
     try:
         img = Image.open(io.BytesIO(img_bytes))
         out = io.BytesIO()
@@ -155,7 +154,6 @@ def size_is_valid_for_openai(size_str):
 
 
 def logical_size_from_openai_size(size_str):
-    # Use same pixels for placeholder as OpenAI size
     mapping = {
         "1024x1024": (1024, 1024),
         "1024x1536": (1024, 1536),
@@ -178,8 +176,6 @@ def generate_openai_image(product_name, product_description, headline, size_str)
             f"Embed this headline clearly in the image: '{headline}'. "
             "Don't include any other text besides this headline."
         )
-        # IMPORTANT: gpt-image-1 does NOT support response_format parameter.
-        # It always returns base64 in data[0].b64_json.
         resp = client.images.generate(
             model=IMAGE_MODEL,
             prompt=prompt,
@@ -190,7 +186,6 @@ def generate_openai_image(product_name, product_description, headline, size_str)
         img_bytes = base64.b64decode(b64_data)
         return img_bytes
     except Exception as e:
-        # Optional: print to logs on Render for debugging
         print("OpenAI image error:", str(e))
         return None
 
