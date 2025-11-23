@@ -1,3 +1,4 @@
+# ACE BACKEND v1 SAFE VARIATIONS
 
 import os
 import io
@@ -9,7 +10,7 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from PIL import Image, ImageDraw, ImageFont
 
-# OpenAI client (new SDK)
+# OpenAI client
 try:
     from openai import OpenAI
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -20,7 +21,7 @@ IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
 TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
 
 app = Flask(__name__)
-# Allow all origins - easier for GitHub Pages builder
+# CORS פתוח לכל הדומיינים (GitHub Pages וכו')
 CORS(app)
 
 
@@ -29,7 +30,7 @@ def health():
     return jsonify({"status": "ok"})
 
 
-# ---------- placeholder helpers ----------
+# ---------- Placeholder helpers ----------
 def create_placeholder_image(size_tuple, headline, idx):
     width, height = size_tuple
     base_colors = [(28, 40, 72), (20, 60, 80), (60, 35, 90)]
@@ -162,40 +163,33 @@ def logical_size_from_openai_size(size_str):
     return mapping.get(size_str, (1024, 1024))
 
 
-def generate_openai_images(product_name, product_description, size_str, n=3):
-    """Single API call that asks OpenAI for n variations at once.
-    This prevents gunicorn worker timeout from 3 separate slow calls.
-    """
+def generate_openai_image_single(product_name, product_description, headline, size_str):
+    """Generate ONE image via OpenAI. Any error -> return None (no exception)."""
     if client is None or not size_is_valid_for_openai(size_str):
-        return [None] * n
+        return None
 
     try:
         prompt = (
-            "Photographic advertising image for an online ad. Minimal, clean background with depth. "
+            "Photographic advertising image. Minimal, clean background with depth. "
             "Central hybrid object that visually represents the product benefit. "
             "No logos, no brands, no celebrities, no recognizable IP. "
-            "Leave space for a short headline, but do not render any text. "
             f"Product name: {product_name}. "
-            f"Product description: {product_description}."
+            f"Product description: {product_description}. "
+            f"Embed this headline clearly in the image: '{headline}'. "
+            "Don't include any other text besides this headline."
         )
         resp = client.images.generate(
             model=IMAGE_MODEL,
             prompt=prompt,
             size=size_str,
-            n=n,
+            n=1,
         )
-        results = []
-        for i in range(n):
-            try:
-                b64_data = resp.data[i].b64_json
-                img_bytes = base64.b64decode(b64_data)
-                results.append(img_bytes)
-            except Exception:
-                results.append(None)
-        return results
+        b64_data = resp.data[0].b64_json
+        img_bytes = base64.b64decode(b64_data)
+        return img_bytes
     except Exception as e:
         print("OpenAI image error:", str(e))
-        return [None] * n
+        return None
 
 
 @app.route("/download/<path:zip_name>", methods=["GET"])
@@ -221,13 +215,14 @@ def generate():
     width, height = logical_size_from_openai_size(size_str)
     marketing_copy = generate_marketing_copy(product_name, product_description)
 
-    # Single OpenAI image call for 3 variations
-    images_bytes = generate_openai_images(product_name, product_description, size_str, n=3)
-
     variations = []
     for idx in range(3):
         headline = f"{product_name} – Variation {idx + 1}"
-        img_bytes = images_bytes[idx]
+
+        # Try OpenAI once per variation; never raise, only log.
+        img_bytes = generate_openai_image_single(
+            product_name, product_description, headline, size_str
+        )
 
         if img_bytes is None:
             img = create_placeholder_image((width, height), headline, idx)
