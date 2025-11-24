@@ -1,11 +1,12 @@
 import os
 import io
 import base64
-from PIL import Image, ImageDraw, ImageFont
+from datetime import timedelta
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
+from PIL import Image, ImageDraw, ImageFont
 
 app = Flask(__name__)
 
@@ -37,14 +38,10 @@ def make_image_with_headline(headline: str, size_key: str) -> str:
     img = Image.new("RGB", (width, height), color=(0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # Basic font handling – use default PIL font
     font = ImageFont.load_default()
-
-    # Wrap headline if needed
     text = headline or "ACE Ad"
     max_width = int(width * 0.8)
 
-    # Split manually by spaces
     words = text.split()
     lines = []
     current = ""
@@ -60,6 +57,9 @@ def make_image_with_headline(headline: str, size_key: str) -> str:
             current = w
     if current:
         lines.append(current)
+
+    if not lines:
+        lines = ["ACE Ad"]
 
     line_heights = []
     for line in lines:
@@ -142,8 +142,10 @@ Respond ONLY as JSON in the following format (no extra text):
     except Exception as e:
         return jsonify({"success": False, "error": f"Text generation failed: {e}"}), 500
 
+    import json as json_lib
+
     try:
-        variations = json.loads(raw_text)
+        variations = json_lib.loads(raw_text)
         if not isinstance(variations, list) or len(variations) != 3:
             raise ValueError("Model did not return 3 variations.")
     except Exception:
@@ -154,7 +156,7 @@ Respond ONLY as JSON in the following format (no extra text):
         ]
 
     results = []
-    for idx, item in enumerate(variations):
+    for item in variations:
         headline = (item.get("headline") or "").strip()
         copy_text = (item.get("copy") or "").strip()
 
