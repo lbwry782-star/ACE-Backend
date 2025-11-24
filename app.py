@@ -26,6 +26,8 @@ def health():
 
 @app.route("/generate_ads", methods=["POST"])
 def generate_ads():
+    import json
+
     try:
         data = request.get_json(force=True) or {}
     except Exception:
@@ -41,7 +43,6 @@ def generate_ads():
     if size not in ALLOWED_SIZES:
         size = "1024x1024"
 
-    # --- Generate 3 headline + copy variations ---
     prompt = f"""You are the text engine for the ACE Advertising Engine.
 
 You receive a product name and an optional description.
@@ -76,20 +77,17 @@ Respond ONLY as JSON in the following format (no extra text):
                     "content": prompt,
                 },
             ],
-            temperature=0.8,
+            temperature=0.7,
         )
         raw_text = chat_response.choices[0].message.content
     except Exception as e:
         return jsonify({"success": False, "error": f"Text generation failed: {e}"}), 500
-
-    import json  # local import to avoid issues if unused
 
     try:
         variations = json.loads(raw_text)
         if not isinstance(variations, list) or len(variations) != 3:
             raise ValueError("Model did not return 3 variations.")
     except Exception:
-        # Fallback: wrap whole text as one variation if JSON parsing fails
         variations = [
             {"headline": product_name[:60] or "ACE Ad Variation 1", "copy": raw_text or ""},
             {"headline": product_name[:60] or "ACE Ad Variation 2", "copy": raw_text or ""},
@@ -98,7 +96,6 @@ Respond ONLY as JSON in the following format (no extra text):
 
     results = []
 
-    # --- Generate image for each variation ---
     for idx, item in enumerate(variations):
         headline = (item.get("headline") or "").strip()
         copy_text = (item.get("copy") or "").strip()
