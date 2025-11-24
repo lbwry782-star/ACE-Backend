@@ -94,29 +94,38 @@ Respond ONLY as JSON in the following format (no extra text):
             {"headline": product_name[:60] or "ACE Ad Variation 3", "copy": raw_text or ""},
         ]
 
+    # --- Generate ONE image only, reuse for all variations ---
+    primary_headline = (variations[0].get("headline") or product_name or "ACE Ad").strip()
+
+    image_prompt = f"""Photographic advertising visual for the product "{product_name}".
+Black minimal background. One central hybrid object inspired by the product benefit and the inferred target audience.
+Single clear composition, no clutter. No logos, no celebrities.
+Embed the headline text in the image: "{primary_headline}".
+"""  # noqa: E501
+
+    image_url = None
+    image_error = None
+
+    try:
+        img_resp = client.images.generate(
+            model=IMAGE_MODEL,
+            prompt=image_prompt,
+            size=size,
+            n=1,
+        )
+        image_url = img_resp.data[0].url
+    except Exception as e:
+        image_error = str(e)
+        print("IMAGE_GENERATION_ERROR:", repr(e), flush=True)
+
     results = []
 
     for idx, item in enumerate(variations):
         headline = (item.get("headline") or "").strip()
         copy_text = (item.get("copy") or "").strip()
 
-        image_prompt = f"""Photographic advertising visual for the product "{product_name}".
-Black minimal background. One central hybrid object inspired by the product benefit and the inferred target audience.
-Single clear composition, no clutter. No logos, no celebrities.
-Embed the headline text in the image: "{headline}".
-"""  # noqa: E501
-
-        try:
-            img_resp = client.images.generate(
-                model=IMAGE_MODEL,
-                prompt=image_prompt,
-                size=size,
-                n=1,
-            )
-            image_url = img_resp.data[0].url
-        except Exception as e:
-            image_url = None
-            copy_text = (copy_text + f" [Image generation failed: {e}]").strip()
+        if image_url is None and image_error:
+            copy_text = (copy_text + f" [Image generation failed: {image_error}]").strip()
 
         results.append(
             {
