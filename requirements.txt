@@ -1,5 +1,4 @@
 flask
 flask-cors
-gunicorn
 openai>=1.0.0
-Pillow
+gunicorn
