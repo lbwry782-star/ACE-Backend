@@ -1,8 +1,7 @@
+
 import os
 import io
 import base64
-from datetime import timedelta
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
@@ -19,11 +18,20 @@ else:
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
+IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
 
-ALLOWED_SIZES = {
+# UI sizes (what the frontend sends)
+UI_SIZES = {
     "1024x1024": (1024, 1024),
     "1024x1536": (1024, 1536),
     "1536x1024": (1536, 1024),
+}
+
+# Mapping from UI size -> OpenAI generic image size
+OPENAI_SIZE_MAP = {
+    "1024x1024": "1024x1024",
+    "1024x1536": "1024x1792",
+    "1536x1024": "1792x1024",
 }
 
 
@@ -32,9 +40,9 @@ def health():
     return jsonify({"status": "ok"}), 200
 
 
-def make_image_with_headline(headline: str, size_key: str) -> str:
-    """Create a simple black image with the headline in the center and return as data URL."""
-    width, height = ALLOWED_SIZES.get(size_key, (1024, 1024))
+def make_fallback_image(headline: str, size_key: str) -> str:
+    """Fallback: create a simple black image with the headline in the center and return as data URL."""
+    width, height = UI_SIZES.get(size_key, (1024, 1024))
     img = Image.new("RGB", (width, height), color=(0, 0, 0))
     draw = ImageDraw.Draw(img)
 
@@ -85,7 +93,7 @@ def make_image_with_headline(headline: str, size_key: str) -> str:
 
 @app.route("/generate_ads", methods=["POST"])
 def generate_ads():
-    import json
+    import json as json_lib
 
     try:
         data = request.get_json(force=True) or {}
@@ -99,9 +107,12 @@ def generate_ads():
     if not product_name:
         return jsonify({"success": False, "error": "Missing product_name"}), 400
 
-    if size_key not in ALLOWED_SIZES:
+    if size_key not in UI_SIZES:
         size_key = "1024x1024"
 
+    openai_size = OPENAI_SIZE_MAP.get(size_key, "1024x1024")
+
+    # ---- 1) TEXT GENERATION ----
     prompt = f"""You are the text engine for the ACE Advertising Engine.
 
 You receive a product name and an optional description.
@@ -142,8 +153,6 @@ Respond ONLY as JSON in the following format (no extra text):
     except Exception as e:
         return jsonify({"success": False, "error": f"Text generation failed: {e}"}), 500
 
-    import json as json_lib
-
     try:
         variations = json_lib.loads(raw_text)
         if not isinstance(variations, list) or len(variations) != 3:
@@ -155,18 +164,48 @@ Respond ONLY as JSON in the following format (no extra text):
             {"headline": product_name[:60] or "ACE Ad Variation 3", "copy": raw_text or ""},
         ]
 
+    # ---- 2) IMAGE GENERATION ----
     results = []
     for item in variations:
         headline = (item.get("headline") or "").strip()
         copy_text = (item.get("copy") or "").strip()
 
-        image_url = make_image_with_headline(headline, size_key)
+        img_data_url = None
+
+        visual_prompt = f"""Create a single photographic advertising image.
+
+Brand: ACE Advertising Engine (do not write the brand name in the image).
+Product: {product_name}
+Description: {product_description}
+
+Headline text to EMBED in the image: "{headline}"
+
+Visual rules:
+- Use a clear hybrid object composed from two real-world elements that symbolise the product and its benefit.
+- Photographic, realistic lighting and materials. No illustration, no icons, no logos.
+- Dark, elegant background suitable for a premium ad.
+- Do NOT include any marketing copy in the image, only the short English headline.
+- No additional UI elements, no borders, no watermarks."""  # noqa: E501
+
+        try:
+            img_resp = client.images.generate(
+                model=IMAGE_MODEL,
+                prompt=visual_prompt,
+                size=openai_size,
+                n=1,
+                response_format="b64_json",
+            )
+            b64 = img_resp.data[0].b64_json
+            img_data_url = f"data:image/png;base64,{b64}"
+        except Exception as e:
+            # On any error, fall back to local text-on-black image
+            img_data_url = make_fallback_image(headline, size_key)
 
         results.append(
             {
                 "headline": headline,
                 "copy": copy_text,
-                "image_url": image_url,
+                "image_url": img_data_url,
                 "size": size_key,
             }
         )
