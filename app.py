@@ -2,6 +2,7 @@
 import os
 import io
 import base64
+import json
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
@@ -15,19 +16,21 @@ if FRONTEND_URL == "*":
 else:
     CORS(app, resources={r"/*": {"origins": [FRONTEND_URL]}})
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY environment variable is required")
+
+client = OpenAI(api_key=OPENAI_API_KEY, timeout=60.0)
 
 TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
-IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
+IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-4.1-image")
 
-# UI sizes (what the frontend sends)
 UI_SIZES = {
     "1024x1024": (1024, 1024),
     "1024x1536": (1024, 1536),
     "1536x1024": (1536, 1024),
 }
 
-# Mapping from UI size -> OpenAI generic image size
 OPENAI_SIZE_MAP = {
     "1024x1024": "1024x1024",
     "1024x1536": "1024x1792",
@@ -41,15 +44,13 @@ def health():
 
 
 def make_fallback_image(headline: str, size_key: str) -> str:
-    """Fallback: create a simple black image with the headline in the center and return as data URL."""
     width, height = UI_SIZES.get(size_key, (1024, 1024))
     img = Image.new("RGB", (width, height), color=(0, 0, 0))
     draw = ImageDraw.Draw(img)
-
     font = ImageFont.load_default()
     text = headline or "ACE Ad"
-    max_width = int(width * 0.8)
 
+    max_width = int(width * 0.8)
     words = text.split()
     lines = []
     current = ""
@@ -65,7 +66,6 @@ def make_fallback_image(headline: str, size_key: str) -> str:
             current = w
     if current:
         lines.append(current)
-
     if not lines:
         lines = ["ACE Ad"]
 
@@ -93,8 +93,6 @@ def make_fallback_image(headline: str, size_key: str) -> str:
 
 @app.route("/generate_ads", methods=["POST"])
 def generate_ads():
-    import json as json_lib
-
     try:
         data = request.get_json(force=True) or {}
     except Exception:
@@ -112,15 +110,14 @@ def generate_ads():
 
     openai_size = OPENAI_SIZE_MAP.get(size_key, "1024x1024")
 
-    # ---- 1) TEXT GENERATION ----
     prompt = f"""You are the text engine for the ACE Advertising Engine.
 
 You receive a product name and an optional description.
 Your task: generate EXACTLY 3 advertising variations.
 
 For EACH variation you MUST output:
-- "headline": a short English headline, 3–7 words, focused on the audience mindset and benefit. Do NOT describe any hybrid object literally.
-- "copy": exactly 50 words of English marketing copy. It should focus on benefit, promise, or solution. No bullet lists.
+- "headline": a short English headline, 3–7 words, focused on the audience mindset and benefit.
+- "copy": exactly 50 words of English marketing copy (no bullet lists).
 
 Product name: "{product_name}"
 Product description: "{product_description}"
@@ -140,7 +137,7 @@ Respond ONLY as JSON in the following format (no extra text):
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a precise advertising copy generator that always follows instructions and JSON format strictly.",
+                    "content": "You are a precise advertising copy generator that always returns valid JSON.",
                 },
                 {
                     "role": "user",
@@ -154,7 +151,7 @@ Respond ONLY as JSON in the following format (no extra text):
         return jsonify({"success": False, "error": f"Text generation failed: {e}"}), 500
 
     try:
-        variations = json_lib.loads(raw_text)
+        variations = json.loads(raw_text)
         if not isinstance(variations, list) or len(variations) != 3:
             raise ValueError("Model did not return 3 variations.")
     except Exception:
@@ -164,7 +161,6 @@ Respond ONLY as JSON in the following format (no extra text):
             {"headline": product_name[:60] or "ACE Ad Variation 3", "copy": raw_text or ""},
         ]
 
-    # ---- 2) IMAGE GENERATION ----
     results = []
     for item in variations:
         headline = (item.get("headline") or "").strip()
@@ -174,7 +170,6 @@ Respond ONLY as JSON in the following format (no extra text):
 
         visual_prompt = f"""Create a single photographic advertising image.
 
-Brand: ACE Advertising Engine (do not write the brand name in the image).
 Product: {product_name}
 Description: {product_description}
 
@@ -182,7 +177,7 @@ Headline text to EMBED in the image: "{headline}"
 
 Visual rules:
 - Use a clear hybrid object composed from two real-world elements that symbolise the product and its benefit.
-- Photographic, realistic lighting and materials. No illustration, no icons, no logos.
+- Photographic, realistic lighting and materials. No illustration, no icons, no logos, no celebrities.
 - Dark, elegant background suitable for a premium ad.
 - Do NOT include any marketing copy in the image, only the short English headline.
 - No additional UI elements, no borders, no watermarks."""  # noqa: E501
@@ -197,8 +192,7 @@ Visual rules:
             )
             b64 = img_resp.data[0].b64_json
             img_data_url = f"data:image/png;base64,{b64}"
-        except Exception as e:
-            # On any error, fall back to local text-on-black image
+        except Exception:
             img_data_url = make_fallback_image(headline, size_key)
 
         results.append(
