@@ -83,9 +83,26 @@ def generate_ads():
     except Exception:
         return jsonify({"error": "Invalid JSON body"}), 400
 
-    product = (data.get("product") or "").strip()
-    description = (data.get("description") or "").strip()
-    ad_size_label = (data.get("ad_size") or "").strip()
+    # Support both the old frontend field names and the new ones
+    product = (
+        data.get("product")
+        or data.get("productName")
+        or ""
+    )
+    description = (
+        data.get("description")
+        or data.get("productDescription")
+        or ""
+    )
+    ad_size_label = (
+        data.get("ad_size")
+        or data.get("adSize")
+        or ""
+    )
+
+    product = product.strip()
+    description = description.strip()
+    ad_size_label = ad_size_label.strip()
 
     if not product:
         return jsonify({"error": "Missing 'product' in request body"}), 400
