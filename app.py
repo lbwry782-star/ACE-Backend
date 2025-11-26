@@ -4,16 +4,22 @@
     import base64
     import io
     import logging
+
     from flask import Flask, request, jsonify
     from flask_cors import CORS
-    from openai import OpenAI
     import zipfile
+
+    # Try to import OpenAI client, but don't crash the worker if it fails.
+    try:
+        from openai import OpenAI  # new SDK
+        openai_import_error = None
+    except Exception as e:  # pragma: no cover
+        OpenAI = None
+        openai_import_error = e
 
     TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
     IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
     FRONTEND_URL = os.getenv("FRONTEND_URL", "")
-
-    client = OpenAI()
 
     app = Flask(__name__)
 
@@ -67,6 +73,13 @@
 
     @app.route("/generate_ads", methods=["POST"])
     def generate_ads():
+        # If OpenAI client failed to import, return clear error instead of crashing worker
+        if OpenAI is None:
+            logger.error("OpenAI SDK import error: %s", openai_import_error)
+            return jsonify({"error": f"OpenAI SDK not available: {openai_import_error}"}), 500
+
+        client = OpenAI()
+
         try:
             data = request.get_json(force=True) or {}
         except Exception:
@@ -153,10 +166,14 @@ Return ONLY a valid JSON array with 3 objects and the keys: "headline", "copy", 
 
         image_data_list = []
         for i, item in enumerate(img_resp.data):
-            b64 = item.b64_json if hasattr(item, "b64_json") else item.get("b64_json")
+            b64 = getattr(item, "b64_json", None)
+            if not b64 and isinstance(item, dict):
+                b64 = item.get("b64_json")
+
             if not b64:
                 logger.error("Missing b64_json in image response item %s", i)
                 return jsonify({"error": "Invalid image response from OpenAI"}), 500
+
             image_data_list.append(b64)
 
         results = []
