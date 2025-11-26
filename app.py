@@ -1,166 +1,109 @@
 
 import os
-import io
-import json
-import zipfile
 import base64
-from datetime import datetime
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
 
 app = Flask(__name__)
 
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+FRONTEND_URL = os.environ.get("FRONTEND_URL")
+if FRONTEND_URL:
+    CORS(app, resources={r"/*": {"origins": [FRONTEND_URL]}})
+else:
+    CORS(app)
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
-OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-if not OPENAI_API_KEY:
-    raise RuntimeError("Missing OPENAI_API_KEY in environment.")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-SIZE_MAP = {
-    "1024 x 1024 – Square": "1024x1024",
-    "1024 x 1536 – Portrait": "1024x1536",
-    "1536 x 1024 – Landscape": "1536x1024",
-}
-
-
-def build_prompt(product_name: str, product_description: str) -> str:
-    desc = product_description.strip() or "No additional description provided."
-    return (
-        "You are the text engine for the ACE Advertising Engine. "
-        "You receive a product name and an optional description. "
-        "Generate three distinct ad concepts for the same product. "
-        "For each concept, return a JSON object with:\n"
-        " - headline: a short, punchy English headline (3–7 words)\n"
-        " - copy: exactly 50 English words of marketing text describing the ad.\n\n"
-        f"Product name: {product_name}\n"
-        f"Product description: {desc}\n\n"
-        "Return a JSON array with exactly 3 objects, no prose, no backticks."
-    )
-
-
-def parse_concepts(raw_text: str):
-    try:
-        data = json.loads(raw_text)
-        if isinstance(data, list) and len(data) == 3:
-            out = []
-            for item in data:
-                out.append(
-                    {
-                        "headline": str(item.get("headline", "")).strip() or "ACE Ad",
-                        "copy": str(item.get("copy", "")).strip(),
-                    }
-                )
-            return out
-    except Exception:
-        pass
-
-    return [
-        {"headline": "ACE Ad Variation 1", "copy": raw_text.strip()[:350]},
-        {"headline": "ACE Ad Variation 2", "copy": raw_text.strip()[:350]},
-        {"headline": "ACE Ad Variation 3", "copy": raw_text.strip()[:350]},
-    ]
-
-
-def make_zip_bytes(image_bytes: bytes, headline: str, copy: str) -> bytes:
-    mem = io.BytesIO()
-    with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("ad.jpg", image_bytes)
-        txt = f"{headline}\n\n{copy}\n"
-        zf.writestr("copy.txt", txt)
-    mem.seek(0)
-    return mem.read()
+ALLOWED_SIZES = {"1024x1024", "1024x1792", "1792x1024"}
 
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "time": datetime.utcnow().isoformat() + "Z"})
+    return jsonify({"status": "ok"}), 200
 
 
-@app.route("/generate_ads", methods=["POST", "OPTIONS"])
-def generate_ads():
-    if request.method == "OPTIONS":
-        return ("", 200)
+@app.route("/generate", methods=["POST"])
+def generate():
+    try:
+        data = request.get_json(force=True)
+    except Exception:
+        return jsonify({"error": "Invalid JSON body"}), 400
+
+    product = (data.get("product") or "").strip()
+    size = (data.get("size") or "1024x1024").strip()
+
+    if not product:
+        return jsonify({"error": "Missing 'product' in request body"}), 400
+
+    if size not in ALLOWED_SIZES:
+        size = "1024x1024"
+
+    image_model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1")
+    text_model = os.environ.get("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
+
+    # Build prompts
+    copy_prompt = (
+        "You are an advertising copywriter. "
+        "Write 3 distinct short marketing texts for a social media image ad. "
+        "Each text must be exactly 50 English words. "
+        "Do not number them. Separate the 3 texts using a single line with three hash symbols (###).\n\n"
+        f"Product: {product}\n"
+        "Audience: inferred from the product. Focus on benefits, clarity and a friendly, persuasive tone."
+    )
 
     try:
-        data = request.get_json(force=True, silent=False)
-    except Exception:
-        return jsonify({"success": False, "error": "Invalid JSON in request body."}), 400
-
-    product_name = (data.get("productName") or data.get("product") or "").strip()
-    product_description = (data.get("productDescription") or data.get("description") or "").strip()
-    ad_size_label = data.get("adSize") or data.get("ad_size") or "1024 x 1024 – Square"
-
-    if not product_name:
-        return jsonify({"success": False, "error": "Missing 'productName' in request body."}), 400
-
-    size = SIZE_MAP.get(ad_size_label, "1024x1024")
-
-    system_prompt = (
-        "You are an advertising expert. Always respond with valid JSON ONLY, no explanations."
-    )
-    user_prompt = build_prompt(product_name, product_description)
-
-    text_resp = client.responses.create(
-        model=OPENAI_TEXT_MODEL,
-        input=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        max_output_tokens=800,
-    )
-
-    raw_text = text_resp.output[0].content[0].text
-
-    concepts = parse_concepts(raw_text)
-
-    variations_payload = []
-    for idx, concept in enumerate(concepts, start=1):
-        headline = concept["headline"]
-        copy = concept["copy"]
-
-        img_prompt = (
-            f"Photographic advertising image as a hybrid object representing: {product_name}. "
-            f"Headline to overlay in the composition (but DO NOT rasterize the text): '{headline}'. "
-            "High detail, cinematic lighting, black background, strong focal hybrid object."
+        # Generate marketing copy
+        chat_resp = client.chat.completions.create(
+            model=text_model,
+            messages=[
+                {"role": "system", "content": "You write concise, high‑impact English marketing copy."},
+                {"role": "user", "content": copy_prompt},
+            ],
         )
+        raw_text = chat_resp.choices[0].message.content.strip()
+        parts = [p.strip() for p in raw_text.split("###") if p.strip()]
+        # Ensure exactly 3 pieces
+        if len(parts) < 3:
+            # If fewer than 3, pad by repeating
+            while len(parts) < 3:
+                parts.append(parts[-1])
+        copies = parts[:3]
+
+        # Generate images
+        img_prompt = (
+            "Photorealistic social media image ad for the following product: "
+            f"{product}. Modern, clean composition on a neutral or black background, "
+            "optimized for readability of overlaid headline text (the text will be added separately). "
+            "Do not include any text in the image."
+        )
+
         img_resp = client.images.generate(
-            model=OPENAI_IMAGE_MODEL,
+            model=image_model,
             prompt=img_prompt,
+            n=3,
             size=size,
-            n=1,
             response_format="b64_json",
         )
-        b64 = img_resp.data[0].b64_json
-        image_bytes = base64.b64decode(b64)
 
-        zip_bytes = make_zip_bytes(image_bytes, headline, copy)
-        zip_b64 = base64.b64encode(zip_bytes).decode("utf-8")
+        results = []
+        for i, item in enumerate(img_resp.data):
+            b64_img = item.b64_json
+            results.append(
+                {
+                    "index": i,
+                    "image_b64": b64_img,
+                    "copy": copies[i],
+                    "size": size,
+                }
+            )
 
-        variations_payload.append(
-            {
-                "headline": headline,
-                "copy": copy,
-                "image_b64": f"data:image/jpeg;base64,{b64}",
-                "zip_b64": zip_b64,
-                "zip_filename": f"ace_ad_{idx}.zip",
-            }
-        )
+        return jsonify({"success": True, "results": results}), 200
 
-    return jsonify(
-        {
-            "success": True,
-            "size": size,
-            "variations": variations_payload,
-        }
-    )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
