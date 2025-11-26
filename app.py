@@ -3,16 +3,15 @@ import os
 import io
 import json
 import zipfile
+import base64
 from datetime import datetime
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
-import base64
 
 app = Flask(__name__)
 
-# Allow all origins so GitHub Pages (and others) can call the API without CORS errors
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -94,9 +93,9 @@ def generate_ads():
     except Exception:
         return jsonify({"success": False, "error": "Invalid JSON in request body."}), 400
 
-    product_name = (data.get("productName") or "").strip()
-    product_description = (data.get("productDescription") or "").strip()
-    ad_size_label = data.get("adSize") or "1024 x 1024 – Square"
+    product_name = (data.get("productName") or data.get("product") or "").strip()
+    product_description = (data.get("productDescription") or data.get("description") or "").strip()
+    ad_size_label = data.get("adSize") or data.get("ad_size") or "1024 x 1024 – Square"
 
     if not product_name:
         return jsonify({"success": False, "error": "Missing 'productName' in request body."}), 400
@@ -117,7 +116,6 @@ def generate_ads():
         max_output_tokens=800,
     )
 
-    # newer client helper
     raw_text = text_resp.output[0].content[0].text
 
     concepts = parse_concepts(raw_text)
