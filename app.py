@@ -1,231 +1,168 @@
 
 import os
-import json
-import base64
 import io
-import logging
+import json
 import zipfile
+from datetime import datetime
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-
-try:
-    from openai import OpenAI  # new SDK
-    openai_import_error = None
-except Exception as e:  # pragma: no cover
-    OpenAI = None
-    openai_import_error = e
-
-TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
-IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "")
+from openai import OpenAI
+import base64
 
 app = Flask(__name__)
 
-if FRONTEND_URL:
-    CORS(app, resources={r"/*": {"origins": [FRONTEND_URL]}}, supports_credentials=True)
-else:
-    CORS(app)
+# Allow all origins so GitHub Pages (and others) can call the API without CORS errors
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("ace-backend")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
+OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
+
+if not OPENAI_API_KEY:
+    raise RuntimeError("Missing OPENAI_API_KEY in environment.")
+
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+SIZE_MAP = {
+    "1024 x 1024 – Square": "1024x1024",
+    "1024 x 1536 – Portrait": "1024x1536",
+    "1536 x 1024 – Landscape": "1536x1024",
+}
+
+
+def build_prompt(product_name: str, product_description: str) -> str:
+    desc = product_description.strip() or "No additional description provided."
+    return (
+        "You are the text engine for the ACE Advertising Engine. "
+        "You receive a product name and an optional description. "
+        "Generate three distinct ad concepts for the same product. "
+        "For each concept, return a JSON object with:\n"
+        " - headline: a short, punchy English headline (3–7 words)\n"
+        " - copy: exactly 50 English words of marketing text describing the ad.\n\n"
+        f"Product name: {product_name}\n"
+        f"Product description: {desc}\n\n"
+        "Return a JSON array with exactly 3 objects, no prose, no backticks."
+    )
+
+
+def parse_concepts(raw_text: str):
+    try:
+        data = json.loads(raw_text)
+        if isinstance(data, list) and len(data) == 3:
+            out = []
+            for item in data:
+                out.append(
+                    {
+                        "headline": str(item.get("headline", "")).strip() or "ACE Ad",
+                        "copy": str(item.get("copy", "")).strip(),
+                    }
+                )
+            return out
+    except Exception:
+        pass
+
+    return [
+        {"headline": "ACE Ad Variation 1", "copy": raw_text.strip()[:350]},
+        {"headline": "ACE Ad Variation 2", "copy": raw_text.strip()[:350]},
+        {"headline": "ACE Ad Variation 3", "copy": raw_text.strip()[:350]},
+    ]
+
+
+def make_zip_bytes(image_bytes: bytes, headline: str, copy: str) -> bytes:
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("ad.jpg", image_bytes)
+        txt = f"{headline}\n\n{copy}\n"
+        zf.writestr("copy.txt", txt)
+    mem.seek(0)
+    return mem.read()
 
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"}), 200
+    return jsonify({"status": "ok", "time": datetime.utcnow().isoformat() + "Z"})
 
 
-def _map_size_label(ad_size: str) -> str:
-    if not ad_size:
-        return "1024x1024"
-    label = ad_size.strip().lower()
-    mapping = {
-        "1024 x 1024 – square": "1024x1024",
-        "1024 x 1024 - square": "1024x1024",
-        "1024×1024 – square": "1024x1024",
-        "1024×1024 - square": "1024x1024",
-        "1024 x 1536 – portrait": "1024x1536",
-        "1024 x 1536 - portrait": "1024x1536",
-        "1536 x 1024 – landscape": "1536x1024",
-        "1536 x 1024 - landscape": "1536x1024",
-    }
-    return mapping.get(label, "1024x1024")
-
-
-def _parse_variations(raw_text: str):
-    try:
-        return json.loads(raw_text)
-    except Exception:
-        pass
-
-    start = raw_text.find("[")
-    end = raw_text.rfind("]")
-    if start != -1 and end != -1 and end > start:
-        try:
-            return json.loads(raw_text[start : end + 1])
-        except Exception:
-            pass
-
-    return None
-
-
-@app.route("/generate_ads", methods=["POST"])
+@app.route("/generate_ads", methods=["POST", "OPTIONS"])
 def generate_ads():
-    if OpenAI is None:
-        logger.error("OpenAI SDK import error: %s", openai_import_error)
-        return jsonify({"error": f"OpenAI SDK not available: {openai_import_error}"}), 500
-
-    client = OpenAI()
+    if request.method == "OPTIONS":
+        return ("", 200)
 
     try:
-        data = request.get_json(force=True) or {}
+        data = request.get_json(force=True, silent=False)
     except Exception:
-        return jsonify({"error": "Invalid JSON body"}), 400
+        return jsonify({"success": False, "error": "Invalid JSON in request body."}), 400
 
-    # Support both the old frontend field names and the new ones
-    product = (
-        data.get("product")
-        or data.get("productName")
-        or ""
+    product_name = (data.get("productName") or "").strip()
+    product_description = (data.get("productDescription") or "").strip()
+    ad_size_label = data.get("adSize") or "1024 x 1024 – Square"
+
+    if not product_name:
+        return jsonify({"success": False, "error": "Missing 'productName' in request body."}), 400
+
+    size = SIZE_MAP.get(ad_size_label, "1024x1024")
+
+    system_prompt = (
+        "You are an advertising expert. Always respond with valid JSON ONLY, no explanations."
     )
-    description = (
-        data.get("description")
-        or data.get("productDescription")
-        or ""
+    user_prompt = build_prompt(product_name, product_description)
+
+    text_resp = client.responses.create(
+        model=OPENAI_TEXT_MODEL,
+        input=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        max_output_tokens=800,
     )
-    ad_size_label = (
-        data.get("ad_size")
-        or data.get("adSize")
-        or ""
-    )
 
-    product = product.strip()
-    description = description.strip()
-    ad_size_label = ad_size_label.strip()
+    # newer client helper
+    raw_text = text_resp.output[0].content[0].text
 
-    if not product:
-        return jsonify({"error": "Missing 'product' in request body"}), 400
+    concepts = parse_concepts(raw_text)
 
-    if len(product.split()) > 15:
-        return jsonify({"error": "Product name must be 15 words or fewer"}), 400
+    variations_payload = []
+    for idx, concept in enumerate(concepts, start=1):
+        headline = concept["headline"]
+        copy = concept["copy"]
 
-    size = _map_size_label(ad_size_label)
-
-    text_prompt = f"""
-You are the text engine for the ACE Advertising Engine.
-
-You receive a product name and an optional description and must create EXACTLY 3 ad variations.
-
-Product: {product}
-Description: {description or "N/A"}
-Ad size: {ad_size_label or "1024 x 1024 – Square"}
-
-For each variation, generate:
-- "headline": 3–7 words, catchy, English only.
-- "copy": exactly 50 words, persuasive, English only, a single paragraph.
-- "image_prompt": 1–2 short sentences (max 60 words) describing a photographic hybrid-object visual that could be used for this ad. No text in the image, no logos, no celebrities, no brands.
-
-Return ONLY a valid JSON array with 3 objects and the keys: "headline", "copy", "image_prompt".
-""".strip()
-
-    try:
-        chat_resp = client.chat.completions.create(
-            model=TEXT_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a helpful advertising copywriter and art director. You always follow the instructions exactly and always return valid JSON when asked.",
-                },
-                {"role": "user", "content": text_prompt},
-            ],
-            temperature=0.9,
-            max_tokens=900,
+        img_prompt = (
+            f"Photographic advertising image as a hybrid object representing: {product_name}. "
+            f"Headline to overlay in the composition (but DO NOT rasterize the text): '{headline}'. "
+            "High detail, cinematic lighting, black background, strong focal hybrid object."
         )
-    except Exception as e:
-        logger.exception("Error calling OpenAI chat model")
-        return jsonify({"error": f"Text generation failed: {str(e)}"}), 500
-
-    raw_output = chat_resp.choices[0].message.content
-    variations = _parse_variations(raw_output)
-
-    if not isinstance(variations, list) or len(variations) == 0:
-        logger.error("Failed to parse JSON variations from model output")
-        return jsonify({"error": "Failed to parse variations from text model output"}), 500
-
-    if len(variations) < 3:
-        while len(variations) < 3:
-            variations.append(variations[-1])
-
-    variations = variations[:3]
-
-    image_prompt_base = variations[0].get("image_prompt") or f"Photographic advertisement for {product}. High quality studio lighting, realistic details."
-
-    full_image_prompt = (
-        f"{image_prompt_base} "
-        f"Advertising photograph, no text, no logos, no watermarks, high quality, professional lighting."
-    )
-
-    try:
         img_resp = client.images.generate(
-            model=IMAGE_MODEL,
-            prompt=full_image_prompt,
-            n=3,
+            model=OPENAI_IMAGE_MODEL,
+            prompt=img_prompt,
             size=size,
+            n=1,
             response_format="b64_json",
-            quality="high",
         )
-    except Exception as e:
-        logger.exception("Error calling OpenAI image model")
-        return jsonify({"error": f"Image generation failed: {str(e)}"}), 500
+        b64 = img_resp.data[0].b64_json
+        image_bytes = base64.b64decode(b64)
 
-    image_data_list = []
-    for i, item in enumerate(img_resp.data):
-        b64 = getattr(item, "b64_json", None)
-        if not b64 and isinstance(item, dict):
-            b64 = item.get("b64_json")
-        if not b64:
-            logger.error("Missing b64_json in image response item %s", i)
-            return jsonify({"error": "Invalid image response from OpenAI"}), 500
-        image_data_list.append(b64)
+        zip_bytes = make_zip_bytes(image_bytes, headline, copy)
+        zip_b64 = base64.b64encode(zip_bytes).decode("utf-8")
 
-    results = []
-    for idx, (variation, img_b64) in enumerate(zip(variations, image_data_list), start=1):
-        headline = variation.get("headline") or f"Ad Variation {idx}"
-        copy = variation.get("copy") or ""
-
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            img_bytes = base64.b64decode(img_b64)
-            zf.writestr(f"ace_ad_{idx}.png", img_bytes)
-            text_content = f"{headline}\n\n{copy}"
-            zf.writestr(f"ace_ad_{idx}.txt", text_content)
-
-        zip_buffer.seek(0)
-        zip_b64 = base64.b64encode(zip_buffer.read()).decode("ascii")
-
-        results.append(
+        variations_payload.append(
             {
                 "headline": headline,
                 "copy": copy,
-                "image_b64": f"data:image/png;base64,{img_b64}",
+                "image_b64": f"data:image/jpeg;base64,{b64}",
                 "zip_b64": zip_b64,
                 "zip_filename": f"ace_ad_{idx}.zip",
-                "size": size,
             }
         )
 
     return jsonify(
         {
             "success": True,
-            "product": product,
-            "ad_size_label": ad_size_label,
             "size": size,
-            "variations": results,
+            "variations": variations_payload,
         }
-    ), 200
+    )
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
