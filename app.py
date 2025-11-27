@@ -9,10 +9,8 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import requests
 
-# Basic Flask app
 app = Flask(__name__)
 
-# Output directories for images and ZIPs
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
 ZIP_DIR = os.path.join(BASE_DIR, "zips")
@@ -27,7 +25,6 @@ if FRONTEND_URL == "*" or not FRONTEND_URL:
 else:
     CORS(app, resources={r"/*": {"origins": [FRONTEND_URL]}})
 
-
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 OPENAI_IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1")
 OPENAI_TEXT_MODEL = os.environ.get("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
@@ -41,7 +38,6 @@ def health():
 
 
 def build_engine_system_prompt():
-    """System prompt encoding ACE + 'Mishrad Pirsum' engine rules."""
     return (
         "You are the ACE hybrid advertising engine. "
         "You receive an English product name and optional description, and you must create advertising ideas that follow these rules:\n"
@@ -81,11 +77,11 @@ def build_chat_payload(product, description, size):
         "following all engine rules. Do NOT embed the 50-word copy or any headline into the image.\n\n"
         "Return a single JSON object with this structure:\n"
         "{\n"
-        "  "variations": [\n"
+        "  \"variations\": [\n"
         "    {\n"
-        "      "headline": "...",\n"
-        "      "marketing_copy": "...",\n"
-        "      "image_prompt": "..."\n"
+        "      \"headline\": \"...\",\n"
+        "      \"marketing_copy\": \"...\",\n"
+        "      \"image_prompt\": \"...\"\n"
         "    },\n"
         "    { ... },\n"
         "    { ... }\n"
@@ -140,7 +136,6 @@ def call_openai_image(prompt, size):
         "prompt": prompt,
         "size": size,
         "n": 1,
-        "response_format": "b64_json",
     }
     resp = requests.post(
         "https://api.openai.com/v1/images/generations",
