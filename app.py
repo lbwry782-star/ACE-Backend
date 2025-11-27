@@ -5,6 +5,7 @@ from openai import OpenAI
 
 app = Flask(__name__)
 
+# CORS: allow only the configured frontend URL if present
 frontend_url = os.environ.get("FRONTEND_URL")
 if frontend_url:
     CORS(app, resources={r"/*": {"origins": [frontend_url]}})
@@ -53,8 +54,10 @@ def build_copy_prompt(product: str, description: str) -> str:
 
 
 def parse_ads(raw_text: str):
+    """Parse the raw text into a list of 3 ads: [{headline, copy}, ...]."""
     ads = []
     chunks = [c.strip() for c in raw_text.split("---") if c.strip()]
+
     for chunk in chunks:
         headline = None
         copy_lines = []
@@ -64,17 +67,21 @@ def parse_ads(raw_text: str):
             if upper.startswith("HEADLINE:"):
                 headline = line_s.split(":", 1)[1].strip()
             elif upper.startswith("COPY:"):
+                # first line of copy, excluding the prefix
                 first_copy = line_s.split(":", 1)[1].strip()
                 if first_copy:
                     copy_lines.append(first_copy)
             elif copy_lines:
                 copy_lines.append(line_s)
+
         if headline and copy_lines:
             copy_text = " ".join(copy_lines).strip()
             ads.append({"headline": headline, "copy": copy_text})
+
         if len(ads) == 3:
             break
 
+    # Fallback – if parsing failed, treat whole text as one big copy
     if not ads:
         ads.append(
             {
@@ -82,35 +89,65 @@ def parse_ads(raw_text: str):
                 "copy": raw_text.strip(),
             }
         )
+
+    # Always return 3 ads (repeat last if needed)
     while len(ads) < 3:
         ads.append(ads[-1])
+
     return ads
 
 
 def generate_copies(product: str, description: str):
+    """Call OpenAI Responses API and extract plain text safely."""
     prompt = build_copy_prompt(product, description)
     response = client.responses.create(
         model=TEXT_MODEL,
         input=prompt,
+        max_output_tokens=700,
     )
+
+    text = None
+
+    # Prefer the convenience attribute if available
     try:
-        first_output = response.output[0]
-        first_content = first_output.content[0]
-        text = first_content.text.value
+        output_text = getattr(response, "output_text", None)
+        if isinstance(output_text, str) and output_text.strip():
+            text = output_text
     except Exception:
+        text = None
+
+    # Fallback to the first output/content item
+    if not text:
+        try:
+            first_output = response.output[0]
+            first_content = first_output.content[0]
+            text_block = getattr(first_content, "text", None)
+            if hasattr(text_block, "value"):
+                text = text_block.value
+            elif isinstance(text_block, str):
+                text = text_block
+        except Exception:
+            text = None
+
+    # Last resort: string representation
+    if not text:
         text = str(response)
+
     return parse_ads(text)
 
 
 def build_image_prompt(product: str, description: str, headline: str) -> str:
+    """Prompt gpt-image-1 to create a hybrid-object ad with a very bold headline on the image."""
     return (
         "Create a hyper-realistic photographic advertising image for the following product. "
         "Use a single central hybrid object built from two real-world objects that are conceptually related "
         "to the product's main benefit. Use shape overlap, like a gentle solar eclipse, to merge them. "
-        "Place the hybrid object on a minimal dark background with soft light, no clutter.\n\n"
+        "Place the hybrid object on a minimal dark background with soft light and no clutter.\n\n"
         f"Product: {product}\n"
         f"Short description: {description or 'Use common-sense assumptions about the product.'}\n"
-        "Do NOT add any long marketing text in the image. Only embed this short English headline, once, cleanly:\n"
+        "The image must contain a single English headline, placed in a strong composition near the hybrid object, "
+        "without hiding it. The headline text must be very bold, high-contrast, and clearly readable at first glance. "
+        "Do NOT add any long marketing text in the image. Only embed this short English headline once:\n"
         f"\"{headline}\"\n"
         "No logos unless they are part of the headline text. No extra frames or borders."
     )
@@ -130,7 +167,12 @@ def generate_images_for_ads(product: str, description: str, ads, size: str):
             n=1,
             quality="high",
         )
-        image_b64 = img.data[0].b64_json
+
+        image_b64 = None
+        if img and getattr(img, "data", None):
+            first = img.data[0]
+            image_b64 = getattr(first, "b64_json", None)
+
         results.append(
             {
                 "headline": headline,
@@ -138,6 +180,7 @@ def generate_images_for_ads(product: str, description: str, ads, size: str):
                 "image_b64": image_b64,
             }
         )
+
     return results
 
 
@@ -147,7 +190,7 @@ def generate():
         data = request.get_json(force=True, silent=True) or {}
         product = (data.get("product") or "").strip()
         description = (data.get("description") or "").strip()
-        size = (data.get("size") or "").strip()
+        size = (data.get("size") or "1024x1024").strip()
 
         if not product:
             return jsonify({"success": False, "error": "Missing 'product' in request body."}), 400
