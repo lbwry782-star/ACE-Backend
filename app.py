@@ -5,7 +5,6 @@ from openai import OpenAI
 
 app = Flask(__name__)
 
-# CORS - allow only the configured frontend URL if present
 frontend_url = os.environ.get("FRONTEND_URL")
 if frontend_url:
     CORS(app, resources={r"/*": {"origins": [frontend_url]}})
@@ -24,8 +23,6 @@ ALLOWED_SIZES = {"1024x1024", "1024x1536", "1536x1024"}
 def health():
     return jsonify({"status": "ok"}), 200
 
-
-# ---------- COPY GENERATION ----------
 
 def build_copy_prompt(product: str, description: str) -> str:
     return (
@@ -52,7 +49,6 @@ def build_copy_prompt(product: str, description: str) -> str:
 
 
 def parse_ads(raw_text: str):
-    """Parse the raw text into a list of 3 ads: [{headline, copy}, ...]."""
     ads = []
     chunks = [c.strip() for c in raw_text.split("---") if c.strip()]
 
@@ -93,7 +89,6 @@ def parse_ads(raw_text: str):
 
 
 def generate_copies(product: str, description: str):
-    """Call OpenAI Responses API and extract plain text safely."""
     prompt = build_copy_prompt(product, description)
     response = client.responses.create(
         model=TEXT_MODEL,
@@ -128,41 +123,56 @@ def generate_copies(product: str, description: str):
     return parse_ads(text)
 
 
-# ---------- IMAGE GENERATION - SHAPE-FIRST STRICT ENGINE ----------
-
 def build_image_prompt(product: str, description: str, headline: str) -> str:
     return (
         "Create a hyper-realistic photographic advertising image.\n\n"
-        "SHAPE-FIRST HYBRID RULES (STRICT):\n"
-        "- Select TWO real-world objects ONLY by SHAPE, not by meaning or story.\n"
-        "- The two objects must have very high macro-geometry similarity:\n"
-        "  circle with circle, sphere with sphere, cylinder with cylinder,\n"
-        "  rectangle with rectangle, triangle with triangle, grid with grid,\n"
-        "  X-shape with X-shape.\n"
-        "- They must be interchangeable: if you swap them, the overall silhouette\n"
-        "  remains almost identical. Differences should be visible only through\n"
-        "  texture or material, not through outline.\n"
-        "- Match proportions, contour lines, bounding-box ratio, dominant axis,\n"
-        "  curvature, mass distribution and internal structure.\n"
-        "- If shapes do not match at about 95 percent shape similarity, reject\n"
-        "  the pair and re-select two new objects.\n\n"
-        "HYBRID CONSTRUCTION:\n"
-        "- Build exactly one central hybrid-object from these two shape-matched objects.\n"
-        "- Use gentle partial overlap, like a soft solar eclipse.\n"
-        "- Preserve the clean shared outline of the combined shape.\n\n"
-        "COMPOSITION:\n"
-        "- Minimal dark photographic background.\n"
-        "- Soft directional light.\n"
-        "- No extra props, no clutter, no additional objects.\n\n"
-        "HEADLINE PLACEMENT:\n"
-        f'- Embed this headline once: \"{headline}\"\n'
-        "- Place the headline NEXT TO the hybrid-object, never on top of it.\n"
-        "- The headline must never overlap, cover, touch, or cross the object.\n"
-        "- Use bold, high-contrast text so it is easy to read at first glance.\n\n"
+        "CONCEPT STAGE (ALREADY DONE BY TEXT ENGINE):\n"
+        "- Assume that 50 conceptual associations related to the product and its goal have already been selected.\n"
+        "- From these, you now work ONLY with visual 2D shape categories.\n\n"
+        "2D SHAPE CATEGORIES:\n"
+        "- Circle / ellipse\n"
+        "- Square / rectangle\n"
+        "- Triangle / trapezoid\n"
+        "- Elongated organic figure (person, animal, bottle, vehicle etc.)\n"
+        "- Ring / frame / hollow shape\n"
+        "- Complex shape (cluster) if needed.\n\n"
+        "SHAPE-FIRST PAIR SELECTION (OBJECT A and OBJECT B):\n"
+        "- Select TWO real-world objects, A and B, from the conceptual pool ONLY by 2D silhouette similarity, not by meaning.\n"
+        "- A and B must belong to the SAME 2D shape category.\n"
+        "- Match:\n"
+        "  • height/width ratio\n"
+        "  • overall contour\n"
+        "  • dominant axis (vertical / horizontal / diagonal)\n"
+        "  • internal structure (center, ring, fill etc.).\n"
+        "- They should be interchangeable in the same frame window: swapping A with B keeps almost the same silhouette, and differences are mostly in texture and material.\n\n"
+        "FULL OBJECTS AND NATURAL BACKGROUND:\n"
+        "- Never crop A or B at the frame edges.\n"
+        "- Each object must appear as a complete object, fully inside the image boundaries.\n"
+        "- Object A has its natural environment (classroom, kitchen, road, office, etc.).\n"
+        "- Build the hybrid scene as follows:\n"
+        "  1) Use the natural background of object A (its environment).\n"
+        "  2) Remove A as a visible object.\n"
+        "  3) Place object B as a complete, intact object inside A's background.\n"
+        "- Viewers can still understand that this is 'A's world' by the context of the background.\n"
+        "- No half-objects: an object is either fully present or not present at all.\n\n"
+        "FULL SWAP RULE (NO HALF-AND-HALF BODIES):\n"
+        "- Do NOT create a half-A half-B fused body.\n"
+        "- Do NOT slice objects in the middle.\n"
+        "- Instead, use a full swap logic: background of A + full B placed into that background.\n"
+        "- You may softly adjust lighting and shadows around B so it fits the scene, but do not distort its silhouette.\n\n"
+        "COMPOSITION AND MARGINS:\n"
+        "- Place B as the main central object (or slightly off-center) inside the frame.\n"
+        "- Keep at least 10% margin from every image edge to the main object, so nothing important is cut.\n"
+        "- Minimal, clean photographic composition: no extra props or clutter beyond what is needed in A's natural environment.\n\n"
+        "HEADLINE PLACEMENT (TEXT ON IMAGE):\n"
+        f"- Embed this headline once: \"{headline}\"\n"
+        "- Place the headline NEXT TO the hybrid object, outside its silhouette.\n"
+        "- The headline must never overlap, cover, touch or cross the object.\n"
+        "- Use bold, high-contrast typography so it is easy to read at first glance.\n\n"
         "PRODUCT CONTEXT:\n"
-        f"Product: {product}\n"
-        f"Description: {description or 'Use common-sense assumptions.'}\n\n"
-        "Generate one final image."
+        f"- Product: {product}\n"
+        f"- Description: {description or 'Use common-sense assumptions.'}\n\n"
+        "Generate one final image only."
     )
 
 
@@ -171,7 +181,7 @@ def generate_images_for_ads(product: str, description: str, ads, size: str):
     target_size = size if size in ALLOWED_SIZES else "1024x1024"
 
     for ad in ads:
-        headline = (ad.get("headline") or "ACE Hybrid Ad").strip()
+        headline = (ad.get("headline") or "ACE Ad").strip()
         image_prompt = build_image_prompt(product, description, headline)
         img = client.images.generate(
             model=IMAGE_MODEL,
