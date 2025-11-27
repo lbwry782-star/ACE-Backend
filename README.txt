@@ -8,28 +8,3 @@ Required environment variables:
     OPENAI_IMAGE_MODEL  = gpt-image-1
     OPENAI_TEXT_MODEL   = gpt-4.1-mini
     FRONTEND_URL        = https://lbwry782-star.github.io
-
-Endpoints:
-    GET /health
-        -> {"status": "ok"}
-
-    POST /generate
-        JSON body:
-            {
-              "product": "Product name in English",
-              "description": "Optional description in English",
-              "size": "1024x1024" | "1024x1536" | "1536x1024"
-            }
-
-        Response:
-            {
-              "success": true,
-              "ads": [
-                {
-                  "headline": "...",
-                  "copy": "...",
-                  "image_b64": "BASE64 PNG"
-                },
-                ...
-              ]
-            }

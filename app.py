@@ -93,13 +93,11 @@ def generate_copies(product: str, description: str):
         model=TEXT_MODEL,
         input=prompt,
     )
-    # Extract first text output
     try:
         first_output = response.output[0]
         first_content = first_output.content[0]
         text = first_content.text.value
     except Exception:
-        # Fallback – try generic conversion
         text = str(response)
     return parse_ads(text)
 
