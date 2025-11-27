@@ -1,5 +1,4 @@
 import os
-import json
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
@@ -26,11 +25,11 @@ def health():
 
 
 def build_copy_prompt(product: str, description: str) -> str:
-    base = (
-        "You are the ACE Advertising Engine copywriter. "
+    return (
+        "You are the ACE Advertising Engine copywriter.\n"
         "You write short English headlines and exactly 50-word English marketing copy for ads.\n\n"
-        "Product: " + product.strip() + "\n"
-        "Description: " + description.strip() + "\n\n"
+        f"Product: {product.strip()}\n"
+        f"Description: {description.strip()}\n\n"
         "Create 3 different ad variations that could match 3 different hybrid-object images for this product.\n"
         "Rules:\n"
         "- Headlines must be 3–7 English words.\n"
@@ -51,7 +50,6 @@ def build_copy_prompt(product: str, description: str) -> str:
         "COPY: <50-word marketing copy for ad 3>\n"
         "Do not add anything else."
     )
-    return base
 
 
 def parse_ads(raw_text: str):
@@ -61,26 +59,31 @@ def parse_ads(raw_text: str):
         headline = None
         copy_lines = []
         for line in chunk.splitlines():
-            line_stripped = line.strip()
-            upper = line_stripped.upper()
+            line_s = line.strip()
+            upper = line_s.upper()
             if upper.startswith("HEADLINE:"):
-                headline = line_stripped.split(":", 1)[1].strip()
+                headline = line_s.split(":", 1)[1].strip()
             elif upper.startswith("COPY:"):
-                first_copy = line_stripped.split(":", 1)[1].strip()
+                first_copy = line_s.split(":", 1)[1].strip()
                 if first_copy:
                     copy_lines.append(first_copy)
             elif copy_lines:
-                copy_lines.append(line_stripped)
+                copy_lines.append(line_s)
         if headline and copy_lines:
             copy_text = " ".join(copy_lines).strip()
             ads.append({"headline": headline, "copy": copy_text})
         if len(ads) == 3:
             break
+
     if not ads:
-        ads.append({
-            "headline": "Hybrid Ad Preview",
-            "copy": raw_text.strip()
-        })
+        ads.append(
+            {
+                "headline": "ACE Hybrid Ad",
+                "copy": raw_text.strip(),
+            }
+        )
+    while len(ads) < 3:
+        ads.append(ads[-1])
     return ads
 
 
@@ -90,21 +93,27 @@ def generate_copies(product: str, description: str):
         model=TEXT_MODEL,
         input=prompt,
     )
-    text = response.output_text
+    # Extract first text output
+    try:
+        first_output = response.output[0]
+        first_content = first_output.content[0]
+        text = first_content.text.value
+    except Exception:
+        # Fallback – try generic conversion
+        text = str(response)
     return parse_ads(text)
 
 
 def build_image_prompt(product: str, description: str, headline: str) -> str:
-    desc = description.strip()
     return (
         "Create a hyper-realistic photographic advertising image for the following product. "
         "Use a single central hybrid object built from two real-world objects that are conceptually related "
         "to the product's main benefit. Use shape overlap, like a gentle solar eclipse, to merge them. "
         "Place the hybrid object on a minimal dark background with soft light, no clutter.\n\n"
         f"Product: {product}\n"
-        f"Short description: {desc if desc else 'Use common-sense assumptions about the product.'}\n"
-        "Do NOT add any long marketing text in the image. Only embed this short English headline, once, cleanly: "
-        f"\n"" + headline + ""\n"
+        f"Short description: {description or 'Use common-sense assumptions about the product.'}\n"
+        "Do NOT add any long marketing text in the image. Only embed this short English headline, once, cleanly:\n"
+        f"\"{headline}\"\n"
         "No logos unless they are part of the headline text. No extra frames or borders."
     )
 
@@ -114,7 +123,7 @@ def generate_images_for_ads(product: str, description: str, ads, size: str):
     target_size = size if size in ALLOWED_SIZES else "1024x1024"
 
     for ad in ads:
-        headline = ad.get("headline", "").strip() or "ACE Hybrid Ad"
+        headline = (ad.get("headline") or "ACE Hybrid Ad").strip()
         image_prompt = build_image_prompt(product, description, headline)
         img = client.images.generate(
             model=IMAGE_MODEL,
@@ -122,15 +131,15 @@ def generate_images_for_ads(product: str, description: str, ads, size: str):
             size=target_size,
             n=1,
             quality="high",
-            output_format="png",
         )
-        # gpt-image-1 returns base64 in data[0].b64_json
         image_b64 = img.data[0].b64_json
-        results.append({
-            "headline": headline,
-            "copy": ad.get("copy", ""),
-            "image_b64": image_b64,
-        })
+        results.append(
+            {
+                "headline": headline,
+                "copy": ad.get("copy", ""),
+                "image_b64": image_b64,
+            }
+        )
     return results
 
 
