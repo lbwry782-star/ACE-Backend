@@ -148,10 +148,22 @@ def call_openai_image(prompt, size):
     data = resp.json()
     if not data.get("data"):
         raise RuntimeError("No image data returned from OpenAI.")
-    b64 = data["data"][0].get("b64_json")
-    if not b64:
-        raise RuntimeError("Image field 'b64_json' missing in OpenAI response.")
-    return base64.b64decode(b64)
+
+    item = data["data"][0]
+
+    # Prefer base64 if present, otherwise download from URL
+    b64 = item.get("b64_json")
+    if b64:
+        return base64.b64decode(b64)
+
+    url = item.get("url")
+    if not url:
+        raise RuntimeError("Image response missing both 'b64_json' and 'url' fields.")
+
+    img_resp = requests.get(url, timeout=180)
+    if img_resp.status_code != 200:
+        raise RuntimeError(f"Failed to download image from URL: {img_resp.status_code}")
+    return img_resp.content
 
 
 def save_variation_files(image_bytes, headline, marketing_copy, index):
