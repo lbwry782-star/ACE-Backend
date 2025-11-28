@@ -13,8 +13,9 @@ import openai
 # Configure OpenAI (legacy 0.28 style)
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
-OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
+# IMPORTANT: use models that are supported by openai==0.28
+OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")
+OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "dall-e-3")
 
 app = Flask(__name__)
 
@@ -76,7 +77,6 @@ Respond ONLY with the JSON object, no extra text.
 """.strip()
 
     try:
-        # Legacy ChatCompletion style (openai==0.28)
         resp = openai.ChatCompletion.create(
             model=OPENAI_TEXT_MODEL,
             messages=[
@@ -92,13 +92,15 @@ Respond ONLY with the JSON object, no extra text.
         associations = data.get("associations", [])
         # Ensure exactly 100 strings
         associations = [str(a) for a in associations][:100]
-        if len(associations) < 100:
-            # Pad with duplicates of last one if needed (very rare)
-            while len(associations) < 100 and associations:
+        if len(associations) < 100 and associations:
+            while len(associations) < 100:
                 associations.append(associations[-1])
+        if not associations:
+            # very defensive: fallback
+            raise ValueError("No associations returned")
         return audience, goal, associations
     except Exception as e:
-        # Fallback: simple generic data
+        print("Text planner error:", repr(e))
         audience = "general audience"
         goal = "increase interest in the product"
         fallback_objects = [
@@ -127,10 +129,8 @@ def choose_hybrid_pairs(associations, count=3):
     pairs = []
     pool = associations[:]
     random.shuffle(pool)
-    # make sure we have at least 2 per pair
     for i in range(count):
         if len(pool) < 2:
-            # restart from original associations if we run out
             pool = associations[:]
             random.shuffle(pool)
         a = pool.pop()
@@ -144,7 +144,7 @@ def choose_hybrid_pairs(associations, count=3):
 def generate_hybrid_image(product, audience, goal, object_a, object_b, size):
     """
     Calls the image model to generate one hybrid object image and returns base64 JPEG.
-    Note: This uses the legacy openai.Image.create.
+    Uses DALL·E 3 (dall-e-3) which supports sizes like 1024x1024, 1024x1536, 1536x1024.
     """
     prompt = f"""
 Ultra-realistic photographic advertisement for: {product}.
@@ -177,7 +177,7 @@ Output style: hyper-realistic color photograph.
         b64 = img_resp["data"][0]["b64_json"]
         return b64
     except Exception as e:
-        # Fallback: empty string; frontend will still get structure.
+        print("Image generation error:", repr(e))
         return ""
 
 
@@ -192,15 +192,13 @@ def build_zip_from_image_and_copy(image_b64: str, headline: str, copy: str, inde
     """
     mem_file = io.BytesIO()
     with zipfile.ZipFile(mem_file, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
-        # image
         if image_b64:
             try:
                 img_bytes = base64.b64decode(image_b64)
                 z.writestr(f"ad{index}.jpg", img_bytes)
-            except Exception:
-                pass
-        # copy.txt
-        text_content = f"{headline}\\n\\n{copy}"
+            except Exception as e:
+                print("ZIP image decode error:", repr(e))
+        text_content = f"{headline}\n\n{copy}"
         z.writestr("copy.txt", text_content.encode("utf-8"))
 
     mem_file.seek(0)
@@ -228,7 +226,6 @@ def generate():
     ads = []
 
     for idx, (obj_a, obj_b) in enumerate(pairs, start=1):
-        # Simple headline based on objects + goal
         headline = f"{product}: {obj_a.title()} Meets {obj_b.title()}"
         copy = (
             f"{product} reimagined as a bold hybrid between {obj_a} and {obj_b}. "
@@ -236,10 +233,8 @@ def generate():
             "Striking, memorable and built to stand out in any ACE campaign."
         )
 
-        # 3. Generate image
         image_b64 = generate_hybrid_image(product, audience, goal, obj_a, obj_b, size)
 
-        # 4. Build ZIP (image + copy)
         zip_b64 = build_zip_from_image_and_copy(image_b64, headline, copy, idx)
         zip_filename = f"ace_ad_{idx}.zip"
 
