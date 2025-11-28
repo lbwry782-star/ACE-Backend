@@ -13,9 +13,11 @@ import openai
 # Configure OpenAI (legacy 0.28 style)
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# IMPORTANT: use models that are supported by openai==0.28
-OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")
-OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "dall-e-3")
+# Use models that are definitely supported by openai==0.28
+# Text: gpt-3.5-turbo
+# Image: dall-e-2  (sizes: 256x256, 512x512, 1024x1024)
+OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-3.5-turbo")
+OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "dall-e-2")
 
 app = Flask(__name__)
 
@@ -141,10 +143,18 @@ def choose_hybrid_pairs(associations, count=3):
 
 # ---- Helper: call image model to create one hybrid image ----
 
-def generate_hybrid_image(product, audience, goal, object_a, object_b, size):
+def map_size_to_dalle2(size_str: str) -> str:
+    """
+    DALL·E 2 only supports 256x256, 512x512, 1024x1024.
+    We always map to 1024x1024 (the highest quality) regardless of input.
+    """
+    return "1024x1024"
+
+
+def generate_hybrid_image(product, audience, goal, object_a, object_b, requested_size):
     """
     Calls the image model to generate one hybrid object image and returns base64 JPEG.
-    Uses DALL·E 3 (dall-e-3) which supports sizes like 1024x1024, 1024x1536, 1536x1024.
+    Uses DALL·E 2 (dall-e-2). Frontend sizes are mapped to 1024x1024.
     """
     prompt = f"""
 Ultra-realistic photographic advertisement for: {product}.
@@ -166,11 +176,13 @@ Composition rules:
 Output style: hyper-realistic color photograph.
 """.strip()
 
+    dalle_size = map_size_to_dalle2(requested_size)
+
     try:
         img_resp = openai.Image.create(
             model=OPENAI_IMAGE_MODEL,
             prompt=prompt,
-            size=size,
+            size=dalle_size,
             n=1,
             response_format="b64_json",
         )
