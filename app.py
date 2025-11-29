@@ -30,7 +30,8 @@ def build_prompt(product, description):
         "For the given product, create 3 distinct ad concepts. Each ad must include:\n"
         "- An English headline (3-7 words).\n"
         "- A 50-word English marketing copy.\n"
-        "- An image_prompt describing a photographic hybrid composition using two physical objects (A and B).\n\n"
+        "- An image_prompt describing a photographic hybrid composition using two physical objects (A and B) "
+        "AND including the headline text visually inside the image near the hybrid object.\n\n"
         "Association rules:\n"
         "- Imagine exactly 100 concrete, photographable associations (physical objects only) derived from the product, audience, and goal.\n"
         "- From those 100 objects, choose 3 pairs (A,B). Each pair yields one ad concept.\n"
@@ -38,12 +39,13 @@ def build_prompt(product, description):
         "Hybrid rules:\n"
         "- The visual is a hybrid of Object A and Object B, either merged into one form or placed together in a balanced composition.\n"
         "- Photographic style only, no illustration or sketch.\n"
-        "- No logos, brands, extra text, or watermarks inside the image.\n"
+        "- No logos, brands, or watermarks inside the image.\n"
         "- Natural, coherent lighting and background.\n\n"
         "Headline & copy:\n"
         "- Headline: short, punchy, 3-7 English words.\n"
         "- Copy: exactly 50 English words, professional and clear.\n"
-        "- Do not mention ACE, AI, or 'hybrid' explicitly.\n"
+        "- Do not mention ACE, AI, or 'hybrid' explicitly in the text.\n"
+        "- The headline text must be suitable to appear visually inside the image as a title near the hybrid object.\n"
     )
 
     prod_block = f"PRODUCT: {product}\nDESCRIPTION: {description or '(no extra description)'}"
@@ -55,7 +57,7 @@ Return a JSON object with exactly this structure:
     {
       "headline": "English headline 3-7 words",
       "copy": "Exactly 50 English words...",
-      "image_prompt": "Detailed English prompt describing the hybrid object and scene for the image model."
+      "image_prompt": "Detailed English prompt describing the hybrid object, scene, and headline placement inside the image."
     },
     {
       "headline": "...",
@@ -71,6 +73,7 @@ Return a JSON object with exactly this structure:
 }
 
 - "copy" MUST be exactly 50 words (counted in English words).
+- In each image_prompt, describe where the headline text appears inside the image (above, below, or beside the hybrid object) and how it looks.
 - Do not include any other keys.
 - Do not include comments or explanations outside the JSON.
 """
@@ -116,14 +119,23 @@ def generate():
         for idx, item in enumerate(raw_ads[:3]):
             headline = (item.get("headline") or "").strip()
             copy = ensure_50_words(item.get("copy") or "")
-            img_prompt = (
+            base_img_prompt = (
                 item.get("image_prompt")
-                or f"Photographic hybrid object advertisement for {product}. High quality, studio lighting."
+                or f"A high-quality photographic hybrid-object advertisement for {product}. "
+                   f"Include the headline text '{headline}' inside the image near the hybrid object."
+            )
+
+            # D = let the engine decide best placement: describe options, not fixed
+            full_img_prompt = (
+                base_img_prompt
+                + f" The image must visually include the headline text: '{headline}' "
+                  "inside the composition, placed near the hybrid object (above, below, or to the side), "
+                  "clear and readable, professional typography, no extra text."
             )
 
             img_resp = client.images.generate(
                 model=IMAGE_MODEL,
-                prompt=img_prompt,
+                prompt=full_img_prompt,
                 size=size,
             )
             b64_image = img_resp.data[0].b64_json
