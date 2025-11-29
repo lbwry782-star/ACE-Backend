@@ -14,8 +14,6 @@ import openai
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # Use models that are definitely supported by openai==0.28
-# Text: gpt-3.5-turbo
-# Image: dall-e-2  (sizes: 256x256, 512x512, 1024x1024)
 OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-3.5-turbo")
 OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "dall-e-2")
 
@@ -29,10 +27,8 @@ else:
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"}), 200
+    return jsonify({"status": "ok", "image_model": OPENAI_IMAGE_MODEL, "text_model": OPENAI_TEXT_MODEL}), 200
 
-
-# ---- Helper: call text model to get audience, goal, 100 associations ----
 
 PLANNER_SYSTEM_PROMPT = """You are the ACE Engine text planner.
 
@@ -92,17 +88,16 @@ Respond ONLY with the JSON object, no extra text.
         audience = data.get("audience", "")
         goal = data.get("goal", "")
         associations = data.get("associations", [])
-        # Ensure exactly 100 strings
         associations = [str(a) for a in associations][:100]
         if len(associations) < 100 and associations:
             while len(associations) < 100:
                 associations.append(associations[-1])
         if not associations:
-            # very defensive: fallback
             raise ValueError("No associations returned")
+        print(f"[ACE] Text planner ok. audience='{audience}' goal='{goal[:60]}'... assoc_count={len(associations)}")
         return audience, goal, associations
     except Exception as e:
-        print("Text planner error:", repr(e))
+        print("[ACE] Text planner error:", repr(e))
         audience = "general audience"
         goal = "increase interest in the product"
         fallback_objects = [
@@ -121,13 +116,7 @@ Respond ONLY with the JSON object, no extra text.
         return audience, goal, associations
 
 
-# ---- Helper: choose hybrid object pair from associations ----
-
 def choose_hybrid_pairs(associations, count=3):
-    """
-    Choose 'count' pairs (A,B) of objects from the association list.
-    Simple random pairing respecting diversity.
-    """
     pairs = []
     pool = associations[:]
     random.shuffle(pool)
@@ -138,24 +127,17 @@ def choose_hybrid_pairs(associations, count=3):
         a = pool.pop()
         b = pool.pop()
         pairs.append((a, b))
+    print(f"[ACE] Chosen pairs: {pairs}")
     return pairs
 
 
-# ---- Helper: call image model to create one hybrid image ----
-
 def map_size_to_dalle2(size_str: str) -> str:
-    """
-    DALL·E 2 only supports 256x256, 512x512, 1024x1024.
-    We always map to 1024x1024 (the highest quality) regardless of input.
-    """
+    # DALL·E 2 only supports 256x256, 512x512, 1024x1024.
+    # We always map to 1024x1024 (best quality).
     return "1024x1024"
 
 
 def generate_hybrid_image(product, audience, goal, object_a, object_b, requested_size):
-    """
-    Calls the image model to generate one hybrid object image and returns base64 JPEG.
-    Uses DALL·E 2 (dall-e-2). Frontend sizes are mapped to 1024x1024.
-    """
     prompt = f"""
 Ultra-realistic photographic advertisement for: {product}.
 
@@ -177,6 +159,7 @@ Output style: hyper-realistic color photograph.
 """.strip()
 
     dalle_size = map_size_to_dalle2(requested_size)
+    print(f"[ACE] Requesting image with model={OPENAI_IMAGE_MODEL} size={dalle_size} for '{object_a}' + '{object_b}'")
 
     try:
         img_resp = openai.Image.create(
@@ -187,21 +170,14 @@ Output style: hyper-realistic color photograph.
             response_format="b64_json",
         )
         b64 = img_resp["data"][0]["b64_json"]
+        print(f"[ACE] Image created. b64 length={len(b64)}")
         return b64
     except Exception as e:
-        print("Image generation error:", repr(e))
+        print("[ACE] Image generation error:", repr(e))
         return ""
 
 
-# ---- Helper: ZIP packaging ----
-
 def build_zip_from_image_and_copy(image_b64: str, headline: str, copy: str, index: int) -> str:
-    """
-    Create an in-memory ZIP with:
-    - ad{index}.jpg  (decoded from base64)
-    - copy.txt       (headline + copy)
-    Return base64-encoded ZIP.
-    """
     mem_file = io.BytesIO()
     with zipfile.ZipFile(mem_file, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
         if image_b64:
@@ -209,7 +185,7 @@ def build_zip_from_image_and_copy(image_b64: str, headline: str, copy: str, inde
                 img_bytes = base64.b64decode(image_b64)
                 z.writestr(f"ad{index}.jpg", img_bytes)
             except Exception as e:
-                print("ZIP image decode error:", repr(e))
+                print("[ACE] ZIP image decode error:", repr(e))
         text_content = f"{headline}\n\n{copy}"
         z.writestr("copy.txt", text_content.encode("utf-8"))
 
@@ -229,10 +205,9 @@ def generate():
     if not product:
         return jsonify({"error": "Missing 'product' in request body"}), 400
 
-    # 1. Call text planner: audience, goal, 100 associations (concrete objects only)
-    audience, goal, associations = call_text_planner(product, description)
+    print(f"[ACE] /generate called. product='{product}' size='{size}'")
 
-    # 2. Choose 3 hybrid pairs
+    audience, goal, associations = call_text_planner(product, description)
     pairs = choose_hybrid_pairs(associations, count=3)
 
     ads = []
@@ -246,6 +221,7 @@ def generate():
         )
 
         image_b64 = generate_hybrid_image(product, audience, goal, obj_a, obj_b, size)
+        print(f"[ACE] Ad {idx}: image_b64 length after generation = {len(image_b64)}")
 
         zip_b64 = build_zip_from_image_and_copy(image_b64, headline, copy, idx)
         zip_filename = f"ace_ad_{idx}.zip"
@@ -260,6 +236,7 @@ def generate():
             }
         )
 
+    print("[ACE] /generate finished, returning 3 ads.")
     return jsonify({"ads": ads}), 200
 
 
