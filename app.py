@@ -6,6 +6,7 @@ import uuid
 import base64
 import io
 import zipfile
+import json
 from openai import OpenAI
 
 app = Flask(__name__)
@@ -16,7 +17,8 @@ TOKENS = {}
 
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
 
-TEXT_MODEL = os.environ.get("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
+# We hardcode a stable chat model to avoid API mismatches.
+TEXT_MODEL = "gpt-4o-mini"
 IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1")
 
 
@@ -118,7 +120,16 @@ def generate():
     if not product:
         return jsonify({"error": "missing product"}), 400
 
+    # Dev mode: '4242' bypasses token requirement
     dev_mode = (product == "4242")
+
+    # Check API key early
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return jsonify({"error": "missing OPENAI_API_KEY in environment"}), 500
+
+    # Update client key if it changed
+    client.api_key = api_key
 
     # Token enforcement: one generation per token (unless dev mode)
     if not dev_mode:
@@ -128,7 +139,6 @@ def generate():
         if info.get("used"):
             return jsonify({"error": "token already used"}), 403
 
-    # Build text prompt according to ACE engine rules
     prompt = build_text_prompt(product, description)
 
     try:
@@ -142,10 +152,16 @@ def generate():
 
     content = txt.choices[0].message.content
 
-    # Parse the JSON returned by the model
-    import json
+    # Be robust to accidental ```json fences
+    cleaned = content.strip()
+    if cleaned.startswith("```"):
+        # strip leading ```... and trailing ```
+        cleaned = cleaned.strip("`")
+        # remove possible leading 'json'
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].lstrip()
     try:
-        parsed = json.loads(content)
+        parsed = json.loads(cleaned)
         ads_spec = parsed.get("ads", [])
     except Exception as e:
         return jsonify({"error": f"failed to parse JSON from text model: {e}", "raw": content}), 500
@@ -153,7 +169,7 @@ def generate():
     if not isinstance(ads_spec, list) or len(ads_spec) == 0:
         return jsonify({"error": "no ads definition returned from text model", "raw": content}), 500
 
-    # Convert ACE sizes to OpenAI image sizes (use closest)
+    # Convert ACE sizes to OpenAI image sizes
     def size_to_openai(sz: str) -> str:
         s = sz.lower().strip()
         if "1920" in s:
@@ -173,7 +189,6 @@ def generate():
         headline = spec.get("headline") or ""
         copy_text = spec.get("copy") or ""
 
-        # Build final image prompt: include headline rule clearly
         img_prompt = (
             f"Photographic advertisement image for product '{product}'. "
             f"{visual_prompt} "
@@ -189,12 +204,11 @@ def generate():
                 n=1
             )
         except Exception as e:
-            return jsonify({"error": f"image generation failed: {e}"}), 500
+            return jsonify({"error": f"image generation failed: {e}"}, ), 500
 
         b64_image = img.data[0].b64_json
         image_bytes = base64.b64decode(b64_image)
 
-        # Build ZIP in memory: image + copy.txt
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr(f"ace_ad_{idx}.png", image_bytes)
@@ -202,7 +216,6 @@ def generate():
         zip_bytes = zip_buffer.getvalue()
         zip_b64 = base64.b64encode(zip_bytes).decode("utf-8")
 
-        # For immediate preview: use data URL
         image_data_url = f"data:image/png;base64,{b64_image}"
 
         ads_out.append({
