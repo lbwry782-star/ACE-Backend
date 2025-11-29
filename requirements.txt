@@ -1,4 +1,3 @@
 flask
 flask-cors
-openai==0.28
-gunicorn
+openai>=1.0.0

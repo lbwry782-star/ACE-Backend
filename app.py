@@ -1,245 +1,158 @@
 import os
-import json
 import base64
 import io
 import zipfile
-import random
-
+import json
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-
-import openai
-
-# Configure OpenAI (legacy 0.28 style)
-openai.api_key = os.getenv("OPENAI_API_KEY")
-
-# Use models that are definitely supported by openai==0.28
-OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-3.5-turbo")
-OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "dall-e-2")
+from openai import OpenAI
 
 app = Flask(__name__)
 
-frontend_url = os.getenv("FRONTEND_URL")
-if frontend_url:
-    CORS(app, resources={r"/*": {"origins": [frontend_url]}})
-else:
-    CORS(app)
+frontend_url = os.environ.get("FRONTEND_URL", "*")
+CORS(app, resources={r"/*": {"origins": [frontend_url]}})
+
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
+
+TEXT_MODEL = os.environ.get("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
+IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1")
+
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "image_model": OPENAI_IMAGE_MODEL, "text_model": OPENAI_TEXT_MODEL}), 200
+    return jsonify({"status": "ok"})
 
 
-PLANNER_SYSTEM_PROMPT = """You are the ACE Engine text planner.
+def build_prompt(product, description):
+    rules = (
+        "You are ACE, an automated advertising engine that generates photographic "
+        "hybrid-object ads based on a product.\n\n"
+        "For the given product, create 3 distinct ad concepts. Each ad must include:\n"
+        "- An English headline (3-7 words).\n"
+        "- A 50-word English marketing copy.\n"
+        "- An image_prompt describing a photographic hybrid composition using two physical objects (A and B).\n\n"
+        "Association rules:\n"
+        "- Imagine exactly 100 concrete, photographable associations (physical objects only) derived from the product, audience, and goal.\n"
+        "- From those 100 objects, choose 3 pairs (A,B). Each pair yields one ad concept.\n"
+        "- Associations must be real-world objects (no abstract ideas, verbs, or emotions).\n\n"
+        "Hybrid rules:\n"
+        "- The visual is a hybrid of Object A and Object B, either merged into one form or placed together in a balanced composition.\n"
+        "- Photographic style only, no illustration or sketch.\n"
+        "- No logos, brands, extra text, or watermarks inside the image.\n"
+        "- Natural, coherent lighting and background.\n\n"
+        "Headline & copy:\n"
+        "- Headline: short, punchy, 3-7 English words.\n"
+        "- Copy: exactly 50 English words, professional and clear.\n"
+        "- Do not mention ACE, AI, or 'hybrid' explicitly.\n"
+    )
 
-Your job:
-1. Infer the target audience profile from the product name and description.
-2. Infer ONE clear campaign goal.
-3. Generate EXACTLY 100 visual associations for that goal.
+    prod_block = f"PRODUCT: {product}\nDESCRIPTION: {description or '(no extra description)'}"
+    final_prompt = rules + "\n\n" + prod_block + """\n\nOUTPUT FORMAT (STRICT JSON):\n
+Return a JSON object with exactly this structure:
 
-CRITICAL RULES FOR ASSOCIATIONS:
-- You MUST generate EXACTLY 100 associations.
-- Each association MUST be a concrete, physical, photographable object.
-- Objects must be tangible, real-world things that can appear in a photo:
-  Examples: "glass bottle", "aluminum ladder", "wristwatch", "yellow umbrella",
-            "car headlight", "pineapple slice", "coffee mug", "ice cube",
-            "magnifying glass", "stethoscope".
-- Do NOT use abstract concepts (success, freedom, innovation, clarity, luxury),
-  emotions (joy, fear, trust), qualities (strength, freshness, speed),
-  or metaphors without objects (new beginnings, high performance, productivity),
-  or actions/verbs (running fast, competing, winning).
-- Each association MUST be 1–4 English words and refer only to an actual object.
-
-Return valid JSON with this exact structure:
 {
-  "audience": "...",
-  "goal": "...",
-  "associations": [
-    "object 1",
-    "object 2",
-    ...
-    "object 100"
+  "ads": [
+    {
+      "headline": "English headline 3-7 words",
+      "copy": "Exactly 50 English words...",
+      "image_prompt": "Detailed English prompt describing the hybrid object and scene for the image model."
+    },
+    {
+      "headline": "...",
+      "copy": "...",
+      "image_prompt": "..."
+    },
+    {
+      "headline": "...",
+      "copy": "...",
+      "image_prompt": "..."
+    }
   ]
 }
+
+- "copy" MUST be exactly 50 words (counted in English words).
+- Do not include any other keys.
+- Do not include comments or explanations outside the JSON.
 """
+    return final_prompt
 
 
-def call_text_planner(product: str, description: str):
-    """Call the OpenAI text model to get audience, goal, and 100 associations."""
-    user_prompt = f"""
-Product: {product}
-Description: {description}
-
-Infer audience + campaign goal and then produce EXACTLY 100 concrete object associations as specified.
-Respond ONLY with the JSON object, no extra text.
-""".strip()
-
-    try:
-        resp = openai.ChatCompletion.create(
-            model=OPENAI_TEXT_MODEL,
-            messages=[
-                {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.9,
-        )
-        content = resp["choices"][0]["message"]["content"]
-        data = json.loads(content)
-        audience = data.get("audience", "")
-        goal = data.get("goal", "")
-        associations = data.get("associations", [])
-        associations = [str(a) for a in associations][:100]
-        if len(associations) < 100 and associations:
-            while len(associations) < 100:
-                associations.append(associations[-1])
-        if not associations:
-            raise ValueError("No associations returned")
-        print(f"[ACE] Text planner ok. audience='{audience}' goal='{goal[:60]}'... assoc_count={len(associations)}")
-        return audience, goal, associations
-    except Exception as e:
-        print("[ACE] Text planner error:", repr(e))
-        audience = "general audience"
-        goal = "increase interest in the product"
-        fallback_objects = [
-            "glass bottle",
-            "ice cube",
-            "coffee mug",
-            "yellow umbrella",
-            "car headlight",
-            "pineapple slice",
-            "wristwatch",
-            "shopping bag",
-            "spotlight",
-            "magnifying glass",
-        ]
-        associations = (fallback_objects * 10)[:100]
-        return audience, goal, associations
-
-
-def choose_hybrid_pairs(associations, count=3):
-    pairs = []
-    pool = associations[:]
-    random.shuffle(pool)
-    for i in range(count):
-        if len(pool) < 2:
-            pool = associations[:]
-            random.shuffle(pool)
-        a = pool.pop()
-        b = pool.pop()
-        pairs.append((a, b))
-    print(f"[ACE] Chosen pairs: {pairs}")
-    return pairs
-
-
-def map_size_to_dalle2(size_str: str) -> str:
-    # DALL·E 2 only supports 256x256, 512x512, 1024x1024.
-    # We always map to 1024x1024 (best quality).
-    return "1024x1024"
-
-
-def generate_hybrid_image(product, audience, goal, object_a, object_b, requested_size):
-    prompt = f"""
-Ultra-realistic photographic advertisement for: {product}.
-
-Target audience: {audience}.
-Campaign goal: {goal}.
-
-Create a single clear hybrid object combining:
-- Object A: {object_a}
-- Object B: {object_b}
-
-Composition rules:
-- Show ONE hybrid object in the center of the frame.
-- The hybrid must clearly merge BOTH objects, not just show them side by side.
-- Use classic, natural background appropriate to the objects, not a plain studio backdrop.
-- Cinematic lighting, subtle depth of field, no text in the image.
-- No logos, no brands, no watermarks, no extra props that distract from the hybrid.
-
-Output style: hyper-realistic color photograph.
-""".strip()
-
-    dalle_size = map_size_to_dalle2(requested_size)
-    print(f"[ACE] Requesting image with model={OPENAI_IMAGE_MODEL} size={dalle_size} for '{object_a}' + '{object_b}'")
-
-    try:
-        img_resp = openai.Image.create(
-            model=OPENAI_IMAGE_MODEL,
-            prompt=prompt,
-            size=dalle_size,
-            n=1,
-            response_format="b64_json",
-        )
-        b64 = img_resp["data"][0]["b64_json"]
-        print(f"[ACE] Image created. b64 length={len(b64)}")
-        return b64
-    except Exception as e:
-        print("[ACE] Image generation error:", repr(e))
-        return ""
-
-
-def build_zip_from_image_and_copy(image_b64: str, headline: str, copy: str, index: int) -> str:
-    mem_file = io.BytesIO()
-    with zipfile.ZipFile(mem_file, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
-        if image_b64:
-            try:
-                img_bytes = base64.b64decode(image_b64)
-                z.writestr(f"ad{index}.jpg", img_bytes)
-            except Exception as e:
-                print("[ACE] ZIP image decode error:", repr(e))
-        text_content = f"{headline}\n\n{copy}"
-        z.writestr("copy.txt", text_content.encode("utf-8"))
-
-    mem_file.seek(0)
-    zip_bytes = mem_file.read()
-    zip_b64 = base64.b64encode(zip_bytes).decode("utf-8")
-    return zip_b64
+def ensure_50_words(text):
+    words = text.strip().split()
+    if len(words) > 50:
+        words = words[:50]
+    elif len(words) < 50:
+        last = words[-1] if words else "."
+        while len(words) < 50:
+            words.append(last)
+    return " ".join(words)
 
 
 @app.route("/generate", methods=["POST"])
 def generate():
     data = request.get_json(force=True, silent=True) or {}
-    product = data.get("product", "").strip()
-    description = data.get("description", "").strip()
-    size = data.get("size", "1024x1024")
+    product = (data.get("product") or "").strip()
+    description = (data.get("description") or "").strip()
+    size = (data.get("size") or "1024x1024").strip()
 
     if not product:
-        return jsonify({"error": "Missing 'product' in request body"}), 400
+        return jsonify({"error": "Missing 'product' field"}), 400
 
-    print(f"[ACE] /generate called. product='{product}' size='{size}'")
-
-    audience, goal, associations = call_text_planner(product, description)
-    pairs = choose_hybrid_pairs(associations, count=3)
-
-    ads = []
-
-    for idx, (obj_a, obj_b) in enumerate(pairs, start=1):
-        headline = f"{product}: {obj_a.title()} Meets {obj_b.title()}"
-        copy = (
-            f"{product} reimagined as a bold hybrid between {obj_a} and {obj_b}. "
-            f"Designed for {audience}, this visual metaphor supports the goal: {goal}. "
-            "Striking, memorable and built to stand out in any ACE campaign."
+    try:
+        prompt = build_prompt(product, description)
+        completion = client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a precise JSON generator."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
         )
+        content = completion.choices[0].message.content
+        parsed = json.loads(content)
+        raw_ads = parsed.get("ads", [])
+        ads = []
 
-        image_b64 = generate_hybrid_image(product, audience, goal, obj_a, obj_b, size)
-        print(f"[ACE] Ad {idx}: image_b64 length after generation = {len(image_b64)}")
+        for idx, item in enumerate(raw_ads[:3]):
+            headline = (item.get("headline") or "").strip()
+            copy = ensure_50_words(item.get("copy") or "")
+            img_prompt = (
+                item.get("image_prompt")
+                or f"Photographic hybrid object advertisement for {product}. High quality, studio lighting."
+            )
 
-        zip_b64 = build_zip_from_image_and_copy(image_b64, headline, copy, idx)
-        zip_filename = f"ace_ad_{idx}.zip"
+            img_resp = client.images.generate(
+                model=IMAGE_MODEL,
+                prompt=img_prompt,
+                size=size,
+            )
+            b64_image = img_resp.data[0].b64_json
+            image_bytes = base64.b64decode(b64_image)
 
-        ads.append(
-            {
-                "headline": headline,
-                "copy": copy,
-                "image_base64": image_b64,
-                "zip_base64": zip_b64,
-                "zip_filename": zip_filename,
-            }
-        )
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                img_filename = f"ad{idx+1}_image.png"
+                txt_filename = f"ad{idx+1}_copy.txt"
+                zf.writestr(img_filename, image_bytes)
+                zf.writestr(txt_filename, f"{headline}\n\n{copy}")
+            zip_bytes = zip_buffer.getvalue()
+            zip_b64 = base64.b64encode(zip_bytes).decode("utf-8")
 
-    print("[ACE] /generate finished, returning 3 ads.")
-    return jsonify({"ads": ads}), 200
+            ads.append(
+                {
+                    "headline": headline,
+                    "copy": copy,
+                    "image_base64": b64_image,
+                    "zip_base64": zip_b64,
+                    "filename": f"ad{idx+1}.zip",
+                }
+            )
+
+        return jsonify({"ads": ads})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "10000"))
+    port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
