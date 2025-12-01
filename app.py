@@ -62,7 +62,7 @@ def generate():
             )
             images_b64 = [item.b64_json for item in image_resp.data]
             images_data_urls = [f"data:image/png;base64,{b64}" for b64 in images_b64]
-        except Exception as e:
+        except Exception:
             # If image generation fails, return empty visuals but do NOT crash.
             images_data_urls = []
 
@@ -115,7 +115,7 @@ def generate():
                 "copies": copies,
             }
         )
-    except Exception as e:
+    except Exception:
         # Last-resort safety: never return HTTP 500.
         return jsonify({"images": [], "headlines": [], "copies": []})
 
