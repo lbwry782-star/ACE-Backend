@@ -28,15 +28,12 @@ def sanitize_size(size: str) -> str:
 
 @app.post("/generate")
 def generate():
-    # No explicit error messages are returned to the user interface;
-    # frontend treats any non-OK state as a silent failure.
     data = request.get_json(silent=True) or {}
     product = (data.get("product") or "").strip()
     description = (data.get("description") or "").strip()
     size = sanitize_size(str(data.get("size") or "1024x1024"))
 
     if not product or client is None:
-        # Return empty payload – frontend will simply not show anything extra.
         return jsonify({"images": [], "headlines": [], "copies": []})
 
     prompt = (
@@ -50,7 +47,6 @@ def generate():
         "Style: clean, high-end studio photography, realistic lighting, no logos, no brand names."
     )
 
-    # Generate 3 image variations
     image_resp = client.images.generate(
         model=IMAGE_MODEL,
         prompt=prompt,
@@ -61,7 +57,6 @@ def generate():
     images_b64 = [item.b64_json for item in image_resp.data]
     images_data_urls = [f"data:image/png;base64,{b64}" for b64 in images_b64]
 
-    # Generate 3 headline + copy pairs (50-word copy each)
     headlines = []
     copies = []
     for _ in range(3):
