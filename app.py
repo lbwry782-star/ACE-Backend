@@ -7,22 +7,21 @@ from openai import OpenAI
 app = Flask(__name__)
 CORS(app)
 
-# ----- OpenAI client configuration -----
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1")
 TEXT_MODEL = os.environ.get("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
 
 client = None
 if OPENAI_API_KEY:
-    # Timeout is kept lower than gunicorn worker timeout to avoid worker TIMEOUT.
-    client = OpenAI(api_key=OPENAI_API_KEY, timeout=20.0)
+    # Keep this below gunicorn timeout so worker never hangs too long.
+    client = OpenAI(api_key=OPENAI_API_KEY, timeout=15.0)
 
 
 @app.get("/health")
 def health():
     return jsonify({
         "status": "ok",
-        "mode": "real",
+        "mode": "real-fast",
         "image_model": IMAGE_MODEL,
         "text_model": TEXT_MODEL,
         "has_api_key": bool(OPENAI_API_KEY)
@@ -36,24 +35,16 @@ def sanitize_size(size: str) -> str:
 
 @app.post("/generate")
 def generate():
-    """Generate 3 real images + 3 text pairs using OpenAI.
-
-    Designed to be robust in production:
-    - If the API key is missing or invalid, returns an empty but valid payload (HTTP 200).
-    - All OpenAI calls are inside try/except so the worker never crashes.
-    - If anything unexpected happens, returns an empty payload with HTTP 200.
-    """
     try:
         data = request.get_json(silent=True) or {}
         product = (data.get("product") or "").strip()
         description = (data.get("description") or "").strip()
         size = sanitize_size(str(data.get("size") or "1024x1024"))
 
-        # If there is no product or no client, quietly return an empty payload.
         if not product or client is None:
             return jsonify({"images": [], "headlines": [], "copies": []})
 
-        # ---- IMAGE GENERATION ----
+        # ---- IMAGE (single, then duplicated) ----
         images_data_urls = []
         try:
             image_resp = client.images.generate(
@@ -68,16 +59,17 @@ def generate():
                     "Style: high-end studio photography, realistic light, clean background."
                 ),
                 size=size,
-                n=3,
+                n=1,
             )
             images_b64 = [item.b64_json for item in image_resp.data]
-            images_data_urls = [f"data:image/png;base64,{b64}" for b64 in images_b64]
+            if images_b64:
+                url = "data:image/png;base64," + images_b64[0]
+                images_data_urls = [url, url, url]
         except Exception as e:
-            # Log server-side but never crash or return 500.
             print("OpenAI image error:", repr(e))
             images_data_urls = []
 
-        # ---- TEXT GENERATION ----
+        # ---- TEXT (three different variations) ----
         headlines = []
         copies = []
         for _ in range(3):
@@ -126,7 +118,6 @@ def generate():
             "copies": copies,
         })
     except Exception as e:
-        # Last‑resort safety: never return HTTP 500.
         print("Unexpected /generate error:", repr(e))
         return jsonify({"images": [], "headlines": [], "copies": []})
 
