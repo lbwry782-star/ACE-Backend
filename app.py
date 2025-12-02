@@ -1,127 +1,158 @@
 import os
 import json
+import base64
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from openai import OpenAI
+import openai
 
 app = Flask(__name__)
-CORS(app)
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1")
-TEXT_MODEL = os.environ.get("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://ace-advertising.agency")
+CORS(app, resources={r"/*": {"origins": [FRONTEND_URL]}})
 
-client = None
-if OPENAI_API_KEY:
-    # Keep this below gunicorn timeout so worker never hangs too long.
-    client = OpenAI(api_key=OPENAI_API_KEY, timeout=15.0)
+openai.api_key = os.getenv("OPENAI_API_KEY")
+TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
+IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
+
+ALLOWED_SIZES = {
+    "1024x1024": "1024x1024",
+    "1024x1536": "1024x1536",
+    "1536x1024": "1536x1024",
+}
 
 
-@app.get("/health")
+@app.route("/health", methods=["GET"])
 def health():
-    return jsonify({
-        "status": "ok",
-        "mode": "real-fast",
-        "image_model": IMAGE_MODEL,
-        "text_model": TEXT_MODEL,
-        "has_api_key": bool(OPENAI_API_KEY)
-    })
+    return jsonify({"status": "ok"})
 
 
-def sanitize_size(size: str) -> str:
-    allowed = {"1024x1024", "1024x1792", "1792x1024"}
-    return size if size in allowed else "1024x1024"
+def is_english_only(text: str) -> bool:
+    try:
+        text.encode("ascii")
+        return True
+    except UnicodeEncodeError:
+        return False
 
 
-@app.post("/generate")
+def build_text_prompt(product: str, description: str, variation_index: int) -> str:
+    return f"""You are ACE, an advertising copy expert.
+
+Product: {product}
+Description: {description or "(no description provided)"}
+Variation: {variation_index}
+
+Write an advertising concept for one single ad, and then output ONLY a JSON object
+with exactly two fields:
+
+"headline": a short headline in English, 3–7 words, sharp and smart, directly related to the visual scene.
+"copy": a 50-word English marketing text (exactly 50 words, not 49 or 51).
+
+Rules:
+- Do not mention AI, engines, tokens, or technical details.
+- Do not mention the number of variations.
+- Focus on benefits and emotional impact.
+- Output ONLY valid JSON, no commentary.
+"""
+
+
+def build_image_prompt(product: str, description: str, variation_index: int) -> str:
+    return f"""Create a photographic advertising image for this product:
+
+Product: {product}
+Description: {description or "(no description provided)"}
+
+Rules (internal ACE engine style):
+- Use exactly two real-world physical objects (call them A and B) that are conceptually relevant to the product and its goal.
+- Choose A and B so that they have strong visual and shape similarity, or at least a clear visual echo between them.
+- Either fuse A and B into a single visually continuous form, or place them very close together or side by side so the similarity is obvious.
+- Use ONLY A and B as main objects. Do not add any_extra props, icons, logos, text, UI elements, people, or decorations.
+- Use a natural, classic background that belongs either to A or to B (for example: the natural environment where that object normally appears).
+- Keep lighting realistic and consistent with the background.
+- Respect safe margins around the frame (no cropping through the objects).
+
+Composition:
+- Center the composition cleanly in the frame.
+- Leave some free space for a headline area, but do NOT render any text.
+- The overall style is premium, sharp, and cinematic.
+
+Do NOT include any written words in the image. The image must be suitable as an online ad visual without embedded typography.
+"""
+
+
+def generate_ad(product: str, description: str, size_key: str, index: int):
+    text_prompt = build_text_prompt(product, description, index)
+
+    text_resp = openai.ChatCompletion.create(
+        model=TEXT_MODEL,
+        messages=[
+            {"role": "system", "content": "You write short, sharp ad copy and always respond with pure JSON."},
+            {"role": "user", "content": text_prompt},
+        ],
+        temperature=0.8,
+    )
+
+    raw_text = text_resp["choices"][0]["message"]["content"].strip()
+    try:
+        data = json.loads(raw_text)
+    except Exception:
+        data = {"headline": "", "copy": raw_text}
+
+    headline = data.get("headline", "").strip()
+    copy = data.get("copy", "").strip()
+
+    image_prompt = build_image_prompt(product, description, index)
+    size_value = ALLOWED_SIZES[size_key]
+
+    image_resp = openai.Image.create(
+        model=IMAGE_MODEL,
+        prompt=image_prompt,
+        size=size_value,
+        n=1,
+        response_format="b64_json",
+    )
+
+    b64 = image_resp["data"][0]["b64_json"]
+
+    return {
+        "headline": headline,
+        "marketing_text": copy,
+        "image_base64": b64,
+    }
+
+
+@app.route("/generate", methods=["POST"])
 def generate():
     try:
-        data = request.get_json(silent=True) or {}
-        product = (data.get("product") or "").strip()
-        description = (data.get("description") or "").strip()
-        size = sanitize_size(str(data.get("size") or "1024x1024"))
+        payload = request.get_json(force=True)
+    except Exception:
+        return jsonify({"error": "Invalid JSON"}), 400
 
-        if not product or client is None:
-            return jsonify({"images": [], "headlines": [], "copies": []})
+    product = (payload.get("product") or "").strip()
+    description = (payload.get("description") or "").strip()
+    size = (payload.get("size") or "").strip()
 
-        # ---- IMAGE (single, then duplicated) ----
-        images_data_urls = []
-        try:
-            image_resp = client.images.generate(
-                model=IMAGE_MODEL,
-                prompt=(
-                    "You are an ad-creation engine. "
-                    "Create a single photographic advertising image based on the following product. "
-                    "Use a clear, concrete visual metaphor for the product and its benefit. "
-                    "No text inside the image. No logos, no brand names. "
-                    f"Product name: {product}. "
-                    f"Product description: {description}. "
-                    "Style: high-end studio photography, realistic light, clean background."
-                ),
-                size=size,
-                n=1,
-            )
-            images_b64 = [item.b64_json for item in image_resp.data]
-            if images_b64:
-                url = "data:image/png;base64," + images_b64[0]
-                images_data_urls = [url, url, url]
-        except Exception as e:
-            print("OpenAI image error:", repr(e))
-            images_data_urls = []
+    if not product:
+        return jsonify({"error": "Missing product"}), 400
 
-        # ---- TEXT (three different variations) ----
-        headlines = []
-        copies = []
-        for _ in range(3):
-            try:
-                chat = client.chat.completions.create(
-                    model=TEXT_MODEL,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are an advertising copywriter. "
-                                "Write a short English headline (3–7 words) and a 50-word "
-                                "marketing copy for a photographic ad. "
-                                "Do not mention words like 'hybrid', 'composite', 'AI' "
-                                "or 'generated'. "
-                                "Return JSON with keys 'headline' and 'copy'."
-                            ),
-                        },
-                        {
-                            "role": "user",
-                            "content": (
-                                f"Product name: {product}. "
-                                f"Product description: {description}. "
-                                "Focus on the main benefit and a clear metaphor."
-                            ),
-                        },
-                    ],
-                    response_format={ "type": "json_object" },
-                )
-                content = chat.choices[0].message.content
-                parsed = json.loads(content)
-                headlines.append(str(parsed.get("headline", "")).strip())
-                copies.append(str(parsed.get("copy", "")).strip())
-            except Exception as e:
-                print("OpenAI text error:", repr(e))
-                headlines.append("Your new ad")
-                copies.append(
-                    "Discover a clear, simple way to communicate what you offer. "
-                    "This ad focuses on one strong visual idea so your product stands out "
-                    "without distractions or noise."
-                )
+    if not is_english_only(product) or not is_english_only(description):
+        return jsonify({"error": "English only"}), 400
 
-        return jsonify({
-            "images": images_data_urls,
-            "headlines": headlines,
-            "copies": copies,
-        })
+    if len(product.split()) > 15:
+        return jsonify({"error": "Product too long"}), 400
+
+    if size not in ALLOWED_SIZES:
+        return jsonify({"error": "Invalid size"}), 400
+
+    ads = []
+    try:
+        for i in range(1, 4):
+            ads.append(generate_ad(product, description, size, i))
     except Exception as e:
-        print("Unexpected /generate error:", repr(e))
-        return jsonify({"images": [], "headlines": [], "copies": []})
+        return jsonify({"error": "Generation failed"}), 500
+
+    return jsonify({"ads": ads})
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "10000"))
+    port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
