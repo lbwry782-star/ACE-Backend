@@ -64,7 +64,8 @@ def generate():
     session_token = (data.get("session_token") or "").strip()
     dev_mode = bool(data.get("dev_mode"))
 
-    allowed_sizes = {"1024x1024", "1024x1792", "1792x1024"}
+    # Sizes coming from the FRONTEND (UI contract)
+    ui_sizes = {"1024x1024", "1024x1792", "1792x1024"}
 
     if not product:
         return jsonify(
@@ -80,12 +81,12 @@ def generate():
     if product == "4242":
         dev_mode = True
 
-    if size not in allowed_sizes:
+    if size not in ui_sizes:
         return jsonify(
             {
                 "ok": False,
                 "error": "invalid_size",
-                "message": "Size must be one of 1024x1024, 1024x1792, or 1792x1024.",
+                "message": "Size must be 1024x1024, 1024x1792, or 1792x1024.",
                 "button_enabled": not dev_mode,
             }
         ), 400
@@ -127,7 +128,9 @@ def generate():
         ), 500
 
     text_model = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
-    image_model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
+    # default image model – if ENV is empty, fall back to gpt-image-1
+    image_model = os.getenv("OPENAI_IMAGE_MODEL") or "gpt-image-1"
+    image_model_lower = image_model.lower()
 
     client = OpenAI(api_key=api_key)
 
@@ -185,6 +188,25 @@ def generate():
 
     # ----- IMAGE GENERATION -----
 
+    def map_size_for_model(ui_size: str) -> str:
+        """Map UI size to what the selected model actually supports."""
+        # GPT-IMAGE-1: 1024x1024, 1024x1536 (portrait), 1536x1024 (landscape)
+        if "gpt-image-1" in image_model_lower:
+            if ui_size == "1024x1024":
+                return "1024x1024"
+            if ui_size == "1024x1792":
+                return "1024x1536"
+            if ui_size == "1792x1024":
+                return "1536x1024"
+            return "1024x1024"
+        # DALL-E 3: 1024x1024, 1024x1792, 1792x1024
+        if "dall-e-3" in image_model_lower:
+            if ui_size in {"1024x1024", "1024x1792", "1792x1024"}:
+                return ui_size
+            return "1024x1024"
+        # Fallback: just use 1024x1024
+        return "1024x1024"
+
     def build_image_prompt(headline: str) -> str:
         base = (
             "Ultra realistic advertising photo for the product '" + product + "'.\n"
@@ -201,26 +223,38 @@ def generate():
         )
         return base
 
-    size_map = {
-        "1024x1024": "1024x1024",
-        "1024x1792": "1024x1792",
-        "1792x1024": "1792x1024",
-    }
-    openai_size = size_map[size]
+    openai_size = map_size_for_model(size)
 
     image_urls = []
     try:
         for variant in variants:
             headline = (variant.get("headline") or "").strip()
             image_prompt = build_image_prompt(headline)
-            # NOTE: response_format is NOT passed here; default is URL.
-            image_response = client.images.generate(
-                model=image_model,
-                prompt=image_prompt,
-                n=1,
-                size=openai_size,
-            )
-            url = image_response.data[0].url
+
+            kwargs = {
+                "model": image_model,
+                "prompt": image_prompt,
+                "n": 1,
+                "size": openai_size,
+            }
+
+            # For DALL-E 3 we can request URL directly.
+            if "dall-e-3" in image_model_lower:
+                kwargs["response_format"] = "url"
+
+            image_response = client.images.generate(**kwargs)
+            img_obj = image_response.data[0]
+
+            # Prefer URL if available (e.g. DALL-E 3)
+            url = getattr(img_obj, "url", None)
+            if not url:
+                # GPT-IMAGE-1 returns base64 by default
+                b64 = getattr(img_obj, "b64_json", None)
+                if b64:
+                    url = "data:image/png;base64," + b64
+                else:
+                    raise ValueError("Image response missing both url and b64_json.")
+
             image_urls.append(url)
     except Exception as e:
         return jsonify(
