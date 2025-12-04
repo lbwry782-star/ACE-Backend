@@ -64,7 +64,6 @@ def generate():
     session_token = (data.get("session_token") or "").strip()
     dev_mode = bool(data.get("dev_mode"))
 
-    # Sizes coming from the FRONTEND (UI contract)
     ui_sizes = {"1024x1024", "1024x1792", "1792x1024"}
 
     if not product:
@@ -77,7 +76,6 @@ def generate():
             }
         ), 400
 
-    # Developer override: product "4242" turns on dev mode.
     if product == "4242":
         dev_mode = True
 
@@ -91,7 +89,6 @@ def generate():
             }
         ), 400
 
-    # Enforce single attempt per token in non-dev mode
     if not dev_mode:
         if not session_token or session_token not in SESSIONS:
             return jsonify(
@@ -128,13 +125,13 @@ def generate():
         ), 500
 
     text_model = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
-    # default image model – if ENV is empty, fall back to gpt-image-1
     image_model = os.getenv("OPENAI_IMAGE_MODEL") or "gpt-image-1"
     image_model_lower = image_model.lower()
 
-    client = OpenAI(api_key=api_key)
+    # Increase HTTP timeout so Render + OpenAI have time to answer
+    client = OpenAI(api_key=api_key, timeout=120.0)
 
-    # ----- TEXT GENERATION VIA CHAT COMPLETIONS (JSON MODE) -----
+    # ---------- TEXT (CHAT COMPLETIONS JSON MODE) ----------
     system_msg = (
         "You are an ad-creative system for the ACE advertising platform. "
         "You must respond ONLY with valid JSON matching the requested schema."
@@ -186,11 +183,9 @@ def generate():
             }
         ), 500
 
-    # ----- IMAGE GENERATION -----
+    # ---------- IMAGE GENERATION ----------
 
     def map_size_for_model(ui_size: str) -> str:
-        """Map UI size to what the selected model actually supports."""
-        # GPT-IMAGE-1: 1024x1024, 1024x1536 (portrait), 1536x1024 (landscape)
         if "gpt-image-1" in image_model_lower:
             if ui_size == "1024x1024":
                 return "1024x1024"
@@ -199,63 +194,63 @@ def generate():
             if ui_size == "1792x1024":
                 return "1536x1024"
             return "1024x1024"
-        # DALL-E 3: 1024x1024, 1024x1792, 1792x1024
         if "dall-e-3" in image_model_lower:
             if ui_size in {"1024x1024", "1024x1792", "1792x1024"}:
                 return ui_size
             return "1024x1024"
-        # Fallback: just use 1024x1024
         return "1024x1024"
-
-    def build_image_prompt(headline: str) -> str:
-        base = (
-            "Ultra realistic advertising photo for the product '" + product + "'.\n"
-            "Use exactly two physical objects only.\n"
-            "Show them either merged as one clear, dominant form or tightly side by side "
-            "to emphasize a strong similarity in shape.\n"
-            "The background must be the classic, natural environment of one of the objects.\n"
-            "Avoid extra decorative items. Only those two objects are visible.\n"
-            "If any text appears in the image, it must be at most one short English headline, "
-            "and no other words or slogans.\n"
-            "Leave comfortable empty space around the main objects so a headline could exist "
-            "without touching the frame edges.\n"
-            "The visual mood and energy should match this headline: '" + headline + "'.\n"
-        )
-        return base
 
     openai_size = map_size_for_model(size)
 
+    # Build one combined prompt for 3 variations to reduce latency
+    headlines_list = [ (v.get("headline") or "").strip() for v in variants ]
+    headlines_text = "; ".join(h for h in headlines_list if h)
+
+    base_prompt = (
+        "Ultra realistic advertising photos for the product '" + product + "'.\n"
+        "Create 3 different ad variations. In each image, use exactly two physical objects only.\n"
+        "Show them either merged as one clear, dominant form or tightly side by side "
+        "to emphasize a strong similarity in shape.\n"
+        "The background in every image must be the classic, natural environment of one of the objects.\n"
+        "Avoid extra decorative items. Only those two objects are visible.\n"
+        "If any text appears in an image, it must be at most one short English headline, "
+        "and no other words or slogans.\n"
+        "Leave comfortable empty space around the main objects so a headline could exist "
+        "without touching the frame edges.\n"
+    )
+
+    if headlines_text:
+        base_prompt += (
+            "Take creative inspiration from these headlines: " + headlines_text + ". "
+            "Each of the 3 generated images should feel like a different interpretation of these ideas.\n"
+        )
+
     image_urls = []
     try:
-        for variant in variants:
-            headline = (variant.get("headline") or "").strip()
-            image_prompt = build_image_prompt(headline)
+        kwargs = {
+            "model": image_model,
+            "prompt": base_prompt,
+            "n": 3,
+            "size": openai_size,
+        }
+        if "dall-e-3" in image_model_lower:
+            kwargs["response_format"] = "url"
 
-            kwargs = {
-                "model": image_model,
-                "prompt": image_prompt,
-                "n": 1,
-                "size": openai_size,
-            }
+        img_response = client.images.generate(**kwargs)
 
-            # For DALL-E 3 we can request URL directly.
-            if "dall-e-3" in image_model_lower:
-                kwargs["response_format"] = "url"
-
-            image_response = client.images.generate(**kwargs)
-            img_obj = image_response.data[0]
-
-            # Prefer URL if available (e.g. DALL-E 3)
+        for img_obj in img_response.data:
             url = getattr(img_obj, "url", None)
             if not url:
-                # GPT-IMAGE-1 returns base64 by default
                 b64 = getattr(img_obj, "b64_json", None)
                 if b64:
                     url = "data:image/png;base64," + b64
                 else:
                     raise ValueError("Image response missing both url and b64_json.")
-
             image_urls.append(url)
+
+        if len(image_urls) != 3:
+            raise ValueError("Expected exactly 3 images from the image model.")
+
     except Exception as e:
         return jsonify(
             {
