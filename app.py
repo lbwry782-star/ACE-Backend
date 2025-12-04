@@ -22,7 +22,7 @@ if FRONTEND_URL:
 else:
     CORS(app)
 
-# In‑memory session store (single attempt per session in production)
+# In-memory session store (single attempt per session in production)
 SESSIONS = {}
 SESSION_TTL_SECONDS = 60 * 60  # 1 hour
 
@@ -46,7 +46,7 @@ def health():
 
 @app.route("/start-session", methods=["POST"])
 def start_session():
-    """Create a single‑use session token (one GENERATE attempt in production)."""
+    """Create a single-use session token (one GENERATE attempt in production)."""
     cleanup_sessions()
     token = str(uuid.uuid4())
     SESSIONS[token] = {
@@ -96,7 +96,7 @@ def generate():
             }
         ), 400
 
-    # Enforce single attempt per token in non‑dev mode
+    # Enforce single attempt per token in non-dev mode
     if not dev_mode:
         if not session_token or session_token not in SESSIONS:
             return jsonify(
