@@ -213,12 +213,12 @@ def generate():
         for variant in variants:
             headline = (variant.get("headline") or "").strip()
             image_prompt = build_image_prompt(headline)
+            # NOTE: response_format is NOT passed here; default is URL.
             image_response = client.images.generate(
                 model=image_model,
                 prompt=image_prompt,
                 n=1,
                 size=openai_size,
-                response_format="url",
             )
             url = image_response.data[0].url
             image_urls.append(url)
