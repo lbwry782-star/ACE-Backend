@@ -1,3 +1,4 @@
+
 import os
 import time
 import uuid
@@ -14,18 +15,20 @@ except ImportError:
 
 app = Flask(__name__)
 
+# CORS: allow only the configured frontend origin (if provided)
 FRONTEND_URL = os.getenv("FRONTEND_URL")
 if FRONTEND_URL:
     CORS(app, origins=[FRONTEND_URL])
 else:
     CORS(app)
 
-
+# In‑memory session store (single attempt per session in production)
 SESSIONS = {}
 SESSION_TTL_SECONDS = 60 * 60  # 1 hour
 
 
 def cleanup_sessions():
+    """Remove expired sessions."""
     now = time.time()
     to_delete = []
     for token, data in SESSIONS.items():
@@ -37,12 +40,13 @@ def cleanup_sessions():
 
 @app.route("/health", methods=["GET"])
 def health():
+    """Simple health check."""
     return jsonify({"status": "ok"})
 
 
 @app.route("/start-session", methods=["POST"])
 def start_session():
-    """Creates a single-use session token (one GENERATE attempt)."""
+    """Create a single‑use session token (one GENERATE attempt in production)."""
     cleanup_sessions()
     token = str(uuid.uuid4())
     SESSIONS[token] = {
@@ -54,6 +58,7 @@ def start_session():
 
 @app.route("/generate", methods=["POST"])
 def generate():
+    """Main ACE generation endpoint."""
     cleanup_sessions()
 
     data = request.get_json(silent=True) or {}
@@ -64,6 +69,7 @@ def generate():
     session_token = (data.get("session_token") or "").strip()
     dev_mode = bool(data.get("dev_mode"))
 
+    # Sizes coming from the FRONTEND (UI contract)
     ui_sizes = {"1024x1024", "1024x1792", "1792x1024"}
 
     if not product:
@@ -76,6 +82,7 @@ def generate():
             }
         ), 400
 
+    # Developer override: product "4242" turns on dev mode.
     if product == "4242":
         dev_mode = True
 
@@ -89,6 +96,7 @@ def generate():
             }
         ), 400
 
+    # Enforce single attempt per token in non‑dev mode
     if not dev_mode:
         if not session_token or session_token not in SESSIONS:
             return jsonify(
@@ -128,7 +136,7 @@ def generate():
     image_model = os.getenv("OPENAI_IMAGE_MODEL") or "gpt-image-1"
     image_model_lower = image_model.lower()
 
-    # Increase HTTP timeout so Render + OpenAI have time to answer
+    # Increase HTTP timeout so OpenAI calls have time to finish
     client = OpenAI(api_key=api_key, timeout=120.0)
 
     # ---------- TEXT (CHAT COMPLETIONS JSON MODE) ----------
@@ -186,6 +194,8 @@ def generate():
     # ---------- IMAGE GENERATION ----------
 
     def map_size_for_model(ui_size: str) -> str:
+        """Map UI size to what the selected image model actually supports."""
+        # GPT-IMAGE-1 typical sizes: 1024x1024, 1024x1536 (portrait), 1536x1024 (landscape)
         if "gpt-image-1" in image_model_lower:
             if ui_size == "1024x1024":
                 return "1024x1024"
@@ -194,16 +204,18 @@ def generate():
             if ui_size == "1792x1024":
                 return "1536x1024"
             return "1024x1024"
+        # DALL-E 3 typical sizes: 1024x1024, 1024x1792, 1792x1024
         if "dall-e-3" in image_model_lower:
             if ui_size in {"1024x1024", "1024x1792", "1792x1024"}:
                 return ui_size
             return "1024x1024"
+        # Fallback
         return "1024x1024"
 
     openai_size = map_size_for_model(size)
 
-    # Build one combined prompt for 3 variations to reduce latency
-    headlines_list = [ (v.get("headline") or "").strip() for v in variants ]
+    # Build a combined prompt for 3 variations to reduce latency
+    headlines_list = [(v.get("headline") or "").strip() for v in variants]
     headlines_text = "; ".join(h for h in headlines_list if h)
 
     base_prompt = (
@@ -233,6 +245,7 @@ def generate():
             "n": 3,
             "size": openai_size,
         }
+        # For DALL-E 3 we can explicitly ask for URLs.
         if "dall-e-3" in image_model_lower:
             kwargs["response_format"] = "url"
 
@@ -283,4 +296,5 @@ def generate():
 
 
 if __name__ == "__main__":
+    # Local dev server (Render will use gunicorn instead)
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")))
