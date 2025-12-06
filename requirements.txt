@@ -2,4 +2,4 @@ flask
 flask-cors
 openai>=1.0.0
 gunicorn
-pillow\n
+pillow>=10.4.0
