@@ -27,7 +27,7 @@ CORS(
 IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
 TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
 
-# Simple in-memory token system
+# Optional in-memory token system (only if sid is supplied)
 SESSION_TTL_HOURS = int(os.getenv("SESSION_TTL_HOURS", "48"))
 MAX_ATTEMPTS_PER_SESSION = 1
 
@@ -109,6 +109,9 @@ def health():
 
 @app.route("/start-session", methods=["POST"])
 def start_session():
+    """Optional helper: if sid is given, return remaining attempts.
+    Not required for ICOUNT-only flow, but harmless to keep.
+    """
     data = request.get_json(silent=True) or {}
     sid = data.get("sid")
     if not sid:
@@ -124,22 +127,23 @@ def generate():
     body = request.get_json(silent=True) or {}
     product = (body.get("product") or "").strip()
     size = (body.get("size") or "1024x1024").strip()
-    sid = body.get("sid")
+    sid = body.get("sid")  # optional now
 
     if not product:
         return jsonify({"error": "Missing 'product' in request body"}), 400
 
-    # Developer mode 4242 – unlimited tests, bypass token system
+    # Developer mode 4242 – unlimited tests, bypass any sid logic
     dev_mode = product == "4242"
 
-    if not dev_mode:
-        if not sid:
-            return jsonify({"error": "Missing payment session (sid)"}), 400
+    # Token system is **optional** now:
+    # - if sid is provided and not in dev mode → enforce 1 attempt per sid
+    # - if no sid → allow request without limits (for ICOUNT/manual payment flow)
+    if not dev_mode and sid:
         if not has_attempts_left(sid):
             return jsonify({"error": "No attempts left for this session"}), 403
 
     try:
-        # 1) IMAGES – loop 3 times, no deprecated 'n' parameter
+        # 1) IMAGES – 3 separate calls, no deprecated 'n' parameter
         image_prompt = build_image_prompt(product)
         image_b64_list = []
 
@@ -167,7 +171,6 @@ def generate():
             raw_text = txt_resp.output[0].content[0].text
         except Exception:
             try:
-                # Fallback for any older style
                 raw_text = txt_resp.choices[0].message["content"]
             except Exception:
                 raw_text = ""
@@ -230,6 +233,7 @@ def generate():
             "images_b64": image_b64_list,
         }
 
+        # Consume attempt only if sid was supplied and not dev mode
         if not dev_mode and sid:
             consume_attempt(sid)
 
