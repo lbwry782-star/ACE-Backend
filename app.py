@@ -157,6 +157,15 @@ def generate():
             return jsonify({"error": "No attempts left for this session"}), 403
 
     # 1) IMAGES
+    # Normalize size to OpenAI-supported values
+    # Allowed: 1024x1024, 1024x1536 (portrait), 1536x1024 (landscape), auto
+    if size == "1024x1792":
+        size = "1024x1536"
+    elif size == "1792x1024":
+        size = "1536x1024"
+    elif size not in {"1024x1024", "1024x1536", "1536x1024", "auto"}:
+        size = "1024x1024"
+
     try:
         image_prompt = build_image_prompt(product)
         image_b64_list = []
