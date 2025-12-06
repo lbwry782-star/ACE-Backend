@@ -10,10 +10,6 @@ from flask_cors import CORS
 from openai import OpenAI
 from PIL import Image
 
-# -----------------------------------------------------------------------------
-# Setup
-# -----------------------------------------------------------------------------
-
 client = OpenAI()
 app = Flask(__name__)
 
@@ -30,16 +26,14 @@ TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
 SESSION_TTL_HOURS = int(os.getenv("SESSION_TTL_HOURS", "48"))
 MAX_ATTEMPTS_PER_SESSION = 1
 
-sessions = {}        # sid -> {attempts_used, expires_at}
-requests_store = {}  # request_id -> data
-
+sessions = {}
+requests_store = {}
 
 def _cleanup_sessions():
     now = datetime.utcnow()
     expired = [sid for sid, data in sessions.items() if data["expires_at"] < now]
     for sid in expired:
         sessions.pop(sid, None)
-
 
 def ensure_session(sid: str):
     _cleanup_sessions()
@@ -50,16 +44,13 @@ def ensure_session(sid: str):
         }
     return sessions[sid]
 
-
 def has_attempts_left(sid: str) -> bool:
     data = ensure_session(sid)
     return data["attempts_used"] < MAX_ATTEMPTS_PER_SESSION
 
-
 def consume_attempt(sid: str):
     data = ensure_session(sid)
     data["attempts_used"] += 1
-
 
 def build_image_prompt(product_text: str) -> str:
     return (
@@ -71,7 +62,6 @@ def build_image_prompt(product_text: str) -> str:
         "Do NOT include the 50-word marketing copy in the image. "
         "Only embed a short English headline, 3–7 words."
     )
-
 
 def build_text_prompt(product_text: str) -> str:
     return (
@@ -90,11 +80,9 @@ def build_text_prompt(product_text: str) -> str:
         "}"
     )
 
-
 def pil_image_from_b64(b64_data: str) -> Image.Image:
     raw = base64.b64decode(b64_data)
     return Image.open(io.BytesIO(raw)).convert("RGB")
-
 
 def fallback_variants_text():
     base_copy = (
@@ -109,15 +97,9 @@ def fallback_variants_text():
         {"headline": "ACE Ad Variant 3", "copy": base_copy},
     ]
 
-
-# -----------------------------------------------------------------------------
-# Routes
-# -----------------------------------------------------------------------------
-
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"}), 200
-
 
 @app.route("/start-session", methods=["POST"])
 def start_session():
@@ -130,44 +112,37 @@ def start_session():
     attempts_left = max(0, MAX_ATTEMPTS_PER_SESSION - sess["attempts_used"])
     return jsonify({"attempts_left": attempts_left}), 200
 
-
 @app.route("/generate", methods=["POST"])
 def generate():
     body = request.get_json(silent=True) or {}
     product = (body.get("product") or "").strip()
     size = (body.get("size") or "1024x1024").strip()
-    sid = body.get("sid")  # optional
+    sid = body.get("sid")
 
     if not product:
         return jsonify({"error": "Missing 'product' in request body"}), 400
 
     dev_mode = product == "4242"
 
-    # Optional token system: only enforce if sid is given
     if not dev_mode and sid:
         if not has_attempts_left(sid):
             return jsonify({"error": "No attempts left for this session"}), 403
 
     try:
-        # 1) IMAGES – 3 separate calls, no deprecated 'n'
         image_prompt = build_image_prompt(product)
         image_b64_list = []
-
         for _ in range(3):
             img_resp = client.images.generate(
                 model=IMAGE_MODEL,
                 prompt=image_prompt,
                 size=size,
                 quality="high",
-                response_format="b64_json",
             )
             b64 = img_resp.data[0].b64_json
             image_b64_list.append(b64)
     except Exception as e:
-        # Image generation failed – hard failure
         return jsonify({"error": "Image generation failed", "details": str(e)}), 500
 
-    # 2) TEXT – try Responses API; on any failure, use placeholders
     try:
         text_prompt = build_text_prompt(product)
         txt_resp = client.responses.create(
@@ -177,7 +152,6 @@ def generate():
 
         raw_text = ""
         try:
-            # New Responses format
             raw_text = txt_resp.output[0].content[0].text
         except Exception:
             try:
@@ -186,31 +160,25 @@ def generate():
                 raw_text = ""
 
         import json
-
-        variants_text = []
         try:
             parsed = json.loads(raw_text)
             variants_text = parsed.get("variants", [])
         except Exception:
             variants_text = fallback_variants_text()
     except Exception as e:
-        # If anything in text generation fails – fall back silently
         print("Text generation failed, using placeholders:", str(e))
         variants_text = fallback_variants_text()
 
-    # Normalize to exactly 3 variants
     while len(variants_text) < 3:
         variants_text.append(fallback_variants_text()[0])
     variants_text = variants_text[:3]
 
-    # 3) Combine
     variants = []
     for i in range(3):
         b64 = image_b64_list[i]
         txt = variants_text[i]
         headline = txt.get("headline", "").strip()
         copy = txt.get("copy", "").strip()
-
         data_uri = f"data:image/jpeg;base64,{b64}"
         variants.append(
             {
@@ -230,7 +198,6 @@ def generate():
         consume_attempt(sid)
 
     return jsonify({"request_id": request_id, "variants": variants}), 200
-
 
 @app.route("/download", methods=["GET"])
 def download():
@@ -263,7 +230,6 @@ def download():
     text_content = f"{variant.get('headline','').strip()}\n\n{variant.get('copy','').strip()}\n"
 
     import zipfile
-
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("ad.jpg", img_bytes)
@@ -277,7 +243,6 @@ def download():
         as_attachment=True,
         download_name=filename,
     )
-
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
