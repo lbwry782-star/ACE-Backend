@@ -1,15 +1,15 @@
-ACE Backend v3 – sid is optional (ICOUNT friendly)
+ACE Backend v4 – robust against text-model errors
 
-• /health        → status ok
-• /start-session → optional helper when sid is used
-• /generate      → { product, size, sid? }
+• /generate:
+  - 'product' required, 'size' optional (default 1024x1024), 'sid' optional.
+  - If sid is provided → 1 attempt per sid. If not → unlimited (ICOUNT flow).
+  - Developer mode: product == "4242" → ignores sid and limits.
 
-Rules:
-- 'product' is required.
-- Developer mode: product == "4242" → unlimited, ignores sid.
-- If sid is supplied (Stripe-style future flow) → 1 attempt per sid.
-- If NO sid (ICOUNT/manual flow) → no server-side limit, request is allowed.
+• Image generation:
+  - Uses client.images.generate(model=OPENAI_IMAGE_MODEL, size=...).
+  - If images fail → 500 with clear error.
 
-OpenAI:
-- Uses client.images.generate (gpt-image-1) without 'n'.
-- Uses client.responses.create (gpt-4.1-mini) for 3 variants of headline+copy.
+• Text generation:
+  - Tries client.responses.create(model=OPENAI_TEXT_MODEL, input=...).
+  - If anything fails (API error, parsing etc.) → falls back to safe placeholders.
+  - This guarantees that a text error will NOT cause HTTP 500 for the user.

@@ -27,7 +27,6 @@ CORS(
 IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
 TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
 
-# Optional in-memory token system (only if sid is supplied)
 SESSION_TTL_HOURS = int(os.getenv("SESSION_TTL_HOURS", "48"))
 MAX_ATTEMPTS_PER_SESSION = 1
 
@@ -36,7 +35,6 @@ requests_store = {}  # request_id -> data
 
 
 def _cleanup_sessions():
-    """Remove expired sessions from memory."""
     now = datetime.utcnow()
     expired = [sid for sid, data in sessions.items() if data["expires_at"] < now]
     for sid in expired:
@@ -98,6 +96,20 @@ def pil_image_from_b64(b64_data: str) -> Image.Image:
     return Image.open(io.BytesIO(raw)).convert("RGB")
 
 
+def fallback_variants_text():
+    base_copy = (
+        "This is a 50-word placeholder marketing paragraph for the ACE Engine demo. "
+        "It describes the advertised product in clear, persuasive language and "
+        "invites the viewer to explore more and take action after seeing this "
+        "automatically generated ad. The final system will replace this text."
+    )
+    return [
+        {"headline": "ACE Ad Variant 1", "copy": base_copy},
+        {"headline": "ACE Ad Variant 2", "copy": base_copy},
+        {"headline": "ACE Ad Variant 3", "copy": base_copy},
+    ]
+
+
 # -----------------------------------------------------------------------------
 # Routes
 # -----------------------------------------------------------------------------
@@ -109,9 +121,6 @@ def health():
 
 @app.route("/start-session", methods=["POST"])
 def start_session():
-    """Optional helper: if sid is given, return remaining attempts.
-    Not required for ICOUNT-only flow, but harmless to keep.
-    """
     data = request.get_json(silent=True) or {}
     sid = data.get("sid")
     if not sid:
@@ -127,23 +136,20 @@ def generate():
     body = request.get_json(silent=True) or {}
     product = (body.get("product") or "").strip()
     size = (body.get("size") or "1024x1024").strip()
-    sid = body.get("sid")  # optional now
+    sid = body.get("sid")  # optional
 
     if not product:
         return jsonify({"error": "Missing 'product' in request body"}), 400
 
-    # Developer mode 4242 – unlimited tests, bypass any sid logic
     dev_mode = product == "4242"
 
-    # Token system is **optional** now:
-    # - if sid is provided and not in dev mode → enforce 1 attempt per sid
-    # - if no sid → allow request without limits (for ICOUNT/manual payment flow)
+    # Optional token system: only enforce if sid is given
     if not dev_mode and sid:
         if not has_attempts_left(sid):
             return jsonify({"error": "No attempts left for this session"}), 403
 
     try:
-        # 1) IMAGES – 3 separate calls, no deprecated 'n' parameter
+        # 1) IMAGES – 3 separate calls, no deprecated 'n'
         image_prompt = build_image_prompt(product)
         image_b64_list = []
 
@@ -157,8 +163,12 @@ def generate():
             )
             b64 = img_resp.data[0].b64_json
             image_b64_list.append(b64)
+    except Exception as e:
+        # Image generation failed – hard failure
+        return jsonify({"error": "Image generation failed", "details": str(e)}), 500
 
-        # 2) TEXT – using Responses API
+    # 2) TEXT – try Responses API; on any failure, use placeholders
+    try:
         text_prompt = build_text_prompt(product)
         txt_resp = client.responses.create(
             model=TEXT_MODEL,
@@ -182,65 +192,44 @@ def generate():
             parsed = json.loads(raw_text)
             variants_text = parsed.get("variants", [])
         except Exception:
-            # Fallback: simple placeholders
-            for i in range(3):
-                variants_text.append(
-                    {
-                        "headline": f"ACE Ad Variant {i+1}",
-                        "copy": (
-                            "This is a 50-word placeholder marketing paragraph for the ACE "
-                            "Engine demo. It describes the advertised product in clear, "
-                            "persuasive language and invites the viewer to learn more and "
-                            "take action after seeing this automatically generated ad."
-                        ),
-                    }
-                )
-
-        while len(variants_text) < 3:
-            variants_text.append(
-                {
-                    "headline": "ACE Ad Variant",
-                    "copy": (
-                        "This is a 50-word placeholder marketing paragraph for the ACE "
-                        "Engine demo. It describes the advertised product in clear, "
-                        "persuasive language and invites the viewer to learn more and "
-                        "take action after seeing this automatically generated ad."
-                    ),
-                }
-            )
-        variants_text = variants_text[:3]
-
-        # 3) Combine
-        variants = []
-        for i in range(3):
-            b64 = image_b64_list[i]
-            txt = variants_text[i]
-            headline = txt.get("headline", "").strip()
-            copy = txt.get("copy", "").strip()
-
-            data_uri = f"data:image/jpeg;base64,{b64}"
-            variants.append(
-                {
-                    "image_data": data_uri,
-                    "headline": headline,
-                    "copy": copy,
-                }
-            )
-
-        request_id = str(uuid.uuid4())
-        requests_store[request_id] = {
-            "variants": variants,
-            "images_b64": image_b64_list,
-        }
-
-        # Consume attempt only if sid was supplied and not dev mode
-        if not dev_mode and sid:
-            consume_attempt(sid)
-
-        return jsonify({"request_id": request_id, "variants": variants}), 200
-
+            variants_text = fallback_variants_text()
     except Exception as e:
-        return jsonify({"error": "Internal error during generation", "details": str(e)}), 500
+        # If anything in text generation fails – fall back silently
+        print("Text generation failed, using placeholders:", str(e))
+        variants_text = fallback_variants_text()
+
+    # Normalize to exactly 3 variants
+    while len(variants_text) < 3:
+        variants_text.append(fallback_variants_text()[0])
+    variants_text = variants_text[:3]
+
+    # 3) Combine
+    variants = []
+    for i in range(3):
+        b64 = image_b64_list[i]
+        txt = variants_text[i]
+        headline = txt.get("headline", "").strip()
+        copy = txt.get("copy", "").strip()
+
+        data_uri = f"data:image/jpeg;base64,{b64}"
+        variants.append(
+            {
+                "image_data": data_uri,
+                "headline": headline,
+                "copy": copy,
+            }
+        )
+
+    request_id = str(uuid.uuid4())
+    requests_store[request_id] = {
+        "variants": variants,
+        "images_b64": image_b64_list,
+    }
+
+    if not dev_mode and sid:
+        consume_attempt(sid)
+
+    return jsonify({"request_id": request_id, "variants": variants}), 200
 
 
 @app.route("/download", methods=["GET"])
