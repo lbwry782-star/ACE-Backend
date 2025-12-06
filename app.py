@@ -1,260 +1,291 @@
+
 import os
-import time
-import base64
 import io
-import zipfile
-from uuid import uuid4
+import base64
+import uuid
+from datetime import datetime, timedelta
 
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
+from openai import OpenAI
+from PIL import Image
 
-try:
-    from openai import OpenAI
-except ImportError:
-    OpenAI = None
+# -----------------------------------------------------------------------------
+# Setup
+# -----------------------------------------------------------------------------
 
+client = OpenAI()
 app = Flask(__name__)
 
-frontend_url = os.environ.get("FRONTEND_URL")
-if frontend_url:
-    CORS(app, resources={r"/*": {"origins": [frontend_url]}})
-else:
-    CORS(app)
+FRONTEND_URL = os.getenv("FRONTEND_URL", "*")
+CORS(
+    app,
+    resources={r"/*": {"origins": FRONTEND_URL}},
+    supports_credentials=False,
+)
 
-IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1")
-TEXT_MODEL = os.environ.get("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
+IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
+TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
 
-SESSIONS = {}
-RESULTS = {}
+# Simple in-memory token system
+SESSION_TTL_HOURS = int(os.getenv("SESSION_TTL_HOURS", "48"))
+MAX_ATTEMPTS_PER_SESSION = 1
 
-def get_client():
-    if OpenAI is None:
-        raise RuntimeError("openai package not installed. Add 'openai' to requirements.txt")
-    return OpenAI()
+sessions = {}        # sid -> {attempts_used, expires_at}
+requests_store = {}  # request_id -> data
+
+
+def _cleanup_sessions():
+    """Remove expired sessions from memory."""
+    now = datetime.utcnow()
+    expired = [sid for sid, data in sessions.items() if data["expires_at"] < now]
+    for sid in expired:
+        sessions.pop(sid, None)
+
+
+def ensure_session(sid: str):
+    _cleanup_sessions()
+    if sid not in sessions:
+        sessions[sid] = {
+            "attempts_used": 0,
+            "expires_at": datetime.utcnow() + timedelta(hours=SESSION_TTL_HOURS),
+        }
+    return sessions[sid]
+
+
+def has_attempts_left(sid: str) -> bool:
+    data = ensure_session(sid)
+    return data["attempts_used"] < MAX_ATTEMPTS_PER_SESSION
+
+
+def consume_attempt(sid: str):
+    data = ensure_session(sid)
+    data["attempts_used"] += 1
+
+
+def build_image_prompt(product_text: str) -> str:
+    return (
+        "Create a real photographic advertising image for the following product. "
+        "Use ACE Engine rules: combine two real objects into one hybrid object or "
+        "a side-by-side composition with clear visual logic. The result must look "
+        "like a real photo, with a short headline embedded inside the image.\n\n"
+        f"Product & description: {product_text}\n\n"
+        "Do NOT include the 50-word marketing copy in the image. "
+        "Only embed a short English headline, 3–7 words."
+    )
+
+
+def build_text_prompt(product_text: str) -> str:
+    return (
+        "You are an advertising copywriter. Create 3 distinct ad variations for "
+        "the following product description. For each variation, produce:\n"
+        "1) headline – 3–7 English words\n"
+        "2) copy – exactly 50 English words, no bullet points.\n\n"
+        f"Product & description: {product_text}\n\n"
+        "Respond in strict JSON with this structure:\n"
+        "{\n"
+        "  \"variants\": [\n"
+        "    {\"headline\": \"...\", \"copy\": \"...\"},\n"
+        "    {\"headline\": \"...\", \"copy\": \"...\"},\n"
+        "    {\"headline\": \"...\", \"copy\": \"...\"}\n"
+        "  ]\n"
+        "}"
+    )
+
+
+def pil_image_from_b64(b64_data: str) -> Image.Image:
+    raw = base64.b64decode(b64_data)
+    return Image.open(io.BytesIO(raw)).convert("RGB")
+
+
+# -----------------------------------------------------------------------------
+# Routes
+# -----------------------------------------------------------------------------
 
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"}), 200
+
 
 @app.route("/start-session", methods=["POST"])
 def start_session():
     data = request.get_json(silent=True) or {}
     sid = data.get("sid")
     if not sid:
-        return jsonify({"error": "missing sid"}), 400
+        return jsonify({"error": "Missing sid"}), 400
 
-    session = SESSIONS.get(sid)
-    if session is None:
-        session = {"attempts_left": 1}
-        SESSIONS[sid] = session
+    sess = ensure_session(sid)
+    attempts_left = max(0, MAX_ATTEMPTS_PER_SESSION - sess["attempts_used"])
+    return jsonify({"attempts_left": attempts_left}), 200
 
-    return jsonify({"ok": True, "attempts_left": session["attempts_left"]}), 200
-
-def build_image_prompt(product, description, variant_index):
-    desc = description or ""
-    return (
-        "You are ACE, an Automated Creative Engine for advertising.\n"
-        "Create a single realistic photographic advertisement visual.\n"
-        "Rules:\n"
-        "1) Use exactly TWO physical objects only: object A and object B.\n"
-        "2) No third object of any kind. No decorations, icons, or extra items.\n"
-        "3) The background must be the classic, natural background of either A or B.\n"
-        "4) Prefer strong SHAPE similarity between A and B (bottles, cones, discs, etc.).\n"
-        "5) If shape similarity is very strong, you may overlap A and B like a hybrid object.\n"
-        "   Otherwise place them very close side by side.\n"
-        "6) Composition must be clean, with about 10% margin around objects, no cropping.\n"
-        "7) No text in the image at all. No logo, no headline, no UI.\n"
-        "8) Photographic style only – no illustration, no 3D render.\n"
-        "9) Lighting realistic. No surreal floating objects.\n\n"
-        f"Product: {product}\n"
-        f"Description: {desc}\n"
-        f"Variant #{variant_index}: Choose a distinct pair of objects A and B that metaphorically support this product.\n"
-        "Return only the image; do not add any text in the picture."
-    )
-
-def build_copy_prompt(product, description, variants_count=3):
-    desc = description or ""
-    return (
-        "You are ACE, an AI copywriter for advertising.\n"
-        "Write copy for photographic ads that follow these rules:\n"
-        "- The headline must be in English, 3–7 words.\n"
-        "- The body copy must be exactly 50 words in English.\n"
-        "- The copy should match a visual that uses exactly two physical objects (A and B) "
-        "with strong shape similarity, in a realistic photo, no extra objects.\n"
-        "- The tone is sharp, intelligent and concise.\n\n"
-        f"Product: {product}\n"
-        f"Description: {desc}\n"
-        f"Create {variants_count} distinct options. "
-        "Reply strictly as JSON with the following structure:\n"
-        "{ \"variants\": [\n"
-        "  {\"headline\": \"...\", \"copy\": \"...\"},\n"
-        "  {\"headline\": \"...\", \"copy\": \"...\"},\n"
-        "  {\"headline\": \"...\", \"copy\": \"...\"}\n"
-        "]}"
-    )
 
 @app.route("/generate", methods=["POST"])
 def generate():
-    data = request.get_json(silent=True) or {}
-    product = (data.get("product") or "").strip()
-    description = (data.get("description") or "").strip()
-    size = (data.get("size") or "").strip() or "1024x1024"
-    sid = data.get("sid")
+    body = request.get_json(silent=True) or {}
+    product = (body.get("product") or "").strip()
+    size = (body.get("size") or "1024x1024").strip()
+    sid = body.get("sid")
 
     if not product:
-        return jsonify({"error": "missing product"}), 400
+        return jsonify({"error": "Missing 'product' in request body"}), 400
 
-    dev_mode = (product == "4242")
-
-    valid_sizes = {"1024x1024", "1024x1792", "1792x1024"}
-    if size not in valid_sizes:
-        return jsonify({"error": "invalid size"}), 400
+    # Developer mode 4242 – unlimited tests, bypass token system
+    dev_mode = product == "4242"
 
     if not dev_mode:
         if not sid:
-            return jsonify({"error": "missing sid"}), 400
-        session = SESSIONS.get(sid)
-        if not session or session.get("attempts_left", 0) <= 0:
-            return jsonify({"error": "no_attempts"}), 403
-        session["attempts_left"] = 0
+            return jsonify({"error": "Missing payment session (sid)"}), 400
+        if not has_attempts_left(sid):
+            return jsonify({"error": "No attempts left for this session"}), 403
 
     try:
-        client = get_client()
+        # 1) IMAGES – loop 3 times, no deprecated 'n' parameter
+        image_prompt = build_image_prompt(product)
+        image_b64_list = []
 
-        img_prompt_1 = build_image_prompt(product, description, 1)
-        img_prompt_2 = build_image_prompt(product, description, 2)
-        img_prompt_3 = build_image_prompt(product, description, 3)
-        img_prompt = (
-            "Generate three different options following the same rules, "
-            "each with a distinct A/B object pair. "
-            "Do not add any text in any image.\n\n"
-            f"Option 1:\n{img_prompt_1}\n\n"
-            f"Option 2:\n{img_prompt_2}\n\n"
-            f"Option 3:\n{img_prompt_3}\n"
-        )
+        for _ in range(3):
+            img_resp = client.images.generate(
+                model=IMAGE_MODEL,
+                prompt=image_prompt,
+                size=size,
+                quality="high",
+                response_format="b64_json",
+            )
+            b64 = img_resp.data[0].b64_json
+            image_b64_list.append(b64)
 
-        img_resp = client.images.generate(
-            model=IMAGE_MODEL,
-            prompt=img_prompt,
-            n=3,
-            size=size,
-            response_format="b64_json",
-        )
-
-        images_b64 = [d["b64_json"] for d in img_resp.data]
-
-        copy_prompt = build_copy_prompt(product, description, variants_count=3)
-        txt_resp = client.chat.completions.create(
+        # 2) TEXT – using Responses API
+        text_prompt = build_text_prompt(product)
+        txt_resp = client.responses.create(
             model=TEXT_MODEL,
-            messages=[
-                {"role": "system", "content": "You output only JSON, no explanation."},
-                {"role": "user", "content": copy_prompt},
-            ],
-            temperature=0.7,
+            input=text_prompt,
         )
 
-        raw_text = txt_resp.choices[0].message.content.strip()
-
-        import json as _json
+        raw_text = ""
         try:
-            parsed = _json.loads(raw_text)
+            # New Responses format
+            raw_text = txt_resp.output[0].content[0].text
+        except Exception:
+            try:
+                # Fallback for any older style
+                raw_text = txt_resp.choices[0].message["content"]
+            except Exception:
+                raw_text = ""
+
+        import json
+
+        variants_text = []
+        try:
+            parsed = json.loads(raw_text)
             variants_text = parsed.get("variants", [])
         except Exception:
-            variants_text = []
-            for _ in range(3):
-                variants_text.append({
-                    "headline": product[:30] or "ACE Ad",
+            # Fallback: simple placeholders
+            for i in range(3):
+                variants_text.append(
+                    {
+                        "headline": f"ACE Ad Variant {i+1}",
+                        "copy": (
+                            "This is a 50-word placeholder marketing paragraph for the ACE "
+                            "Engine demo. It describes the advertised product in clear, "
+                            "persuasive language and invites the viewer to learn more and "
+                            "take action after seeing this automatically generated ad."
+                        ),
+                    }
+                )
+
+        while len(variants_text) < 3:
+            variants_text.append(
+                {
+                    "headline": "ACE Ad Variant",
                     "copy": (
-                        "Discover a new way to think about this product. "
-                        "A clean, minimal, object‑driven visual invites the viewer "
-                        "to make the connection. No noise, only clarity, emotion "
-                        "and focus around what matters most for your audience."
-                    )
-                })
+                        "This is a 50-word placeholder marketing paragraph for the ACE "
+                        "Engine demo. It describes the advertised product in clear, "
+                        "persuasive language and invites the viewer to learn more and "
+                        "take action after seeing this automatically generated ad."
+                    ),
+                }
+            )
+        variants_text = variants_text[:3]
 
-        request_id = str(uuid4())
-        variants_payload = []
-        store_variants = []
+        # 3) Combine
+        variants = []
+        for i in range(3):
+            b64 = image_b64_list[i]
+            txt = variants_text[i]
+            headline = txt.get("headline", "").strip()
+            copy = txt.get("copy", "").strip()
 
-        for idx, b64 in enumerate(images_b64[:3]):
-            img_bytes = base64.b64decode(b64)
-            headline = ""
-            copy = ""
-            if idx < len(variants_text):
-                headline = (variants_text[idx].get("headline") or "").strip()
-                copy = (variants_text[idx].get("copy") or "").strip()
+            data_uri = f"data:image/jpeg;base64,{b64}"
+            variants.append(
+                {
+                    "image_data": data_uri,
+                    "headline": headline,
+                    "copy": copy,
+                }
+            )
 
-            data_url = "data:image/png;base64," + b64
-
-            variants_payload.append({
-                "index": idx + 1,
-                "image_data": data_url,
-                "headline": headline,
-                "copy": copy,
-            })
-
-            store_variants.append({
-                "image_bytes": img_bytes,
-                "headline": headline,
-                "copy": copy,
-            })
-
-        RESULTS[request_id] = {
-            "created_at": time.time(),
-            "variants": store_variants,
+        request_id = str(uuid.uuid4())
+        requests_store[request_id] = {
+            "variants": variants,
+            "images_b64": image_b64_list,
         }
 
-        return jsonify({
-            "request_id": request_id,
-            "variants": variants_payload,
-        }), 200
+        if not dev_mode and sid:
+            consume_attempt(sid)
+
+        return jsonify({"request_id": request_id, "variants": variants}), 200
 
     except Exception as e:
-        print("Error in /generate:", e, flush=True)
-        if not dev_mode and sid in SESSIONS:
-            SESSIONS[sid]["attempts_left"] = 1
-        return jsonify({"error": "generation_failed", "details": str(e)}), 500
+        return jsonify({"error": "Internal error during generation", "details": str(e)}), 500
+
 
 @app.route("/download", methods=["GET"])
-def download_variant():
+def download():
     request_id = request.args.get("request_id")
     index_str = request.args.get("index")
 
     if not request_id or not index_str:
-        return jsonify({"error": "missing parameters"}), 400
+        return jsonify({"error": "Missing request_id or index"}), 400
 
     try:
-        idx = int(index_str) - 1
+        index = int(index_str) - 1
     except ValueError:
-        return jsonify({"error": "invalid index"}), 400
+        return jsonify({"error": "Invalid index"}), 400
 
-    record = RESULTS.get(request_id)
-    if not record:
-        return jsonify({"error": "unknown request_id"}), 404
+    stored = requests_store.get(request_id)
+    if not stored:
+        return jsonify({"error": "Unknown request_id"}), 404
 
-    variants = record.get("variants", [])
-    if idx < 0 or idx >= len(variants):
-        return jsonify({"error": "index out of range"}), 400
+    if index < 0 or index >= len(stored["variants"]):
+        return jsonify({"error": "Index out of range"}), 400
 
-    v = variants[idx]
-    image_bytes = v["image_bytes"]
-    headline = v["headline"] or "ACE Ad"
-    copy = v["copy"] or ""
+    variant = stored["variants"][index]
+    image_b64 = stored["images_b64"][index]
 
-    mem_zip = io.BytesIO()
-    with zipfile.ZipFile(mem_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(f"ad_{idx+1}.png", image_bytes)
-        text_content = f"HEADLINE:\\n{headline}\\n\\nCOPY (50 words):\\n{copy}\\n"
-        zf.writestr(f"ad_{idx+1}_copy.txt", text_content)
+    img = pil_image_from_b64(image_b64)
+    img_buf = io.BytesIO()
+    img.save(img_buf, format="JPEG", quality=95)
+    img_bytes = img_buf.getvalue()
 
-    mem_zip.seek(0)
-    filename = f"ace_ad_{idx+1}.zip"
+    text_content = f"{variant.get('headline','').strip()}\n\n{variant.get('copy','').strip()}\n"
+
+    import zipfile
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("ad.jpg", img_bytes)
+        zf.writestr("copy.txt", text_content.encode("utf-8"))
+    zip_buf.seek(0)
+
+    filename = f"ace_ad_{index+1}.zip"
     return send_file(
-        mem_zip,
+        zip_buf,
         mimetype="application/zip",
         as_attachment=True,
         download_name=filename,
     )
 
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.getenv("PORT", "8000"))
+    app.run(host="0.0.0.0", port=port, debug=False)
