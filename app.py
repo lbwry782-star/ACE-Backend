@@ -10,6 +10,10 @@ from flask_cors import CORS
 from openai import OpenAI
 from PIL import Image
 
+# -----------------------------------------------------------------------------
+# Setup
+# -----------------------------------------------------------------------------
+
 client = OpenAI()
 app = Flask(__name__)
 
@@ -26,14 +30,17 @@ TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
 SESSION_TTL_HOURS = int(os.getenv("SESSION_TTL_HOURS", "48"))
 MAX_ATTEMPTS_PER_SESSION = 1
 
-sessions = {}
-requests_store = {}
+sessions = {}        # sid -> {attempts_used, expires_at}
+requests_store = {}  # request_id -> data
+last_request = None  # fallback for download
+
 
 def _cleanup_sessions():
     now = datetime.utcnow()
     expired = [sid for sid, data in sessions.items() if data["expires_at"] < now]
     for sid in expired:
         sessions.pop(sid, None)
+
 
 def ensure_session(sid: str):
     _cleanup_sessions()
@@ -44,32 +51,41 @@ def ensure_session(sid: str):
         }
     return sessions[sid]
 
+
 def has_attempts_left(sid: str) -> bool:
     data = ensure_session(sid)
     return data["attempts_used"] < MAX_ATTEMPTS_PER_SESSION
+
 
 def consume_attempt(sid: str):
     data = ensure_session(sid)
     data["attempts_used"] += 1
 
+
 def build_image_prompt(product_text: str) -> str:
+    """Image prompt WITHOUT the word 'hybrid' and WITHOUT logos."""
     return (
         "Create a real photographic advertising image for the following product. "
-        "Use ACE Engine rules: combine two real objects into one hybrid object or "
-        "a side-by-side composition with clear visual logic. The result must look "
-        "like a real photo, with a short headline embedded inside the image.\n\n"
+        "Use one clear visual scene that expresses the idea of the product and its benefit. "
+        "You may include everyday objects, but do not mention or show any logo, brand mark, "
+        "app interface, watermark, or trademark. The visual should feel like a real photo, "
+        "with realistic lighting and depth.\n\n"
         f"Product & description: {product_text}\n\n"
-        "Do NOT include the 50-word marketing copy in the image. "
-        "Only embed a short English headline, 3–7 words."
+        "Embed a short English headline (3–7 words) inside the image only. "
+        "Do NOT add any other text, labels, buttons, or logos anywhere in the image."
     )
 
+
 def build_text_prompt(product_text: str) -> str:
+    """Text prompt – no mention of 'hybrid', only copy rules."""
     return (
         "You are an advertising copywriter. Create 3 distinct ad variations for "
         "the following product description. For each variation, produce:\n"
         "1) headline – 3–7 English words\n"
         "2) copy – exactly 50 English words, no bullet points.\n\n"
         f"Product & description: {product_text}\n\n"
+        "Do not use brand names, app names, or trademarks. "
+        "Write in neutral, clear English only.\n\n"
         "Respond in strict JSON with this structure:\n"
         "{\n"
         "  \"variants\": [\n"
@@ -80,9 +96,11 @@ def build_text_prompt(product_text: str) -> str:
         "}"
     )
 
+
 def pil_image_from_b64(b64_data: str) -> Image.Image:
     raw = base64.b64decode(b64_data)
     return Image.open(io.BytesIO(raw)).convert("RGB")
+
 
 def fallback_variants_text():
     base_copy = (
@@ -97,9 +115,15 @@ def fallback_variants_text():
         {"headline": "ACE Ad Variant 3", "copy": base_copy},
     ]
 
+
+# -----------------------------------------------------------------------------
+# Routes
+# -----------------------------------------------------------------------------
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"}), 200
+
 
 @app.route("/start-session", methods=["POST"])
 def start_session():
@@ -112,22 +136,27 @@ def start_session():
     attempts_left = max(0, MAX_ATTEMPTS_PER_SESSION - sess["attempts_used"])
     return jsonify({"attempts_left": attempts_left}), 200
 
+
 @app.route("/generate", methods=["POST"])
 def generate():
+    global last_request
+
     body = request.get_json(silent=True) or {}
     product = (body.get("product") or "").strip()
     size = (body.get("size") or "1024x1024").strip()
-    sid = body.get("sid")
+    sid = body.get("sid")  # optional
 
     if not product:
         return jsonify({"error": "Missing 'product' in request body"}), 400
 
     dev_mode = product == "4242"
 
+    # Optional token system: only enforce if sid is provided
     if not dev_mode and sid:
         if not has_attempts_left(sid):
             return jsonify({"error": "No attempts left for this session"}), 403
 
+    # 1) IMAGES
     try:
         image_prompt = build_image_prompt(product)
         image_b64_list = []
@@ -138,11 +167,13 @@ def generate():
                 size=size,
                 quality="high",
             )
+            # New Images API still returns base64 field for compat
             b64 = img_resp.data[0].b64_json
             image_b64_list.append(b64)
     except Exception as e:
         return jsonify({"error": "Image generation failed", "details": str(e)}), 500
 
+    # 2) TEXT (robust)
     try:
         text_prompt = build_text_prompt(product)
         txt_resp = client.responses.create(
@@ -152,6 +183,7 @@ def generate():
 
         raw_text = ""
         try:
+            # New Responses format
             raw_text = txt_resp.output[0].content[0].text
         except Exception:
             try:
@@ -169,16 +201,19 @@ def generate():
         print("Text generation failed, using placeholders:", str(e))
         variants_text = fallback_variants_text()
 
+    # Normalize to exactly 3 variants
     while len(variants_text) < 3:
         variants_text.append(fallback_variants_text()[0])
     variants_text = variants_text[:3]
 
+    # 3) Combine
     variants = []
     for i in range(3):
         b64 = image_b64_list[i]
         txt = variants_text[i]
         headline = txt.get("headline", "").strip()
         copy = txt.get("copy", "").strip()
+
         data_uri = f"data:image/jpeg;base64,{b64}"
         variants.append(
             {
@@ -189,32 +224,44 @@ def generate():
         )
 
     request_id = str(uuid.uuid4())
-    requests_store[request_id] = {
+    stored = {
         "variants": variants,
         "images_b64": image_b64_list,
     }
+    requests_store[request_id] = stored
+    last_request = stored  # fallback
 
     if not dev_mode and sid:
         consume_attempt(sid)
 
     return jsonify({"request_id": request_id, "variants": variants}), 200
 
+
 @app.route("/download", methods=["GET"])
 def download():
+    global last_request
+
     request_id = request.args.get("request_id")
     index_str = request.args.get("index")
 
-    if not request_id or not index_str:
-        return jsonify({"error": "Missing request_id or index"}), 400
+    if not index_str:
+        return jsonify({"error": "Missing index"}), 400
 
     try:
         index = int(index_str) - 1
     except ValueError:
         return jsonify({"error": "Invalid index"}), 400
 
-    stored = requests_store.get(request_id)
-    if not stored:
-        return jsonify({"error": "Unknown request_id"}), 404
+    stored = None
+    if request_id:
+        stored = requests_store.get(request_id)
+
+    # Fallback: if request_id is unknown, use last_request (most recent ads)
+    if stored is None:
+        stored = last_request
+
+    if stored is None:
+        return jsonify({"error": "Unknown request_id and no recent generation found"}), 404
 
     if index < 0 or index >= len(stored["variants"]):
         return jsonify({"error": "Index out of range"}), 400
@@ -230,6 +277,7 @@ def download():
     text_content = f"{variant.get('headline','').strip()}\n\n{variant.get('copy','').strip()}\n"
 
     import zipfile
+
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("ad.jpg", img_bytes)
@@ -243,6 +291,7 @@ def download():
         as_attachment=True,
         download_name=filename,
     )
+
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
