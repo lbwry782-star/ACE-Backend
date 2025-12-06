@@ -1,286 +1,260 @@
 import os
 import time
-import uuid
-import json
+import base64
+import io
+import zipfile
+from uuid import uuid4
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 
 try:
     from openai import OpenAI
 except ImportError:
-    OpenAI = None  # Will fail at runtime if not installed
-
+    OpenAI = None
 
 app = Flask(__name__)
 
-FRONTEND_URL = os.getenv("FRONTEND_URL")
-if FRONTEND_URL:
-    CORS(app, origins=[FRONTEND_URL])
+frontend_url = os.environ.get("FRONTEND_URL")
+if frontend_url:
+    CORS(app, resources={r"/*": {"origins": [frontend_url]}})
 else:
     CORS(app)
 
+IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1")
+TEXT_MODEL = os.environ.get("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
 
 SESSIONS = {}
-SESSION_TTL_SECONDS = 60 * 60  # 1 hour
+RESULTS = {}
 
-
-def cleanup_sessions():
-    now = time.time()
-    to_delete = []
-    for token, data in SESSIONS.items():
-        if now - data.get("created_at", now) > SESSION_TTL_SECONDS:
-            to_delete.append(token)
-    for token in to_delete:
-        SESSIONS.pop(token, None)
-
+def get_client():
+    if OpenAI is None:
+        raise RuntimeError("openai package not installed. Add 'openai' to requirements.txt")
+    return OpenAI()
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"})
-
+    return jsonify({"status": "ok"}), 200
 
 @app.route("/start-session", methods=["POST"])
 def start_session():
-    """Creates a single-use session token (one GENERATE attempt)."""
-    cleanup_sessions()
-    token = str(uuid.uuid4())
-    SESSIONS[token] = {
-        "used": False,
-        "created_at": time.time(),
-    }
-    return jsonify({"session_token": token})
+    data = request.get_json(silent=True) or {}
+    sid = data.get("sid")
+    if not sid:
+        return jsonify({"error": "missing sid"}), 400
 
+    session = SESSIONS.get(sid)
+    if session is None:
+        session = {"attempts_left": 1}
+        SESSIONS[sid] = session
+
+    return jsonify({"ok": True, "attempts_left": session["attempts_left"]}), 200
+
+def build_image_prompt(product, description, variant_index):
+    desc = description or ""
+    return (
+        "You are ACE, an Automated Creative Engine for advertising.\n"
+        "Create a single realistic photographic advertisement visual.\n"
+        "Rules:\n"
+        "1) Use exactly TWO physical objects only: object A and object B.\n"
+        "2) No third object of any kind. No decorations, icons, or extra items.\n"
+        "3) The background must be the classic, natural background of either A or B.\n"
+        "4) Prefer strong SHAPE similarity between A and B (bottles, cones, discs, etc.).\n"
+        "5) If shape similarity is very strong, you may overlap A and B like a hybrid object.\n"
+        "   Otherwise place them very close side by side.\n"
+        "6) Composition must be clean, with about 10% margin around objects, no cropping.\n"
+        "7) No text in the image at all. No logo, no headline, no UI.\n"
+        "8) Photographic style only – no illustration, no 3D render.\n"
+        "9) Lighting realistic. No surreal floating objects.\n\n"
+        f"Product: {product}\n"
+        f"Description: {desc}\n"
+        f"Variant #{variant_index}: Choose a distinct pair of objects A and B that metaphorically support this product.\n"
+        "Return only the image; do not add any text in the picture."
+    )
+
+def build_copy_prompt(product, description, variants_count=3):
+    desc = description or ""
+    return (
+        "You are ACE, an AI copywriter for advertising.\n"
+        "Write copy for photographic ads that follow these rules:\n"
+        "- The headline must be in English, 3–7 words.\n"
+        "- The body copy must be exactly 50 words in English.\n"
+        "- The copy should match a visual that uses exactly two physical objects (A and B) "
+        "with strong shape similarity, in a realistic photo, no extra objects.\n"
+        "- The tone is sharp, intelligent and concise.\n\n"
+        f"Product: {product}\n"
+        f"Description: {desc}\n"
+        f"Create {variants_count} distinct options. "
+        "Reply strictly as JSON with the following structure:\n"
+        "{ \"variants\": [\n"
+        "  {\"headline\": \"...\", \"copy\": \"...\"},\n"
+        "  {\"headline\": \"...\", \"copy\": \"...\"},\n"
+        "  {\"headline\": \"...\", \"copy\": \"...\"}\n"
+        "]}"
+    )
 
 @app.route("/generate", methods=["POST"])
 def generate():
-    cleanup_sessions()
-
     data = request.get_json(silent=True) or {}
-
     product = (data.get("product") or "").strip()
     description = (data.get("description") or "").strip()
-    size = (data.get("size") or "").strip()
-    session_token = (data.get("session_token") or "").strip()
-    dev_mode = bool(data.get("dev_mode"))
-
-    ui_sizes = {"1024x1024", "1024x1792", "1792x1024"}
+    size = (data.get("size") or "").strip() or "1024x1024"
+    sid = data.get("sid")
 
     if not product:
-        return jsonify(
-            {
-                "ok": False,
-                "error": "missing_product",
-                "message": "Missing product name.",
-                "button_enabled": not dev_mode,
-            }
-        ), 400
+        return jsonify({"error": "missing product"}), 400
 
-    if product == "4242":
-        dev_mode = True
+    dev_mode = (product == "4242")
 
-    if size not in ui_sizes:
-        return jsonify(
-            {
-                "ok": False,
-                "error": "invalid_size",
-                "message": "Size must be 1024x1024, 1024x1792, or 1792x1024.",
-                "button_enabled": not dev_mode,
-            }
-        ), 400
+    valid_sizes = {"1024x1024", "1024x1792", "1792x1024"}
+    if size not in valid_sizes:
+        return jsonify({"error": "invalid size"}), 400
 
     if not dev_mode:
-        if not session_token or session_token not in SESSIONS:
-            return jsonify(
-                {
-                    "ok": False,
-                    "error": "invalid_token",
-                    "message": "No valid attempt is available for this session.",
-                    "button_enabled": False,
-                }
-            ), 403
-
-        session_data = SESSIONS[session_token]
-        if session_data.get("used"):
-            return jsonify(
-                {
-                    "ok": False,
-                    "error": "no_attempt_left",
-                    "message": "This session has already used its single attempt.",
-                    "button_enabled": False,
-                }
-            ), 403
-
-        session_data["used"] = True
-
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key or OpenAI is None:
-        return jsonify(
-            {
-                "ok": False,
-                "error": "missing_api_key",
-                "message": "Server is not configured with OPENAI_API_KEY.",
-                "button_enabled": dev_mode,
-            }
-        ), 500
-
-    text_model = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
-    image_model = os.getenv("OPENAI_IMAGE_MODEL") or "gpt-image-1"
-    image_model_lower = image_model.lower()
-
-    # Increase HTTP timeout so Render + OpenAI have time to answer
-    client = OpenAI(api_key=api_key, timeout=120.0)
-
-    # ---------- TEXT (CHAT COMPLETIONS JSON MODE) ----------
-    system_msg = (
-        "You are an ad-creative system for the ACE advertising platform. "
-        "You must respond ONLY with valid JSON matching the requested schema."
-    )
-
-    user_msg = (
-        "Product: " + product + "\n"
-        "Description: " + (description or "N/A") + "\n\n"
-        "Create 3 different short English ad headlines and 3 English marketing texts.\n"
-        "Rules:\n"
-        "- Headlines: 3–7 words, punchy, related to the product and to a clear, simple visual metaphor.\n"
-        "- Each marketing text must be a single paragraph of about 50 words (40–60 words range).\n"
-        "- Do NOT mention AI, ACE, or any engine.\n"
-        "- Do NOT talk about being generated by a system or model.\n\n"
-        "Return the result as STRICT JSON with this schema (and nothing else):\n"
-        "{\n"
-        "  \"variants\": [\n"
-        "    {\"headline\": \"...\", \"body\": \"...\"},\n"
-        "    {\"headline\": \"...\", \"body\": \"...\"},\n"
-        "    {\"headline\": \"...\", \"body\": \"...\"}\n"
-        "  ]\n"
-        "}\n"
-    )
+        if not sid:
+            return jsonify({"error": "missing sid"}), 400
+        session = SESSIONS.get(sid)
+        if not session or session.get("attempts_left", 0) <= 0:
+            return jsonify({"error": "no_attempts"}), 403
+        session["attempts_left"] = 0
 
     try:
-        completion = client.chat.completions.create(
-            model=text_model,
-            response_format={"type": "json_object"},
+        client = get_client()
+
+        img_prompt_1 = build_image_prompt(product, description, 1)
+        img_prompt_2 = build_image_prompt(product, description, 2)
+        img_prompt_3 = build_image_prompt(product, description, 3)
+        img_prompt = (
+            "Generate three different options following the same rules, "
+            "each with a distinct A/B object pair. "
+            "Do not add any text in any image.\n\n"
+            f"Option 1:\n{img_prompt_1}\n\n"
+            f"Option 2:\n{img_prompt_2}\n\n"
+            f"Option 3:\n{img_prompt_3}\n"
+        )
+
+        img_resp = client.images.generate(
+            model=IMAGE_MODEL,
+            prompt=img_prompt,
+            n=3,
+            size=size,
+            response_format="b64_json",
+        )
+
+        images_b64 = [d["b64_json"] for d in img_resp.data]
+
+        copy_prompt = build_copy_prompt(product, description, variants_count=3)
+        txt_resp = client.chat.completions.create(
+            model=TEXT_MODEL,
             messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg},
+                {"role": "system", "content": "You output only JSON, no explanation."},
+                {"role": "user", "content": copy_prompt},
             ],
+            temperature=0.7,
         )
 
-        content = completion.choices[0].message.content
-        text_json = json.loads(content)
-        variants = text_json.get("variants", [])
-        if len(variants) != 3:
-            raise ValueError("Unexpected JSON from text model (need exactly 3 variants).")
+        raw_text = txt_resp.choices[0].message.content.strip()
+
+        import json as _json
+        try:
+            parsed = _json.loads(raw_text)
+            variants_text = parsed.get("variants", [])
+        except Exception:
+            variants_text = []
+            for _ in range(3):
+                variants_text.append({
+                    "headline": product[:30] or "ACE Ad",
+                    "copy": (
+                        "Discover a new way to think about this product. "
+                        "A clean, minimal, object‑driven visual invites the viewer "
+                        "to make the connection. No noise, only clarity, emotion "
+                        "and focus around what matters most for your audience."
+                    )
+                })
+
+        request_id = str(uuid4())
+        variants_payload = []
+        store_variants = []
+
+        for idx, b64 in enumerate(images_b64[:3]):
+            img_bytes = base64.b64decode(b64)
+            headline = ""
+            copy = ""
+            if idx < len(variants_text):
+                headline = (variants_text[idx].get("headline") or "").strip()
+                copy = (variants_text[idx].get("copy") or "").strip()
+
+            data_url = "data:image/png;base64," + b64
+
+            variants_payload.append({
+                "index": idx + 1,
+                "image_data": data_url,
+                "headline": headline,
+                "copy": copy,
+            })
+
+            store_variants.append({
+                "image_bytes": img_bytes,
+                "headline": headline,
+                "copy": copy,
+            })
+
+        RESULTS[request_id] = {
+            "created_at": time.time(),
+            "variants": store_variants,
+        }
+
+        return jsonify({
+            "request_id": request_id,
+            "variants": variants_payload,
+        }), 200
 
     except Exception as e:
-        return jsonify(
-            {
-                "ok": False,
-                "error": "text_generation_error",
-                "message": "Failed to create headlines and copy.",
-                "details": str(e),
-                "button_enabled": dev_mode,
-            }
-        ), 500
+        print("Error in /generate:", e, flush=True)
+        if not dev_mode and sid in SESSIONS:
+            SESSIONS[sid]["attempts_left"] = 1
+        return jsonify({"error": "generation_failed", "details": str(e)}), 500
 
-    # ---------- IMAGE GENERATION ----------
+@app.route("/download", methods=["GET"])
+def download_variant():
+    request_id = request.args.get("request_id")
+    index_str = request.args.get("index")
 
-    def map_size_for_model(ui_size: str) -> str:
-        if "gpt-image-1" in image_model_lower:
-            if ui_size == "1024x1024":
-                return "1024x1024"
-            if ui_size == "1024x1792":
-                return "1024x1536"
-            if ui_size == "1792x1024":
-                return "1536x1024"
-            return "1024x1024"
-        if "dall-e-3" in image_model_lower:
-            if ui_size in {"1024x1024", "1024x1792", "1792x1024"}:
-                return ui_size
-            return "1024x1024"
-        return "1024x1024"
+    if not request_id or not index_str:
+        return jsonify({"error": "missing parameters"}), 400
 
-    openai_size = map_size_for_model(size)
-
-    # Build one combined prompt for 3 variations to reduce latency
-    headlines_list = [ (v.get("headline") or "").strip() for v in variants ]
-    headlines_text = "; ".join(h for h in headlines_list if h)
-
-    base_prompt = (
-        "Ultra realistic advertising photos for the product '" + product + "'.\n"
-        "Create 3 different ad variations. In each image, use exactly two physical objects only.\n"
-        "Show them either merged as one clear, dominant form or tightly side by side "
-        "to emphasize a strong similarity in shape.\n"
-        "The background in every image must be the classic, natural environment of one of the objects.\n"
-        "Avoid extra decorative items. Only those two objects are visible.\n"
-        "If any text appears in an image, it must be at most one short English headline, "
-        "and no other words or slogans.\n"
-        "Leave comfortable empty space around the main objects so a headline could exist "
-        "without touching the frame edges.\n"
-    )
-
-    if headlines_text:
-        base_prompt += (
-            "Take creative inspiration from these headlines: " + headlines_text + ". "
-            "Each of the 3 generated images should feel like a different interpretation of these ideas.\n"
-        )
-
-    image_urls = []
     try:
-        kwargs = {
-            "model": image_model,
-            "prompt": base_prompt,
-            "n": 3,
-            "size": openai_size,
-        }
-        if "dall-e-3" in image_model_lower:
-            kwargs["response_format"] = "url"
+        idx = int(index_str) - 1
+    except ValueError:
+        return jsonify({"error": "invalid index"}), 400
 
-        img_response = client.images.generate(**kwargs)
+    record = RESULTS.get(request_id)
+    if not record:
+        return jsonify({"error": "unknown request_id"}), 404
 
-        for img_obj in img_response.data:
-            url = getattr(img_obj, "url", None)
-            if not url:
-                b64 = getattr(img_obj, "b64_json", None)
-                if b64:
-                    url = "data:image/png;base64," + b64
-                else:
-                    raise ValueError("Image response missing both url and b64_json.")
-            image_urls.append(url)
+    variants = record.get("variants", [])
+    if idx < 0 or idx >= len(variants):
+        return jsonify({"error": "index out of range"}), 400
 
-        if len(image_urls) != 3:
-            raise ValueError("Expected exactly 3 images from the image model.")
+    v = variants[idx]
+    image_bytes = v["image_bytes"]
+    headline = v["headline"] or "ACE Ad"
+    copy = v["copy"] or ""
 
-    except Exception as e:
-        return jsonify(
-            {
-                "ok": False,
-                "error": "image_generation_error",
-                "message": "Failed to create images.",
-                "details": str(e),
-                "button_enabled": dev_mode,
-            }
-        ), 500
+    mem_zip = io.BytesIO()
+    with zipfile.ZipFile(mem_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"ad_{idx+1}.png", image_bytes)
+        text_content = f"HEADLINE:\\n{headline}\\n\\nCOPY (50 words):\\n{copy}\\n"
+        zf.writestr(f"ad_{idx+1}_copy.txt", text_content)
 
-    packaged_variants = []
-    for idx, variant in enumerate(variants):
-        packaged_variants.append(
-            {
-                "headline": (variant.get("headline") or "").strip(),
-                "body": (variant.get("body") or "").strip(),
-                "image_url": image_urls[idx] if idx < len(image_urls) else None,
-            }
-        )
-
-    return jsonify(
-        {
-            "ok": True,
-            "dev_mode": dev_mode,
-            "variants": packaged_variants,
-            "button_enabled": dev_mode,
-        }
+    mem_zip.seek(0)
+    filename = f"ace_ad_{idx+1}.zip"
+    return send_file(
+        mem_zip,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=filename,
     )
-
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
