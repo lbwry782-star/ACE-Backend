@@ -57,7 +57,7 @@ def generate():
 
     try:
         # Step 1: Ask text model to plan 3 ads (headline + copy + image_prompt)
-        planning_prompt = f\"\"\"You are the ACE advertising engine.
+        planning_prompt = f"""You are the ACE advertising engine.
 
 Based on the following product and description:
 - Infer the target audience (age, lifestyle, key needs).
@@ -73,30 +73,30 @@ Product: {product}
 Description: {description}
 
 Return a JSON object with this structure:
-{{
+{
   "ads": [
-    {{
+    {
       "headline": "...",
       "copy": "...",
       "image_prompt": "..."
-    }},
-    {{
+    },
+    {
       "headline": "...",
       "copy": "...",
       "image_prompt": "..."
-    }},
-    {{
+    },
+    {
       "headline": "...",
       "copy": "...",
       "image_prompt": "..."
-    }}
+    }
   ]
-}}
+}
 
 Rules:
 - copy must be exactly 50 words for each ad.
 - Headlines and copy must be in English only.
-\"\"\"
+"""
 
         completion = client.chat.completions.create(
             model=TEXT_MODEL,
