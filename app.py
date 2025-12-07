@@ -2,7 +2,7 @@ import os
 import json
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from openai import OpenAI
+import openai
 
 app = Flask(__name__)
 
@@ -13,13 +13,13 @@ if frontend_url:
 else:
     CORS(app)
 
-# OpenAI client & models, with extended timeout
+# OpenAI legacy client with explicit timeout
 api_key = os.environ.get("OPENAI_API_KEY")
 if not api_key:
-    client = None
+    openai.api_key = None
 else:
-    # 120 seconds timeout for slow generations
-    client = OpenAI(api_key=api_key, timeout=120)
+    openai.api_key = api_key
+    openai.timeout = 120  # seconds
 
 TEXT_MODEL = os.environ.get("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
 IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1")
@@ -34,7 +34,7 @@ def health():
 
 @app.route("/generate", methods=["POST"])
 def generate():
-    if not client:
+    if openai.api_key is None:
         return jsonify({"error": "OPENAI_API_KEY missing on server"}), 500
 
     data = request.get_json(silent=True) or {}
@@ -56,7 +56,7 @@ def generate():
         return jsonify({"error": f"Unsupported size '{size}'"}), 400
 
     try:
-        # Step 1: Ask text model to plan 3 ads (headline + copy + image_prompt)
+        # ---- STEP 1: text planning ----
         planning_prompt = (
             "You are the ACE advertising engine.\n\n"
             "Based on the following product and description:\n"
@@ -72,21 +72,21 @@ def generate():
             f"Description: {description}\n\n"
             "Return a JSON object with this structure:\n"
             "{\n"
-            '  "ads": [\n'
+            '  \"ads\": [\n'
             "    {\n"
-            '      "headline": "...",\n'
-            '      "copy": "...",\n'
-            '      "image_prompt": "..."\n'
+            '      \"headline\": \"...\",\n'
+            '      \"copy\": \"...\",\n'
+            '      \"image_prompt\": \"...\"\n'
             "    },\n"
             "    {\n"
-            '      "headline": "...",\n'
-            '      "copy": "...",\n'
-            '      "image_prompt": "..."\n'
+            '      \"headline\": \"...\",\n'
+            '      \"copy\": \"...\",\n'
+            '      \"image_prompt\": \"...\"\n'
             "    },\n"
             "    {\n"
-            '      "headline": "...",\n'
-            '      "copy": "...",\n'
-            '      "image_prompt": "..."\n'
+            '      \"headline\": \"...\",\n'
+            '      \"copy\": \"...\",\n'
+            '      \"image_prompt\": \"...\"\n'
             "    }\n"
             "  ]\n"
             "}\n\n"
@@ -95,25 +95,46 @@ def generate():
             "- Headlines and copy must be in English only.\n"
         )
 
-        completion = client.chat.completions.create(
+        chat_resp = openai.ChatCompletion.create(
             model=TEXT_MODEL,
             messages=[{"role": "user", "content": planning_prompt}],
-            response_format={"type": "json_object"},
+            temperature=0.7,
         )
 
-        content = completion.choices[0].message.content
-        plan = json.loads(content)
+        content = chat_resp["choices"][0]["message"]["content"]
+        # Try to locate JSON in the response
+        start = content.find("{")
+        end = content.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            json_str = content[start : end + 1]
+        else:
+            json_str = content
+
+        try:
+            plan = json.loads(json_str)
+        except Exception:
+            # Fallback: simple structure if parsing fails
+            plan = {
+                "ads": [
+                    {"headline": product, "copy": description, "image_prompt": ""},
+                    {"headline": product, "copy": description, "image_prompt": ""},
+                    {"headline": product, "copy": description, "image_prompt": ""},
+                ]
+            }
+
         ads_plan = plan.get("ads") or []
 
-        # Guarantee we have 3 logical slots
+        # Guarantee we have 3 slots
         while len(ads_plan) < 3:
-            ads_plan.append({
-                "headline": product,
-                "copy": description,
-                "image_prompt": ""
-            })
+            ads_plan.append(
+                {
+                    "headline": product,
+                    "copy": description,
+                    "image_prompt": "",
+                }
+            )
 
-        # Use the first ad's image_prompt (or a generic one) and ask for n=3 variations
+        # ---- STEP 2: image generation (n=3) ----
         first_prompt = (ads_plan[0].get("image_prompt") or "").strip()
         if not first_prompt:
             first_prompt = (
@@ -122,14 +143,15 @@ def generate():
                 "no text inside the image, realistic lighting."
             )
 
-        img_resp = client.images.generate(
+        img_resp = openai.Image.create(
             model=IMAGE_MODEL,
             prompt=first_prompt,
             size=size,
             n=3,
+            response_format="b64_json",
         )
 
-        images_data = img_resp.data
+        images_data = img_resp["data"]
         if len(images_data) < 3:
             images_data = (images_data * 3)[:3]
 
@@ -141,9 +163,7 @@ def generate():
             headline = (ad_plan.get("headline") or "").strip() or product
             copy_text = (ad_plan.get("copy") or "").strip() or description
 
-            # Prefer base64; fall back to url if ever provided
-            b64_data = getattr(img_item, "b64_json", None)
-            url = getattr(img_item, "url", None)
+            b64_data = img_item.get("b64_json")
 
             ad_payload = {
                 "headline": headline,
@@ -151,10 +171,6 @@ def generate():
             }
             if b64_data:
                 ad_payload["image_base64"] = b64_data
-            elif url:
-                ad_payload["image_url"] = url
-            else:
-                continue
 
             ads_out.append(ad_payload)
 
@@ -165,6 +181,7 @@ def generate():
 
     except Exception as e:
         import traceback
+
         traceback.print_exc()
         return jsonify({"error": "Internal generation error", "details": str(e)}), 500
 
