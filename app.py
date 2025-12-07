@@ -1,235 +1,163 @@
 import os
+import json
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
 
 app = Flask(__name__)
+CORS(app)
 
-# CORS — allow your frontend domain
-frontend_url = os.environ.get("FRONTEND_URL")
-if frontend_url:
-    CORS(app, resources={r"/*": {"origins": [frontend_url]}})
-else:
-    CORS(app)
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-api_key = os.environ.get("OPENAI_API_KEY")
-client = OpenAI(api_key=api_key) if api_key else None
-
-IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1")
-ALLOWED_SIZES = {"1024x1024", "1024x1536", "1536x1024"}
-
-
-def build_copy_50_words(product, description, angle):
-    """Deterministic 50-word marketing text."""
-    base = (
-        f"{product} is an automated creative advertising engine for ambitious brands. "
-        f"{description} "
-        f"This ad focuses on {angle} to help you stand out, attract the right audience and turn attention into action. "
-        f"Use it to launch campaigns, test angles and consistently ship fresh visuals across your favorite social platforms."
-    )
-    words = base.strip().split()
-    if len(words) < 50:
-        # repeat description if too short
-        extra = (description + " ") * 10
-        words = (base + " " + extra).strip().split()
-    return " ".join(words[:50])
-
-
-def infer_audience(product, description):
-    text = f"{product} {description}".lower()
-    lifestyle = "digital-first professionals"
-    tone = "confident"
-    if any(k in text for k in ["student", "exam", "learning", "school"]):
-        lifestyle = "busy students preparing for exams"
-        tone = "supportive"
-    if any(k in text for k in ["agency", "marketing", "brand", "campaign"]):
-        lifestyle = "marketing teams and creative freelancers"
-        tone = "bold"
-    return {
-        "age_range": "22-45",
-        "lifestyle": lifestyle,
-        "needs": [
-            "faster ad production",
-            "original visual concepts",
-            "better campaign performance",
-        ],
-        "familiarity": "medium",
-        "tone_preference": tone,
-    }
-
-
-def build_objects_for_target(target):
-    base_objects = [
-        "lightbulb", "keyboard", "camera", "hourglass", "chess king",
-        "gear", "stopwatch", "notebook", "coffee cup", "city billboard",
-        "studio spotlight", "smartphone", "microphone", "road sign", "bridge",
-        "forest path", "window", "elevator button", "clock", "dice",
-    ]
-    # simple expansion to 80
-    objs = []
-    i = 0
-    while len(objs) < 80:
-        name = base_objects[i % len(base_objects)]
-        objs.append(f"{target.lower()} object {len(objs)+1} — {name}")
-        i += 1
-    return objs
-
-
-def pick_A_B(target):
-    if target == "Awareness":
-        return "lightbulb", "keyboard"
-    if target == "Benefit":
-        return "engine gear", "stopwatch"
-    if target == "Emotion":
-        return "hourglass", "chess king"
-    return "object A", "object B"
-
-
-def visual_mode_for_pair(A, B):
-    # simple rule: if words share length and first letter → swap, else placement
-    if A[0].lower() == B[0].lower() and len(A.split()[0]) == len(B.split()[0]):
-        return "swap"
-    return "placement"
-
-
-def build_image_prompt(product, description, target, A, B, mode):
-    base = (
-        f"A realistic advertising photograph in a real studio for '{product}'. "
-        f"The ad is about {target.lower()} and uses a {A} and a {B} as the main visual elements. "
-    )
-    if mode == "swap":
-        relation = (
-            f"The shapes of the {A} and the {B} visually fuse into one believable hybrid object, "
-            f"shot from a single clear angle."
-        )
-    else:
-        relation = (
-            f"The {A} and the {B} are placed very close together, forming one balanced scene without overlapping shapes."
-        )
-    tail = (
-        " Soft, consistent studio lighting, shallow depth of field, no logos, "
-        "no written text inside the image, no extra objects, no unrealistic floating, "
-        "photorealistic commercial quality photograph."
-    )
-    return base + relation + tail
-
-
-def run_engine(product, description):
-    audience = infer_audience(product, description)
-
-    targets = ["Awareness", "Benefit", "Emotion"]
-    angles = ["awareness and discovery", "benefits and value", "emotion and urgency"]
-    ads = []
-
-    for target, angle in zip(targets, angles):
-        objects_list = build_objects_for_target(target)
-        A, B = pick_A_B(target)
-        mode = visual_mode_for_pair(A, B)
-        headline = {
-            "Awareness": "See What ACE Can Do",
-            "Benefit": "Smarter Ads In Seconds",
-            "Emotion": "Win Attention Before They Do",
-        }.get(target, f"ACE for {product}"[:40])
-        copy_text = build_copy_50_words(product, description, angle)
-        prompt = build_image_prompt(product, description, target, A, B, mode)
-        ads.append(
-            {
-                "target": target,
-                "objects": {"A": A, "B": B, "list": objects_list},
-                "visual_mode": mode,
-                "headline": headline,
-                "copy": copy_text,
-                "image_prompt": prompt,
-            }
-        )
-
-    return {"audience": audience, "ads": ads}
+# In-memory override mode flag (strongest state)
+OVERRIDE_ACTIVE = False
 
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"}), 200
+    return jsonify({"status": "ok"})
 
 
-@app.route("/engine", methods=["POST"])
-def engine_endpoint():
-    data = request.get_json(silent=True) or {}
-    product = (data.get("product") or "").strip()
-    description = (data.get("description") or "").strip()
+def build_engine_prompt(product: str, description: str) -> str:
+    """Summarize the ENGINE document into a single instruction prompt."""
+    return f"""You are the ACE Engine.
+Product: {product}
+Description: {description}
 
-    if not product:
-        return jsonify({"error": "Missing 'product' in request body"}), 400
-    if not description:
-        return jsonify({"error": "Missing 'description' in request body"}), 400
+Follow these rules:
+1. Infer a realistic target audience (age, lifestyle, preferences, pains, needs, familiarity level).
+2. Define 3 distinct advertising goals (3 separate ads). Example only: Awareness, Value/Benefit, Emotion/Urgency.
+3. For each goal, internally consider ~80 concrete, physical objects (no abstract concepts, no feelings).
+4. For each ad, choose a pair of objects A (central) and B (associative) and design one strong visual concept:
+   - A and B exist in real physical space, with one consistent realistic background.
+   - Use either:
+     • Shape-Swap (high shape similarity, creating a fused hybrid object), or
+     • Placement (low/medium similarity, two separate objects placed in a meaningful relationship).
+   - Never break physical reality: no impossible shadows, no unnatural floating, no third object, no mutilation.
+5. Your output must be valid JSON with this structure:
+{{
+  "ads": [
+    {{
+      "headline": "Short headline, up to 6–8 words",
+      "copy": "Exactly 50 words of persuasive ad copy.",
+      "image_prompt": "Detailed, concrete visual instructions for the image model that implement the ACE rules above, including A and B, background and lighting."
+    }},
+    {{
+      "headline": "...",
+      "copy": "... (50 words)",
+      "image_prompt": "..."
+    }},
+    {{
+      "headline": "...",
+      "copy": "... (50 words)",
+      "image_prompt": "..."
+    }}
+  ]
+}}
 
-    engine_data = run_engine(product, description)
-    return jsonify(engine_data), 200
+Return JSON only, with no extra text at all.
+"""
+
+
+def generate_ads(product: str, description: str, size: str):
+    text_model = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
+    image_model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
+
+    prompt = build_engine_prompt(product, description)
+
+    # 1) Ask the text model for 3 ads (headline + copy + image prompts)
+    chat = client.chat.completions.create(
+        model=text_model,
+        messages=[
+            {"role": "system", "content": "You are a precise JSON generator."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.7,
+    )
+
+    raw_text = chat.choices[0].message.content
+    try:
+        data = json.loads(raw_text)
+    except Exception:
+        # Try to extract JSON if the model wrapped it in backticks or extra text
+        try:
+            start = raw_text.index("{")
+            end = raw_text.rindex("}") + 1
+            data = json.loads(raw_text[start:end])
+        except Exception as e:
+            raise RuntimeError(f"Failed to parse JSON from model: {e}")
+
+    ads = data.get("ads") or []
+    if len(ads) != 3:
+        raise RuntimeError("Model did not return exactly 3 ads.")
+
+    results = []
+    for ad in ads:
+        img_prompt = ad.get("image_prompt") or ""
+        if not img_prompt:
+            raise RuntimeError("Missing image_prompt for one of the ads.")
+
+        image_resp = client.images.generate(
+            model=image_model,
+            prompt=img_prompt,
+            size=size,
+            n=1,
+        )
+        b64 = image_resp.data[0].b64_json
+
+        results.append(
+            {
+                "headline": ad.get("headline", ""),
+                "copy": ad.get("copy", ""),
+                "image_base64": b64,
+            }
+        )
+
+    return results
 
 
 @app.route("/generate", methods=["POST"])
 def generate():
-    if client is None:
-        return jsonify({"error": "OPENAI_API_KEY missing on server"}), 500
+    global OVERRIDE_ACTIVE
 
-    data = request.get_json(silent=True) or {}
-
-    token = data.get("token", None)
-    if not token:
-        return jsonify({"error": "Token missing or false. Generation is not allowed."}), 403
-
+    data = request.get_json(force=True, silent=False) or {}
     product = (data.get("product") or "").strip()
     description = (data.get("description") or "").strip()
-    size = (data.get("size") or "").strip() or "1024x1024"
+    size = (data.get("size") or "1024x1024").strip()
+    token_flag = bool(data.get("token"))
+    override_flag = bool(data.get("override"))
 
     if not product:
         return jsonify({"error": "Missing 'product' in request body"}), 400
-    if not description:
-        return jsonify({"error": "Missing 'description' in request body"}), 400
-    if size not in ALLOWED_SIZES:
-        return jsonify({"error": f"Unsupported size '{size}'"}), 400
+
+    if size not in ("1024x1024", "1536x1024", "1024x1536"):
+        return jsonify({"error": "Unsupported size"}), 400
+
+    # 1) Handle 4242 override activation (does NOT create an ad)
+    if product == "4242":
+        OVERRIDE_ACTIVE = True
+        return jsonify({"status": "override_activated"}), 200
+
+    # 2) Consolidate override state: strongest state in the system
+    if override_flag:
+        OVERRIDE_ACTIVE = True
+
+    if OVERRIDE_ACTIVE:
+        mode = "override"
+    elif token_flag:
+        mode = "token"
+    else:
+        # No valid token / override → block creation
+        return jsonify({"error": "Generation not allowed. No valid token or override."}), 403
 
     try:
-        engine_data = run_engine(product, description)
-        ads_plan = engine_data.get("ads") or []
-        if len(ads_plan) < 3:
-            ads_plan = (ads_plan * 3)[:3]
-
-        first_prompt = ads_plan[0]["image_prompt"]
-
-        img_resp = client.images.generate(
-            model=IMAGE_MODEL,
-            prompt=first_prompt,
-            size=size,
-            n=3,
-        )
-
-        images = img_resp.data
-        if len(images) < 3:
-            images = (images * 3)[:3]
-
-        ads_out = []
-        for idx in range(3):
-            ad_plan = ads_plan[idx]
-            img_item = images[idx]
-            b64_data = getattr(img_item, "b64_json", None)
-
-            ad_payload = {
-                "headline": ad_plan["headline"],
-                "copy": ad_plan["copy"],
-            }
-            if b64_data:
-                ad_payload["image_base64"] = b64_data
-
-            ads_out.append(ad_payload)
-
-        return jsonify({"ads": ads_out, "size_used": size}), 200
-
+        ads = generate_ads(product, description, size)
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": "Internal generation error", "details": str(e)}), 500
+        return jsonify({"error": f"Generation failed: {e}"}), 500
+
+    return jsonify({"mode": mode, "ads": ads})
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "10000"))
+    port = int(os.environ.get("PORT", "8000"))
     app.run(host="0.0.0.0", port=port)
