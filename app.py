@@ -6,20 +6,25 @@ from openai import OpenAI
 
 app = Flask(__name__)
 
+# CORS — allow your domain; fallback * if not set
 frontend_url = os.environ.get("FRONTEND_URL")
 if frontend_url:
     CORS(app, resources={r"/*": {"origins": [frontend_url]}})
 else:
     CORS(app)
 
+# OpenAI client & models, with extended timeout
 api_key = os.environ.get("OPENAI_API_KEY")
 if not api_key:
     client = None
 else:
-    client = OpenAI(api_key=api_key)
+    # 120 seconds timeout for slow generations
+    client = OpenAI(api_key=api_key, timeout=120)
 
 TEXT_MODEL = os.environ.get("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
 IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1")
+
+ALLOWED_SIZES = {"1024x1024", "1024x1536", "1536x1024"}
 
 
 @app.route("/health", methods=["GET"])
@@ -34,6 +39,7 @@ def generate():
 
     data = request.get_json(silent=True) or {}
 
+    # Token enforcement
     token = data.get("token", None)
     if not token:
         return jsonify({"error": "Token missing or false. Generation is not allowed."}), 403
@@ -46,14 +52,12 @@ def generate():
         return jsonify({"error": "Missing 'product' in request body"}), 400
     if not description:
         return jsonify({"error": "Missing 'description' in request body"}), 400
-
-    # Only accept true OpenAI sizes
-    allowed_sizes = {"1024x1024", "1024x1536", "1536x1024"}
-    if size not in allowed_sizes:
+    if size not in ALLOWED_SIZES:
         return jsonify({"error": f"Unsupported size '{size}'"}), 400
 
     try:
-        planning_prompt = f"""You are the ACE advertising engine.
+        # Step 1: Ask text model to plan 3 ads (headline + copy + image_prompt)
+        planning_prompt = f\"\"\"You are the ACE advertising engine.
 
 Based on the following product and description:
 - Infer the target audience (age, lifestyle, key needs).
@@ -63,7 +67,7 @@ Based on the following product and description:
   * copy: exactly 50 English words of persuasive marketing text
   * image_prompt: detailed English prompt for a realistic photographic advertising image
     following the ACE Engine concept (two real objects combined or placed together,
-    no logos, no text in the image).
+    no logos, no text inside the image).
 
 Product: {product}
 Description: {description}
@@ -92,7 +96,7 @@ Return a JSON object with this structure:
 Rules:
 - copy must be exactly 50 words for each ad.
 - Headlines and copy must be in English only.
-"""
+\"\"\"
 
         completion = client.chat.completions.create(
             model=TEXT_MODEL,
@@ -104,36 +108,61 @@ Rules:
         plan = json.loads(content)
         ads_plan = plan.get("ads") or []
 
-        ads_out = []
-
-        for ad in ads_plan[:3]:
-            headline = (ad.get("headline") or "").strip()
-            copy_text = (ad.get("copy") or "").strip()
-            img_prompt = (ad.get("image_prompt") or "").strip()
-
-            if not img_prompt:
-                img_prompt = (
-                    f"High-quality photographic advertising image for {product}. "
-                    "No logos, no text in the image, realistic lighting."
-                )
-
-            img_resp = client.images.generate(
-                model=IMAGE_MODEL,
-                prompt=img_prompt,
-                size=size,
-                n=1
-            )
-
-            b64_data = img_resp.data[0].b64_json
-
-            ads_out.append({
-                "headline": headline,
-                "copy": copy_text,
-                "image_base64": b64_data,
+        # Guarantee we have 3 logical slots
+        while len(ads_plan) < 3:
+            ads_plan.append({
+                "headline": product,
+                "copy": description,
+                "image_prompt": ""
             })
 
+        # Use the first ad's image_prompt (or a generic one) and ask for n=3 variations
+        first_prompt = (ads_plan[0].get("image_prompt") or "").strip()
+        if not first_prompt:
+            first_prompt = (
+                f"High-quality photographic advertising image for {product}. "
+                "Two real objects combined or placed side by side, no logos, "
+                "no text inside the image, realistic lighting."
+            )
+
+        img_resp = client.images.generate(
+            model=IMAGE_MODEL,
+            prompt=first_prompt,
+            size=size,
+            n=3,
+        )
+
+        images_data = img_resp.data
+        if len(images_data) < 3:
+            images_data = (images_data * 3)[:3]
+
+        ads_out = []
+        for idx in range(3):
+            ad_plan = ads_plan[idx]
+            img_item = images_data[idx]
+
+            headline = (ad_plan.get("headline") or "").strip() or product
+            copy_text = (ad_plan.get("copy") or "").strip() or description
+
+            # Prefer base64; fall back to url if ever provided
+            b64_data = getattr(img_item, "b64_json", None)
+            url = getattr(img_item, "url", None)
+
+            ad_payload = {
+                "headline": headline,
+                "copy": copy_text,
+            }
+            if b64_data:
+                ad_payload["image_base64"] = b64_data
+            elif url:
+                ad_payload["image_url"] = url
+            else:
+                continue
+
+            ads_out.append(ad_payload)
+
         if len(ads_out) == 0:
-            return jsonify({"error": "No ads generated from text model"}), 500
+            return jsonify({"error": "No ads generated from image model"}), 500
 
         return jsonify({"ads": ads_out, "size_used": size}), 200
 
