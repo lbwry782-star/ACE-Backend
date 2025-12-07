@@ -57,46 +57,43 @@ def generate():
 
     try:
         # Step 1: Ask text model to plan 3 ads (headline + copy + image_prompt)
-        planning_prompt = f"""You are the ACE advertising engine.
-
-Based on the following product and description:
-- Infer the target audience (age, lifestyle, key needs).
-- Define 3 distinct advertising objectives for 3 different ads.
-- For each ad, create:
-  * headline: short English headline, 3–7 words
-  * copy: exactly 50 English words of persuasive marketing text
-  * image_prompt: detailed English prompt for a realistic photographic advertising image
-    following the ACE Engine concept (two real objects combined or placed together,
-    no logos, no text inside the image).
-
-Product: {product}
-Description: {description}
-
-Return a JSON object with this structure:
-{
-  "ads": [
-    {
-      "headline": "...",
-      "copy": "...",
-      "image_prompt": "..."
-    },
-    {
-      "headline": "...",
-      "copy": "...",
-      "image_prompt": "..."
-    },
-    {
-      "headline": "...",
-      "copy": "...",
-      "image_prompt": "..."
-    }
-  ]
-}
-
-Rules:
-- copy must be exactly 50 words for each ad.
-- Headlines and copy must be in English only.
-"""
+        planning_prompt = (
+            "You are the ACE advertising engine.\n\n"
+            "Based on the following product and description:\n"
+            "- Infer the target audience (age, lifestyle, key needs).\n"
+            "- Define 3 distinct advertising objectives for 3 different ads.\n"
+            "- For each ad, create:\n"
+            "  * headline: short English headline, 3–7 words\n"
+            "  * copy: exactly 50 English words of persuasive marketing text\n"
+            "  * image_prompt: detailed English prompt for a realistic photographic advertising image\n"
+            "    following the ACE Engine concept (two real objects combined or placed together,\n"
+            "    no logos, no text inside the image).\n\n"
+            f"Product: {product}\n"
+            f"Description: {description}\n\n"
+            "Return a JSON object with this structure:\n"
+            "{\n"
+            '  "ads": [\n'
+            "    {\n"
+            '      "headline": "...",\n'
+            '      "copy": "...",\n'
+            '      "image_prompt": "..."\n'
+            "    },\n"
+            "    {\n"
+            '      "headline": "...",\n'
+            '      "copy": "...",\n'
+            '      "image_prompt": "..."\n'
+            "    },\n"
+            "    {\n"
+            '      "headline": "...",\n'
+            '      "copy": "...",\n'
+            '      "image_prompt": "..."\n'
+            "    }\n"
+            "  ]\n"
+            "}\n\n"
+            "Rules:\n"
+            "- copy must be exactly 50 words for each ad.\n"
+            "- Headlines and copy must be in English only.\n"
+        )
 
         completion = client.chat.completions.create(
             model=TEXT_MODEL,
