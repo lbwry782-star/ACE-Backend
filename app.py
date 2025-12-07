@@ -27,7 +27,7 @@ Description: {description}
 Follow these rules:
 1. Infer a realistic target audience (age, lifestyle, preferences, pains, needs, familiarity level).
 2. Define 3 distinct advertising goals (3 separate ads). Example only: Awareness, Value/Benefit, Emotion/Urgency.
-3. For each goal, internally consider ~80 concrete, physical objects (no abstract concepts, no feelings).
+3. For each goal, internally consider many concrete, physical objects (no abstract concepts, no feelings).
 4. For each ad, choose a pair of objects A (central) and B (associative) and design one strong visual concept:
    - A and B exist in real physical space, with one consistent realistic background.
    - Use either:
@@ -60,12 +60,12 @@ Return JSON only, with no extra text at all.
 
 
 def generate_ads(product: str, description: str, size: str):
+    """Call OpenAI once for text+prompts, then 3 times for images."""
     text_model = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
     image_model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
 
     prompt = build_engine_prompt(product, description)
 
-    # 1) Ask the text model for 3 ads (headline + copy + image prompts)
     chat = client.chat.completions.create(
         model=text_model,
         messages=[
@@ -118,6 +118,14 @@ def generate_ads(product: str, description: str, size: str):
 
 @app.route("/generate", methods=["POST"])
 def generate():
+    """Main generation endpoint with TOKEN + OVERRIDE logic.
+
+    IMPORTANT BEHAVIOR (matches your spec):
+    - Frontend is allowed to click GENERATE.
+    - Backend is the authority that decides if creation is allowed.
+    - If creation fails for any reason in TOKEN mode → the user
+      should be allowed to try again (no token burn on failure).
+    """
     global OVERRIDE_ACTIVE
 
     data = request.get_json(force=True, silent=False) or {}
@@ -145,17 +153,27 @@ def generate():
     if OVERRIDE_ACTIVE:
         mode = "override"
     elif token_flag:
+        # User came with a valid token (after payment)
         mode = "token"
     else:
         # No valid token / override → block creation
         return jsonify({"error": "Generation not allowed. No valid token or override."}), 403
 
+    # 3) Try to generate ads. Any failure returns HTTP 200 with an error,
+    # so the frontend can show a message and allow another attempt.
     try:
         ads = generate_ads(product, description, size)
+        return jsonify({"mode": mode, "ads": ads}), 200
     except Exception as e:
-        return jsonify({"error": f"Generation failed: {e}"}), 500
-
-    return jsonify({"mode": mode, "ads": ads})
+        # Do NOT burn the token here. The frontend will see `error` and
+        # will NOT mark the token as used.
+        return jsonify(
+            {
+                "mode": mode,
+                "error": f"Generation failed: {e}",
+                "ads": [],
+            }
+        ), 200
 
 
 if __name__ == "__main__":

@@ -1,16 +1,9 @@
-ACE Backend (Prototype)
+ACE Backend (Token + Override) – Updated
 
-Endpoints:
-- GET /health      → simple health check
-- POST /generate   → create 3 ads (image + headline + 50-word copy)
-
-TOKEN & OVERRIDE (summary):
-- Product == "4242" in the request → does NOT generate ads, but activates OVERRIDE mode.
-- OVERRIDE mode (strongest): allows unlimited creations, survives page refresh as long as the server stays up.
-- If OVERRIDE is not active, a request must include "token": true in the JSON body to be allowed.
-- Otherwise, /generate returns 403 (blocked).
-
-Environment variables:
-- OPENAI_API_KEY      → required
-- OPENAI_IMAGE_MODEL  → default: gpt-image-1
-- OPENAI_TEXT_MODEL   → default: gpt-4.1-mini
+Key behaviors:
+- /generate always returns HTTP 200 for generation attempts (except for bad input / no token).
+- If generation fails (OpenAI error, timeout, JSON issue), response is:
+  { "mode": "...", "error": "Generation failed: ...", "ads": [] }
+  so the frontend can show an error and allow another attempt.
+- Successful TOKEN generation does not fail the HTTP layer and the frontend
+  will mark the token as used.
