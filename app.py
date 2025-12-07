@@ -147,8 +147,7 @@ def generate():
             model=IMAGE_MODEL,
             prompt=first_prompt,
             size=size,
-            n=3,
-            response_format="b64_json",
+            n=3
         )
 
         images_data = img_resp["data"]
