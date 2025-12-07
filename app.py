@@ -6,17 +6,14 @@ from openai import OpenAI
 
 app = Flask(__name__)
 
-# CORS — allow your domain; fallback * if not set
 frontend_url = os.environ.get("FRONTEND_URL")
 if frontend_url:
     CORS(app, resources={r"/*": {"origins": [frontend_url]}})
 else:
     CORS(app)
 
-# OpenAI client & models
 api_key = os.environ.get("OPENAI_API_KEY")
 if not api_key:
-    # App will still start, but /generate will return 500 explaining missing key
     client = None
 else:
     client = OpenAI(api_key=api_key)
@@ -49,8 +46,11 @@ def generate():
         return jsonify({"error": "Missing 'product' in request body"}), 400
     if not description:
         return jsonify({"error": "Missing 'description' in request body"}), 400
-    if size not in ("1024x1024", "1024x1792", "1792x1024"):
-        return jsonify({"error": "Unsupported size"}), 400
+
+    # Only accept true OpenAI sizes
+    allowed_sizes = {"1024x1024", "1024x1536", "1536x1024"}
+    if size not in allowed_sizes:
+        return jsonify({"error": f"Unsupported size '{size}'"}), 400
 
     try:
         planning_prompt = f"""You are the ACE advertising engine.
@@ -63,7 +63,7 @@ Based on the following product and description:
   * copy: exactly 50 English words of persuasive marketing text
   * image_prompt: detailed English prompt for a realistic photographic advertising image
     following the ACE Engine concept (two real objects combined or placed together,
-    no logos, no text inside the image).
+    no logos, no text in the image).
 
 Product: {product}
 Description: {description}
@@ -135,10 +135,9 @@ Rules:
         if len(ads_out) == 0:
             return jsonify({"error": "No ads generated from text model"}), 500
 
-        return jsonify({"ads": ads_out}), 200
+        return jsonify({"ads": ads_out, "size_used": size}), 200
 
     except Exception as e:
-        # Log full error for Render logs
         import traceback
         traceback.print_exc()
         return jsonify({"error": "Internal generation error", "details": str(e)}), 500
