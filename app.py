@@ -6,14 +6,14 @@ import openai
 
 app = Flask(__name__)
 
-# CORS — allow your domain; fallback * if not set
+# CORS
 frontend_url = os.environ.get("FRONTEND_URL")
 if frontend_url:
     CORS(app, resources={r"/*": {"origins": [frontend_url]}})
 else:
     CORS(app)
 
-# OpenAI legacy client with explicit timeout
+# OpenAI legacy client
 api_key = os.environ.get("OPENAI_API_KEY")
 if not api_key:
     openai.api_key = None
@@ -22,7 +22,6 @@ else:
     openai.timeout = 120  # seconds
 
 IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1")
-
 ALLOWED_SIZES = {"1024x1024", "1024x1536", "1536x1024"}
 
 
@@ -35,7 +34,6 @@ def build_copy_50_words(product, description):
     )
     words = (base + " " + filler).split()
     if len(words) < 50:
-        # repeat filler until we have enough
         extra = (filler + " ") * 5
         words = (base + " " + extra).split()
     return " ".join(words[:50])
@@ -53,7 +51,6 @@ def generate():
 
     data = request.get_json(silent=True) or {}
 
-    # Token enforcement
     token = data.get("token", None)
     if not token:
         return jsonify({"error": "Token missing or false. Generation is not allowed."}), 403
@@ -70,7 +67,7 @@ def generate():
         return jsonify({"error": f"Unsupported size '{size}'"}), 400
 
     try:
-        # ---- single prompt for three variations ----
+        # Simple prompt
         prompt = (
             f"High-quality photographic advertising image for product '{product}'. "
             f"Description: {description}. "
@@ -79,36 +76,33 @@ def generate():
             "suitable for a professional social media campaign."
         )
 
+        # Exactly like the shell test: one image only
         img_resp = openai.Image.create(
             model=IMAGE_MODEL,
             prompt=prompt,
             size=size,
-            n=3
+            n=1
         )
 
         images_data = img_resp.get("data", [])
-        if len(images_data) < 3:
-            images_data = (images_data * 3)[:3]
+        if not images_data:
+            return jsonify({"error": "Image model returned no data"}), 500
+
+        # Use the single image for all 3 ads (temporary stabilization)
+        first_item = images_data[0]
+        b64_data = first_item.get("b64_json")
 
         ads_out = []
         for idx in range(3):
-            img_item = images_data[idx]
-            b64_data = img_item.get("b64_json")
-
             headline = f"ACE for {product}"[:60]
             copy_text = build_copy_50_words(product, description)
-
             ad_payload = {
                 "headline": headline,
                 "copy": copy_text,
             }
             if b64_data:
                 ad_payload["image_base64"] = b64_data
-
             ads_out.append(ad_payload)
-
-        if len(ads_out) == 0:
-            return jsonify({"error": "No ads generated from image model"}), 500
 
         return jsonify({"ads": ads_out, "size_used": size}), 200
 
