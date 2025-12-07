@@ -106,10 +106,9 @@ def generate_ads(product: str, description: str, size: str):
         safe_headline = headline.replace('"', '\"')
         full_image_prompt = (
             img_prompt
-            + "\n\nAdd the following advertising headline as large, clear, readable text "
-              "integrated into the scene, without cropping or cutting it: ""
+            + "\n\nAdd the following advertising headline as large, clear, readable text integrated into the scene, without cropping or cutting it: \""
             + safe_headline
-            + """
+            + "\""
         )
 
         image_resp = client.images.generate(
