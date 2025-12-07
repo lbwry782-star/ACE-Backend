@@ -1,8 +1,7 @@
 import os
-import json
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import openai
+from openai import OpenAI
 
 app = Flask(__name__)
 
@@ -13,240 +12,138 @@ if frontend_url:
 else:
     CORS(app)
 
-# OpenAI legacy client (works with current key + models)
 api_key = os.environ.get("OPENAI_API_KEY")
-if not api_key:
-    openai.api_key = None
-else:
-    openai.api_key = api_key
-    openai.timeout = 120  # seconds for slow generations
+client = OpenAI(api_key=api_key) if api_key else None
 
-TEXT_MODEL = os.environ.get("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
 IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1")
-
 ALLOWED_SIZES = {"1024x1024", "1024x1536", "1536x1024"}
 
 
-def build_copy_50_words(product, description, extra_hint=""):
-    """Fallback copy generator: around 50 words, English only."""
-    base_parts = []
-    if product:
-        base_parts.append(product)
-    if description:
-        base_parts.append(description)
-    if extra_hint:
-        base_parts.append(extra_hint)
-    base = ". ".join([p.strip() for p in base_parts if p.strip()])
-    filler = (
-        "Discover the benefits today and boost your results with this "
-        "automated creative advertising engine designed for powerful "
-        "social media campaigns and engaging visual storytelling worldwide."
+def build_copy_50_words(product, description, angle):
+    """Deterministic 50-word marketing text."""
+    base = (
+        f"{product} is an automated creative advertising engine for ambitious brands. "
+        f"{description} "
+        f"This ad focuses on {angle} to help you stand out, attract the right audience and turn attention into action. "
+        f"Use it to launch campaigns, test angles and consistently ship fresh visuals across your favorite social platforms."
     )
-    words = (base + " " + filler).split()
+    words = base.strip().split()
     if len(words) < 50:
-        extra = (filler + " ") * 5
-        words = (base + " " + extra).split()
+        # repeat description if too short
+        extra = (description + " ") * 10
+        words = (base + " " + extra).strip().split()
     return " ".join(words[:50])
 
 
+def infer_audience(product, description):
+    text = f"{product} {description}".lower()
+    lifestyle = "digital-first professionals"
+    tone = "confident"
+    if any(k in text for k in ["student", "exam", "learning", "school"]):
+        lifestyle = "busy students preparing for exams"
+        tone = "supportive"
+    if any(k in text for k in ["agency", "marketing", "brand", "campaign"]):
+        lifestyle = "marketing teams and creative freelancers"
+        tone = "bold"
+    return {
+        "age_range": "22-45",
+        "lifestyle": lifestyle,
+        "needs": [
+            "faster ad production",
+            "original visual concepts",
+            "better campaign performance",
+        ],
+        "familiarity": "medium",
+        "tone_preference": tone,
+    }
+
+
+def build_objects_for_target(target):
+    base_objects = [
+        "lightbulb", "keyboard", "camera", "hourglass", "chess king",
+        "gear", "stopwatch", "notebook", "coffee cup", "city billboard",
+        "studio spotlight", "smartphone", "microphone", "road sign", "bridge",
+        "forest path", "window", "elevator button", "clock", "dice",
+    ]
+    # simple expansion to 80
+    objs = []
+    i = 0
+    while len(objs) < 80:
+        name = base_objects[i % len(base_objects)]
+        objs.append(f"{target.lower()} object {len(objs)+1} — {name}")
+        i += 1
+    return objs
+
+
+def pick_A_B(target):
+    if target == "Awareness":
+        return "lightbulb", "keyboard"
+    if target == "Benefit":
+        return "engine gear", "stopwatch"
+    if target == "Emotion":
+        return "hourglass", "chess king"
+    return "object A", "object B"
+
+
+def visual_mode_for_pair(A, B):
+    # simple rule: if words share length and first letter → swap, else placement
+    if A[0].lower() == B[0].lower() and len(A.split()[0]) == len(B.split()[0]):
+        return "swap"
+    return "placement"
+
+
+def build_image_prompt(product, description, target, A, B, mode):
+    base = (
+        f"A realistic advertising photograph in a real studio for '{product}'. "
+        f"The ad is about {target.lower()} and uses a {A} and a {B} as the main visual elements. "
+    )
+    if mode == "swap":
+        relation = (
+            f"The shapes of the {A} and the {B} visually fuse into one believable hybrid object, "
+            f"shot from a single clear angle."
+        )
+    else:
+        relation = (
+            f"The {A} and the {B} are placed very close together, forming one balanced scene without overlapping shapes."
+        )
+    tail = (
+        " Soft, consistent studio lighting, shallow depth of field, no logos, "
+        "no written text inside the image, no extra objects, no unrealistic floating, "
+        "photorealistic commercial quality photograph."
+    )
+    return base + relation + tail
+
+
 def run_engine(product, description):
-    """TEXT ENGINE V2 — Audience → Targets → Objects → A/B → Headline/Copy/Prompt.
+    audience = infer_audience(product, description)
 
-    Returns a dict:
-    {
-      "audience": {...},
-      "ads":[
-        {
-          "target": "...",
-          "objects": {
-            "A": "...",
-            "B": "...",
-            "list": ["...", ... up to 80]
-          },
-          "visual_mode": "swap" or "placement",
-          "headline": "...",
-          "copy": "...",
-          "image_prompt": "..."
-        }, ...
-      ]
-    }
-    If anything fails, returns a simple fallback structure.
-    """
-    # Basic fallback structure
-    fallback = {
-        "audience": {
-            "age_range": "24-44",
-            "lifestyle": "creative, digital-first marketers",
-            "needs": [
-                "faster ad production",
-                "original visual concepts",
-                "better campaign performance"
-            ],
-            "familiarity": "high",
-            "tone_preference": "confident"
-        },
-        "ads": [
+    targets = ["Awareness", "Benefit", "Emotion"]
+    angles = ["awareness and discovery", "benefits and value", "emotion and urgency"]
+    ads = []
+
+    for target, angle in zip(targets, angles):
+        objects_list = build_objects_for_target(target)
+        A, B = pick_A_B(target)
+        mode = visual_mode_for_pair(A, B)
+        headline = {
+            "Awareness": "See What ACE Can Do",
+            "Benefit": "Smarter Ads In Seconds",
+            "Emotion": "Win Attention Before They Do",
+        }.get(target, f"ACE for {product}"[:40])
+        copy_text = build_copy_50_words(product, description, angle)
+        prompt = build_image_prompt(product, description, target, A, B, mode)
+        ads.append(
             {
-                "target": "Awareness",
-                "objects": {
-                    "A": "Lightbulb",
-                    "B": "Keyboard",
-                    "list": []
-                },
-                "visual_mode": "placement",
-                "headline": "Ideas That Build Themselves",
-                "copy": build_copy_50_words(product, description, "awareness ad"),
-                "image_prompt": (
-                    "A realistic advertising photograph in a real studio. "
-                    "A warm glowing lightbulb placed very close to a modern keyboard "
-                    "on a dark desk, shallow depth of field, soft consistent lighting, "
-                    "no logos, no written text inside the image, no extra objects."
-                )
-            },
-            {
-                "target": "Benefit",
-                "objects": {
-                    "A": "Engine Gear",
-                    "B": "Stopwatch",
-                    "list": []
-                },
-                "visual_mode": "placement",
-                "headline": "Faster Than Any Creative Team",
-                "copy": build_copy_50_words(product, description, "benefit ad"),
-                "image_prompt": (
-                    "A realistic advertising photograph. A metallic engine gear and a "
-                    "sleek stopwatch placed side by side on a clean industrial desk, "
-                    "symbolizing speed and precision. Soft directional light, no logos, "
-                    "no text inside the image, no extra objects, commercial photo style."
-                )
-            },
-            {
-                "target": "Emotion",
-                "objects": {
-                    "A": "Hourglass",
-                    "B": "Chess King",
-                    "list": []
-                },
-                "visual_mode": "placement",
-                "headline": "Before Your Competitor Does",
-                "copy": build_copy_50_words(product, description, "urgency ad"),
-                "image_prompt": (
-                    "A realistic advertising photograph. A glass hourglass and a black "
-                    "chess king standing very close together on a wooden table, in a "
-                    "spotlight that emphasizes tension and strategy. No floating objects, "
-                    "no logos, no text inside the image, no extra items, studio lighting."
-                )
+                "target": target,
+                "objects": {"A": A, "B": B, "list": objects_list},
+                "visual_mode": mode,
+                "headline": headline,
+                "copy": copy_text,
+                "image_prompt": prompt,
             }
-        ]
-    }
-
-    if openai.api_key is None:
-        return fallback
-
-    try:
-        engine_prompt = (
-            "You are the ACE ENGINE V2. You must output ONLY valid JSON, no prose.\n\n"
-            "Goal: From a product and description, build an advertising engine structure:\n"
-            "- Infer audience (age_range, lifestyle, needs, familiarity, tone_preference).\n"
-            "- Define exactly 3 ads: Awareness, Benefit, Emotion.\n"
-            "- For each ad, generate 80 physical objects only (no abstract concepts).\n"
-            "- For each ad, choose Object A (primary meaning) and Object B (secondary meaning).\n"
-            "- Decide visual_mode: 'swap' for high shape similarity or 'placement' otherwise.\n"
-            "- Create an English headline (3-6 words).\n"
-            "- Create exactly 50 English words of persuasive marketing copy.\n"
-            "- Create an English image_prompt describing a realistic advertising photograph "
-            "that follows these rules: real environment, no floating objects, no text inside "
-            "the image, no logos, coherent lighting, commercial style.\n\n"
-            "Product name: " + product + "\n"
-            "Product description: " + description + "\n\n"
-            "Return ONLY a JSON object with this structure (no extra text):\n"
-            "{\n"
-            "  \"audience\": {\n"
-            "    \"age_range\": \"...\",\n"
-            "    \"lifestyle\": \"...\",\n"
-            "    \"needs\": [\"...\", \"...\"],\n"
-            "    \"familiarity\": \"low|medium|high\",\n"
-            "    \"tone_preference\": \"...\"\n"
-            "  },\n"
-            "  \"ads\": [\n"
-            "    {\n"
-            "      \"target\": \"Awareness\",\n"
-            "      \"objects\": {\n"
-            "        \"A\": \"...\",\n"
-            "        \"B\": \"...\",\n"
-            "        \"list\": [\"physical object 1\", \"physical object 2\", ... ]\n"
-            "      },\n"
-            "      \"visual_mode\": \"swap\" or \"placement\",\n"
-            "      \"headline\": \"...\",\n"
-            "      \"copy\": \"exactly 50 English words\",\n"
-            "      \"image_prompt\": \"realistic advertising photo description\"\n"
-            "    },\n"
-            "    {\n"
-            "      \"target\": \"Benefit\",\n"
-            "      \"objects\": { ... },\n"
-            "      \"visual_mode\": \"swap\" or \"placement\",\n"
-            "      \"headline\": \"...\",\n"
-            "      \"copy\": \"exactly 50 English words\",\n"
-            "      \"image_prompt\": \"...\"\n"
-            "    },\n"
-            "    {\n"
-            "      \"target\": \"Emotion\",\n"
-            "      \"objects\": { ... },\n"
-            "      \"visual_mode\": \"swap\" or \"placement\",\n"
-            "      \"headline\": \"...\",\n"
-            "      \"copy\": \"exactly 50 English words\",\n"
-            "      \"image_prompt\": \"...\"\n"
-            "    }\n"
-            "  ]\n"
-            "}\n"
         )
 
-        chat_resp = openai.ChatCompletion.create(
-            model=TEXT_MODEL,
-            messages=[{"role": "user", "content": engine_prompt}],
-            temperature=0.4,
-        )
-        content = chat_resp["choices"][0]["message"]["content"]
-
-        start = content.find("{")
-        end = content.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            json_str = content[start : end + 1]
-        else:
-            json_str = content
-
-        engine_data = json.loads(json_str)
-
-        if "ads" not in engine_data or not isinstance(engine_data["ads"], list):
-            return fallback
-
-        while len(engine_data["ads"]) < 3:
-            engine_data["ads"].append(fallback["ads"][len(engine_data["ads"])])
-
-        for idx in range(3):
-            if idx >= len(fallback["ads"]):
-                break
-            ad = engine_data["ads"][idx]
-            fb_ad = fallback["ads"][idx]
-
-            ad.setdefault("target", fb_ad["target"])
-            ad.setdefault("objects", fb_ad["objects"])
-            ad.setdefault("visual_mode", fb_ad["visual_mode"])
-            ad.setdefault("headline", fb_ad["headline"])
-            ad.setdefault("copy", fb_ad["copy"])
-            ad.setdefault("image_prompt", fb_ad["image_prompt"])
-
-            words = (ad.get("copy") or "").split()
-            if len(words) < 30 or len(words) > 70:
-                ad["copy"] = fb_ad["copy"]
-
-        if "audience" not in engine_data:
-            engine_data["audience"] = fallback["audience"]
-
-        return engine_data
-
-    except Exception:
-        return fallback
+    return {"audience": audience, "ads": ads}
 
 
 @app.route("/health", methods=["GET"])
@@ -256,9 +153,6 @@ def health():
 
 @app.route("/engine", methods=["POST"])
 def engine_endpoint():
-    if openai.api_key is None:
-        return jsonify({"error": "OPENAI_API_KEY missing on server"}), 500
-
     data = request.get_json(silent=True) or {}
     product = (data.get("product") or "").strip()
     description = (data.get("description") or "").strip()
@@ -274,7 +168,7 @@ def engine_endpoint():
 
 @app.route("/generate", methods=["POST"])
 def generate():
-    if openai.api_key is None:
+    if client is None:
         return jsonify({"error": "OPENAI_API_KEY missing on server"}), 500
 
     data = request.get_json(silent=True) or {}
@@ -297,55 +191,36 @@ def generate():
     try:
         engine_data = run_engine(product, description)
         ads_plan = engine_data.get("ads") or []
+        if len(ads_plan) < 3:
+            ads_plan = (ads_plan * 3)[:3]
 
-        while len(ads_plan) < 3:
-            ads_plan.append(ads_plan[0])
+        first_prompt = ads_plan[0]["image_prompt"]
 
-        first_prompt = (ads_plan[0].get("image_prompt") or "").strip()
-        if not first_prompt:
-            first_prompt = (
-                f"High-quality realistic advertising photograph for product '{product}'. "
-                "Two real objects combined or placed side by side in a clever way, "
-                "no logos, no written text inside the image, realistic lighting, "
-                "suitable for a professional commercial campaign."
-            )
-
-        img_resp = openai.Image.create(
+        img_resp = client.images.generate(
             model=IMAGE_MODEL,
             prompt=first_prompt,
             size=size,
-            n=3
+            n=3,
         )
 
-        images_data = img_resp.get("data", [])
-        if len(images_data) < 3:
-            images_data = (images_data * 3)[:3]
+        images = img_resp.data
+        if len(images) < 3:
+            images = (images * 3)[:3]
 
         ads_out = []
         for idx in range(3):
             ad_plan = ads_plan[idx]
-            img_item = images_data[idx]
-            b64_data = img_item.get("b64_json")
-
-            headline = (ad_plan.get("headline") or "").strip()
-            copy_text = (ad_plan.get("copy") or "").strip()
-
-            if not headline:
-                headline = f"ACE for {product}"[:60]
-            if not copy_text:
-                copy_text = build_copy_50_words(product, description)
+            img_item = images[idx]
+            b64_data = getattr(img_item, "b64_json", None)
 
             ad_payload = {
-                "headline": headline,
-                "copy": copy_text,
+                "headline": ad_plan["headline"],
+                "copy": ad_plan["copy"],
             }
             if b64_data:
                 ad_payload["image_base64"] = b64_data
 
             ads_out.append(ad_payload)
-
-        if not ads_out:
-            return jsonify({"error": "No ads generated from image model"}), 500
 
         return jsonify({"ads": ads_out, "size_used": size}), 200
 
