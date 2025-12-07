@@ -60,7 +60,10 @@ Return JSON only, with no extra text at all.
 
 
 def generate_ads(product: str, description: str, size: str):
-    """Call OpenAI once for text+prompts, then 3 times for images."""
+    """Call OpenAI once for text+prompts, then 3 times for images.
+
+    IMPORTANT: the headline must appear ON the image itself as clear ad text.
+    """
     text_model = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
     image_model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
 
@@ -93,13 +96,25 @@ def generate_ads(product: str, description: str, size: str):
 
     results = []
     for ad in ads:
+        headline = ad.get("headline", "")
+        copy = ad.get("copy", "")
         img_prompt = ad.get("image_prompt") or ""
         if not img_prompt:
             raise RuntimeError("Missing image_prompt for one of the ads.")
 
+        # Ensure the generated image CONTAINS the headline text visually.
+        safe_headline = headline.replace('"', '\"')
+        full_image_prompt = (
+            img_prompt
+            + "\n\nAdd the following advertising headline as large, clear, readable text "
+              "integrated into the scene, without cropping or cutting it: ""
+            + safe_headline
+            + """
+        )
+
         image_resp = client.images.generate(
             model=image_model,
-            prompt=img_prompt,
+            prompt=full_image_prompt,
             size=size,
             n=1,
         )
@@ -107,8 +122,8 @@ def generate_ads(product: str, description: str, size: str):
 
         results.append(
             {
-                "headline": ad.get("headline", ""),
-                "copy": ad.get("copy", ""),
+                "headline": headline,
+                "copy": copy,
                 "image_base64": b64,
             }
         )
@@ -118,14 +133,7 @@ def generate_ads(product: str, description: str, size: str):
 
 @app.route("/generate", methods=["POST"])
 def generate():
-    """Main generation endpoint with TOKEN + OVERRIDE logic.
-
-    IMPORTANT BEHAVIOR (matches your spec):
-    - Frontend is allowed to click GENERATE.
-    - Backend is the authority that decides if creation is allowed.
-    - If creation fails for any reason in TOKEN mode → the user
-      should be allowed to try again (no token burn on failure).
-    """
+    """Main generation endpoint with TOKEN + OVERRIDE logic."""
     global OVERRIDE_ACTIVE
 
     data = request.get_json(force=True, silent=False) or {}
@@ -141,7 +149,7 @@ def generate():
     if size not in ("1024x1024", "1536x1024", "1024x1536"):
         return jsonify({"error": "Unsupported size"}), 400
 
-    # 1) Handle 4242 override activation (does NOT create an ad)
+    # 1) Handle dev override activation (secret code) — does NOT create an ad
     if product == "4242":
         OVERRIDE_ACTIVE = True
         return jsonify({"status": "override_activated"}), 200
@@ -165,8 +173,6 @@ def generate():
         ads = generate_ads(product, description, size)
         return jsonify({"mode": mode, "ads": ads}), 200
     except Exception as e:
-        # Do NOT burn the token here. The frontend will see `error` and
-        # will NOT mark the token as used.
         return jsonify(
             {
                 "mode": mode,
