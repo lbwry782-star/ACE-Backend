@@ -3,14 +3,27 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)
+
+# Explicit CORS: allow everything, including preflight OPTIONS
+CORS(
+    app,
+    resources={r"/*": {"origins": "*"}},
+    supports_credentials=False,
+)
+
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "mode": "debug-backend"})
+    return jsonify({"status": "ok", "mode": "debug-backend-cors"})
 
-@app.route("/generate", methods=["POST"])
+
+@app.route("/generate", methods=["POST", "OPTIONS"])
 def generate():
+    # If it's a preflight OPTIONS request, just return OK
+    if request.method == "OPTIONS":
+        # Flask-CORS will add the appropriate headers
+        return "", 204
+
     data = request.get_json(force=True, silent=True) or {}
     product = (data.get("product") or "").strip()
     description = (data.get("description") or "").strip()
@@ -25,7 +38,7 @@ def generate():
             {
                 "headline": f"Sample headline {i+1} for {product}",
                 "copy": (
-                    "This is a DEBUG response from the backend. "
+                    "This is a DEBUG response from the backend with full CORS enabled. "
                     "The ACE Engine is not running here yet, but the "
                     "frontend, token and override flow are verified."
                 ),
@@ -35,6 +48,7 @@ def generate():
         )
 
     return jsonify({"mode": "debug", "ads": ads}), 200
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8000"))
