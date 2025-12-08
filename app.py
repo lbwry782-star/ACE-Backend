@@ -1,28 +1,35 @@
 import os
 from flask import Flask, request, jsonify
-from flask_cors import CORS
 
 app = Flask(__name__)
 
-# Explicit CORS: allow everything, including preflight OPTIONS
-CORS(
-    app,
-    resources={r"/*": {"origins": "*"}},
-    supports_credentials=False,
-)
+# ---- Manual CORS on ALL responses ----
+FRONTEND_ORIGIN = "https://ace-advertising.agency"  # your real site origin
 
 
-@app.route("/health", methods=["GET"])
+@app.after_request
+def add_cors_headers(resp):
+    # Allow the ACE frontend to call this backend
+    resp.headers["Access-Control-Allow-Origin"] = FRONTEND_ORIGIN
+    resp.headers["Vary"] = "Origin"
+    resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return resp
+
+
+@app.route("/health", methods=["GET", "OPTIONS"])
 def health():
-    return jsonify({"status": "ok", "mode": "debug-backend-cors"})
+    if request.method == "OPTIONS":
+        # Preflight
+        return ("", 204)
+    return jsonify({"status": "ok", "mode": "debug-backend-manual-cors"})
 
 
 @app.route("/generate", methods=["POST", "OPTIONS"])
 def generate():
-    # If it's a preflight OPTIONS request, just return OK
+    # Handle CORS preflight explicitly
     if request.method == "OPTIONS":
-        # Flask-CORS will add the appropriate headers
-        return "", 204
+        return ("", 204)
 
     data = request.get_json(force=True, silent=True) or {}
     product = (data.get("product") or "").strip()
@@ -38,12 +45,11 @@ def generate():
             {
                 "headline": f"Sample headline {i+1} for {product}",
                 "copy": (
-                    "This is a DEBUG response from the backend with full CORS enabled. "
+                    "This is a DEBUG response from the backend with MANUAL CORS enabled. "
                     "The ACE Engine is not running here yet, but the "
-                    "frontend, token and override flow are verified."
+                    "connection between frontend and backend is verified."
                 ),
-                # Empty placeholder base64 – image will not show, but JSON is valid.
-                "image_base64": ""
+                "image_base64": ""  # placeholder
             }
         )
 
