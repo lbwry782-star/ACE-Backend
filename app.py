@@ -3,15 +3,10 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# ---- Manual CORS on ALL responses ----
-FRONTEND_ORIGIN = "https://ace-advertising.agency"  # your real site origin
-
-
+# ---- Very permissive CORS on ALL responses (debug only) ----
 @app.after_request
 def add_cors_headers(resp):
-    # Allow the ACE frontend to call this backend
-    resp.headers["Access-Control-Allow-Origin"] = FRONTEND_ORIGIN
-    resp.headers["Vary"] = "Origin"
+    resp.headers["Access-Control-Allow-Origin"] = "*"
     resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return resp
@@ -20,9 +15,8 @@ def add_cors_headers(resp):
 @app.route("/health", methods=["GET", "OPTIONS"])
 def health():
     if request.method == "OPTIONS":
-        # Preflight
         return ("", 204)
-    return jsonify({"status": "ok", "mode": "debug-backend-manual-cors"})
+    return jsonify({"status": "ok", "mode": "debug-backend-wildcard-cors"})
 
 
 @app.route("/generate", methods=["POST", "OPTIONS"])
@@ -45,7 +39,7 @@ def generate():
             {
                 "headline": f"Sample headline {i+1} for {product}",
                 "copy": (
-                    "This is a DEBUG response from the backend with MANUAL CORS enabled. "
+                    "This is a DEBUG response from the backend with WILDCARD CORS enabled. "
                     "The ACE Engine is not running here yet, but the "
                     "connection between frontend and backend is verified."
                 ),
