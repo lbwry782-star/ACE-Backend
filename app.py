@@ -2,13 +2,14 @@ import os
 import uuid
 import time
 import threading
+import json
 from io import BytesIO
 from zipfile import ZipFile
+from pathlib import Path
 
 import requests
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-
 from PIL import Image
 
 app = Flask(__name__)
@@ -24,8 +25,33 @@ ALLOWED_SIZES = {
     "1536x1024": (1536, 1024),
 }
 
-# In-memory job store
-JOBS = {}
+# Use filesystem-backed jobs so it works even with multiple gunicorn workers
+JOBS_ROOT = Path(os.getenv("JOBS_ROOT", "/tmp/ace_jobs"))
+JOBS_ROOT.mkdir(parents=True, exist_ok=True)
+
+def job_dir(job_id: str) -> Path:
+    p = JOBS_ROOT / job_id
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+def job_json_path(job_id: str) -> Path:
+    return job_dir(job_id) / "job.json"
+
+def write_job(job_id: str, data: dict):
+    tmp = job_dir(job_id) / "job.json.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, job_json_path(job_id))
+
+def read_job(job_id: str):
+    p = job_json_path(job_id)
+    if not p.exists():
+        return None
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 def _placeholder_jpg(width: int, height: int) -> bytes:
     img = Image.new("RGB", (width, height), (0, 0, 0))
@@ -56,8 +82,7 @@ def openai_chat_json(system_prompt: str, user_prompt: str) -> dict:
     r.raise_for_status()
     data = r.json()
     content = data["choices"][0]["message"]["content"]
-    # content is JSON text
-    return requests.utils.json.loads(content)
+    return json.loads(content)
 
 def openai_image_bytes(prompt: str, size: str) -> bytes:
     url = "https://api.openai.com/v1/images/generations"
@@ -67,17 +92,16 @@ def openai_image_bytes(prompt: str, size: str) -> bytes:
         "size": size,
         "n": 1,
     }
-    r = requests.post(url, headers=_openai_headers(), json=payload, timeout=180)
+    r = requests.post(url, headers=_openai_headers(), json=payload, timeout=240)
     r.raise_for_status()
     data = r.json()
 
-    # Support either b64_json or url (depending on API response)
     item = (data.get("data") or [None])[0] or {}
     if "b64_json" in item and item["b64_json"]:
         import base64
         return base64.b64decode(item["b64_json"])
     if "url" in item and item["url"]:
-        img_r = requests.get(item["url"], timeout=180)
+        img_r = requests.get(item["url"], timeout=240)
         img_r.raise_for_status()
         return img_r.content
     raise RuntimeError("Unexpected image response from OpenAI")
@@ -93,7 +117,7 @@ def run_generation(job_id: str, product_name: str, product_description: str, siz
         system = (
             "You are ACE ENGINE. Follow these rules strictly:\n"
             "- Create 3 DIFFERENT ad objectives for the same product.\n"
-            "- For each ad: create a ORIGINAL headline that includes the product name, 3-7 words.\n"
+            "- For each ad: create an ORIGINAL headline that includes the product name, 3-7 words.\n"
             "- Create a 50-word marketing copy (not for on-image).\n"
             "- The 3 copies must be DIFFERENT in angle, benefits, and message.\n"
             "- Return valid JSON only."
@@ -115,16 +139,13 @@ def run_generation(job_id: str, product_name: str, product_description: str, siz
         plan = openai_chat_json(system, user)
         ads_plan = plan.get("ads") or []
 
-        images = {}
         ads_out = []
-
         for i in range(1, 4):
             ad = next((a for a in ads_plan if int(a.get("index", 0)) == i), {})
             objective = (ad.get("objective") or "").strip() or f"Objective {i}"
             headline = (ad.get("headline") or "").strip()
             copy_50 = (ad.get("copy_50") or "").strip()
 
-            # Engine: no text on image; photorealistic
             img_prompt = (
                 f"Photorealistic advertising image for: {product_name}. "
                 f"Objective: {objective}. "
@@ -136,10 +157,13 @@ def run_generation(job_id: str, product_name: str, product_description: str, siz
             try:
                 img_bytes = openai_image_bytes(img_prompt, size=size)
             except Exception:
-                # fallback keeps the flow running
                 img_bytes = _placeholder_jpg(w, h)
 
-            images[i] = img_bytes
+            # write image to disk
+            img_path = job_dir(job_id) / f"ad_{i}.jpg"
+            with open(img_path, "wb") as f:
+                f.write(img_bytes)
+
             ads_out.append({
                 "index": i,
                 "objective": objective,
@@ -147,15 +171,22 @@ def run_generation(job_id: str, product_name: str, product_description: str, siz
                 "text": copy_50,
             })
 
-        JOBS[job_id]["status"] = "done"
-        JOBS[job_id]["ready"] = True
-        JOBS[job_id]["ads"] = ads_out
-        JOBS[job_id]["images"] = images
+        write_job(job_id, {
+            "status": "done",
+            "ready": True,
+            "size": size,
+            "ads": ads_out,
+            "error": None,
+        })
 
     except Exception as e:
-        JOBS[job_id]["status"] = "error"
-        JOBS[job_id]["ready"] = False
-        JOBS[job_id]["error"] = str(e)
+        write_job(job_id, {
+            "status": "error",
+            "ready": False,
+            "size": size,
+            "ads": [],
+            "error": str(e),
+        })
 
 @app.post("/api/generate")
 def generate():
@@ -168,13 +199,14 @@ def generate():
         return jsonify({"error": "invalid_input"}), 400
 
     job_id = str(uuid.uuid4())
-    JOBS[job_id] = {
+
+    write_job(job_id, {
         "status": "running",
         "ready": False,
         "size": size,
         "ads": [],
-        "images": {},
-    }
+        "error": None,
+    })
 
     t = threading.Thread(target=run_generation, args=(job_id, product_name, product_description, size), daemon=True)
     t.start()
@@ -183,34 +215,29 @@ def generate():
 
 @app.get("/api/jobs/<job_id>")
 def job_status(job_id):
-    job = JOBS.get(job_id)
+    job = read_job(job_id)
     if not job:
         return jsonify({"error": "Job not found"}), 404
-    return jsonify({
-        "status": job.get("status"),
-        "ready": bool(job.get("ready")),
-        "size": job.get("size"),
-        "ads": job.get("ads", []),
-        "error": job.get("error") if job.get("status") == "error" else None,
-    }), 200
+    return jsonify(job), 200
 
 @app.get("/api/jobs/<job_id>/ads/<int:index>/image")
 def get_image(job_id, index):
-    job = JOBS.get(job_id)
+    job = read_job(job_id)
     if not job or job.get("status") != "done":
         return jsonify({"error": "Not ready"}), 400
-    img_bytes = (job.get("images") or {}).get(index)
-    if not img_bytes:
+    img_path = job_dir(job_id) / f"ad_{index}.jpg"
+    if not img_path.exists():
         return jsonify({"error": "Not found"}), 404
-    return send_file(BytesIO(img_bytes), mimetype="image/jpeg", download_name=f"ad_{index}.jpg")
+    return send_file(str(img_path), mimetype="image/jpeg", download_name=f"ad_{index}.jpg")
 
 @app.get("/api/jobs/<job_id>/ads/<int:index>/zip")
 def download_zip(job_id, index):
-    job = JOBS.get(job_id)
+    job = read_job(job_id)
     if not job or job.get("status") != "done":
         return jsonify({"error": "Not ready"}), 400
-    img_bytes = (job.get("images") or {}).get(index)
-    if not img_bytes:
+
+    img_path = job_dir(job_id) / f"ad_{index}.jpg"
+    if not img_path.exists():
         return jsonify({"error": "Not found"}), 404
 
     ad = next((a for a in (job.get("ads") or []) if int(a.get("index", 0)) == index), {})
@@ -220,7 +247,8 @@ def download_zip(job_id, index):
 
     zip_buffer = BytesIO()
     with ZipFile(zip_buffer, "w") as z:
-        z.writestr(f"ad_{index}.jpg", img_bytes)
+        with open(img_path, "rb") as f:
+            z.writestr(f"ad_{index}.jpg", f.read())
         z.writestr(f"ad_{index}.txt", text)
         z.writestr(f"ad_{index}_headline.txt", headline)
         z.writestr(f"ad_{index}_objective.txt", objective)
