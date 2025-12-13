@@ -8,7 +8,7 @@ from zipfile import ZipFile
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
 app = Flask(__name__)
 CORS(app)
@@ -25,15 +25,9 @@ ALLOWED_SIZES = {
     "1536x1024": (1536, 1024),
 }
 
-def _make_placeholder_jpg(width: int, height: int, headline: str) -> bytes:
-    # Black background, simple photo-like vignette, no text on image per engine rules.
+def _make_placeholder_jpg(width: int, height: int) -> bytes:
+    # Black background ONLY (no shapes/text on image) – aligns with "no text on image"
     img = Image.new("RGB", (width, height), (0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    # subtle frame
-    draw.rectangle([20, 20, width-20, height-20], outline=(60, 60, 60), width=3)
-    # subtle light gradient block (visual placeholder)
-    draw.ellipse([width*0.15, height*0.10, width*0.85, height*0.70], outline=(90, 90, 90), width=4)
-    # Export
     buf = BytesIO()
     img.save(buf, format="JPEG", quality=92, optimize=True)
     return buf.getvalue()
@@ -50,30 +44,31 @@ def run_generation(job_id: str, product_name: str, product_description: str, siz
 
         w, h = ALLOWED_SIZES[size]
 
-        ads = []
-        # Distinct purpose/copy per ad (placeholder logic; real engine determines purposes)
+        # Three distinct ad "purposes" (placeholder)
         purposes = [
-            "clarity",
-            "confidence",
-            "speed",
+            ("Speed", "Get results faster", "A faster path with fewer steps and less friction."),
+            ("Confidence", "Feel in control", "Clear guidance that builds trust and reduces uncertainty."),
+            ("Clarity", "Know what to do next", "Simple structure that keeps focus and avoids overwhelm."),
         ]
 
+        ads = []
         for i in range(1, 4):
-            headline = f"{product_name} for {purposes[i-1]}"
-            # Placeholder image in correct dimensions
-            JOBS[job_id]["images"][i] = _make_placeholder_jpg(w, h, headline)
+            purpose_name, hook, angle = purposes[i-1]
 
-            # 50-word marketing text (approx, no extra UI text)
+            # Correct-size image
+            JOBS[job_id]["images"][i] = _make_placeholder_jpg(w, h)
+
+            # Distinct 50-word-ish copy per ad
             text = (
-                f"{product_name} is built for people who need results without friction. "
-                f"This message focuses on {purposes[i-1]}: a clearer path, fewer steps, and more control. "
-                f"It supports the audience’s needs and pain points, stays practical, and drives action. "
-                f"Use it on landing pages and social posts alongside the visual."
+                f"{product_name} is made for {purpose_name.lower()}. {hook}. "
+                f"{angle} Designed for the right audience, it saves time, reduces effort, "
+                f"and supports consistent outcomes. Use this message alongside the visual to "
+                f"drive clicks and conversions with a single clear next step."
             )
 
             ads.append({
                 "index": i,
-                "headline": headline,
+                "purpose": purpose_name,
                 "text": text,
             })
 
@@ -154,11 +149,9 @@ def download_zip(job_id, index):
     if not img_bytes:
         return jsonify({"error": "Not found"}), 404
 
-    headline = ""
     text = ""
     for ad in job.get("ads", []):
         if int(ad.get("index", -1)) == index:
-            headline = ad.get("headline", "")
             text = ad.get("text", "")
             break
 
