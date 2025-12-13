@@ -2,15 +2,5 @@ services:
   - type: web
     name: ace-backend
     env: python
-    plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --timeout 600 --bind 0.0.0.0:$PORT
-    envVars:
-      - key: OPENAI_API_KEY
-        sync: false
-      - key: OPENAI_IMAGE_MODEL
-        value: gpt-image-1
-      - key: OPENAI_TEXT_MODEL
-        value: gpt-4.1-mini
-      - key: PORT
-        value: "10000"
+    startCommand: gunicorn app:app --timeout 600
