@@ -25,7 +25,6 @@ ALLOWED_SIZES = {
     "1536x1024": (1536, 1024),
 }
 
-# Use filesystem-backed jobs so it works even with multiple gunicorn workers
 JOBS_ROOT = Path(os.getenv("JOBS_ROOT", "/tmp/ace_jobs"))
 JOBS_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -38,20 +37,28 @@ def job_json_path(job_id: str) -> Path:
     return job_dir(job_id) / "job.json"
 
 def write_job(job_id: str, data: dict):
-    tmp = job_dir(job_id) / "job.json.tmp"
+    d = job_dir(job_id)
+    tmp = d / "job.json.tmp"
+    final = d / "job.json"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
-    os.replace(tmp, job_json_path(job_id))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, final)
 
 def read_job(job_id: str):
     p = job_json_path(job_id)
     if not p.exists():
         return None
-    try:
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
+    for _ in range(3):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            time.sleep(0.05)
+        except Exception:
+            break
+    return None
 
 def _placeholder_jpg(width: int, height: int) -> bytes:
     img = Image.new("RGB", (width, height), (0, 0, 0))
@@ -86,16 +93,10 @@ def openai_chat_json(system_prompt: str, user_prompt: str) -> dict:
 
 def openai_image_bytes(prompt: str, size: str) -> bytes:
     url = "https://api.openai.com/v1/images/generations"
-    payload = {
-        "model": OPENAI_IMAGE_MODEL,
-        "prompt": prompt,
-        "size": size,
-        "n": 1,
-    }
+    payload = {"model": OPENAI_IMAGE_MODEL, "prompt": prompt, "size": size, "n": 1}
     r = requests.post(url, headers=_openai_headers(), json=payload, timeout=240)
     r.raise_for_status()
     data = r.json()
-
     item = (data.get("data") or [None])[0] or {}
     if "b64_json" in item and item["b64_json"]:
         import base64
@@ -111,15 +112,14 @@ def health():
     return "ok", 200
 
 def run_generation(job_id: str, product_name: str, product_description: str, size: str):
+    w, h = ALLOWED_SIZES[size]
     try:
-        w, h = ALLOWED_SIZES[size]
-
         system = (
             "You are ACE ENGINE. Follow these rules strictly:\n"
             "- Create 3 DIFFERENT ad objectives for the same product.\n"
             "- For each ad: create an ORIGINAL headline that includes the product name, 3-7 words.\n"
             "- Create a 50-word marketing copy (not for on-image).\n"
-            "- The 3 copies must be DIFFERENT in angle, benefits, and message.\n"
+            "- The 3 copies must be VERY DIFFERENT in angle, benefits, and message.\n"
             "- Return valid JSON only."
         )
         user = (
@@ -127,7 +127,6 @@ def run_generation(job_id: str, product_name: str, product_description: str, siz
             f"Product description: {product_description}\n\n"
             "Return JSON with this schema:\n"
             "{\n"
-            "  \"audience\": { \"age\": \"...\", \"lifestyle\": \"...\", \"needs\": \"...\", \"pain_points\": \"...\" },\n"
             "  \"ads\": [\n"
             "    { \"index\": 1, \"objective\": \"...\", \"headline\": \"...\", \"copy_50\": \"...\" },\n"
             "    { \"index\": 2, \"objective\": \"...\", \"headline\": \"...\", \"copy_50\": \"...\" },\n"
@@ -159,34 +158,16 @@ def run_generation(job_id: str, product_name: str, product_description: str, siz
             except Exception:
                 img_bytes = _placeholder_jpg(w, h)
 
-            # write image to disk
             img_path = job_dir(job_id) / f"ad_{i}.jpg"
             with open(img_path, "wb") as f:
                 f.write(img_bytes)
 
-            ads_out.append({
-                "index": i,
-                "objective": objective,
-                "headline": headline,
-                "text": copy_50,
-            })
+            ads_out.append({"index": i, "objective": objective, "headline": headline, "text": copy_50})
 
-        write_job(job_id, {
-            "status": "done",
-            "ready": True,
-            "size": size,
-            "ads": ads_out,
-            "error": None,
-        })
+        write_job(job_id, {"status": "done", "ready": True, "size": size, "ads": ads_out, "error": None})
 
     except Exception as e:
-        write_job(job_id, {
-            "status": "error",
-            "ready": False,
-            "size": size,
-            "ads": [],
-            "error": str(e),
-        })
+        write_job(job_id, {"status": "error", "ready": False, "size": size, "ads": [], "error": str(e)})
 
 @app.post("/api/generate")
 def generate():
@@ -199,14 +180,7 @@ def generate():
         return jsonify({"error": "invalid_input"}), 400
 
     job_id = str(uuid.uuid4())
-
-    write_job(job_id, {
-        "status": "running",
-        "ready": False,
-        "size": size,
-        "ads": [],
-        "error": None,
-    })
+    write_job(job_id, {"status": "running", "ready": False, "size": size, "ads": [], "error": None})
 
     t = threading.Thread(target=run_generation, args=(job_id, product_name, product_description, size), daemon=True)
     t.start()
