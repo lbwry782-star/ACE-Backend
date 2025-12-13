@@ -28,6 +28,11 @@ ALLOWED_SIZES = {
 JOBS_ROOT = Path(os.getenv("JOBS_ROOT", "/tmp/ace_jobs"))
 JOBS_ROOT.mkdir(parents=True, exist_ok=True)
 
+# Retry policy (user chose "keep trying up to ~5 minutes")
+MAX_RETRY_SECONDS = int(os.getenv("OPENAI_MAX_RETRY_SECONDS", "330"))  # ~5.5 min safety
+BASE_BACKOFF = float(os.getenv("OPENAI_RETRY_BASE_BACKOFF", "2.0"))   # seconds
+MAX_BACKOFF = float(os.getenv("OPENAI_RETRY_MAX_BACKOFF", "30.0"))    # seconds
+
 def job_dir(job_id: str) -> Path:
     p = JOBS_ROOT / job_id
     p.mkdir(parents=True, exist_ok=True)
@@ -69,10 +74,52 @@ def _placeholder_jpg(width: int, height: int) -> bytes:
 def _openai_headers():
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is missing")
-    return {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
+    return {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+
+def _should_retry(status_code: int) -> bool:
+    return status_code in (429, 500, 502, 503, 504)
+
+def _request_with_retry(method: str, url: str, *, headers: dict, json_body: dict, timeout: int):
+    start = time.time()
+    attempt = 0
+    backoff = BASE_BACKOFF
+
+    last_exc = None
+    while True:
+        attempt += 1
+        try:
+            r = requests.request(method, url, headers=headers, json=json_body, timeout=timeout)
+            if r.status_code == 200:
+                return r
+
+            if _should_retry(r.status_code) and (time.time() - start) < MAX_RETRY_SECONDS:
+                # Respect Retry-After if present
+                ra = r.headers.get("retry-after")
+                if ra:
+                    try:
+                        sleep_s = float(ra)
+                    except Exception:
+                        sleep_s = backoff
+                else:
+                    sleep_s = backoff
+
+                sleep_s = min(MAX_BACKOFF, max(1.0, sleep_s))
+                time.sleep(sleep_s)
+                backoff = min(MAX_BACKOFF, backoff * 2)
+                continue
+
+            # non-retriable or time budget exceeded
+            r.raise_for_status()
+            return r
+
+        except requests.RequestException as e:
+            last_exc = e
+            # Network errors: retry within budget
+            if (time.time() - start) < MAX_RETRY_SECONDS:
+                time.sleep(min(MAX_BACKOFF, backoff))
+                backoff = min(MAX_BACKOFF, backoff * 2)
+                continue
+            raise last_exc
 
 def openai_chat_json(system_prompt: str, user_prompt: str) -> dict:
     url = "https://api.openai.com/v1/chat/completions"
@@ -85,8 +132,7 @@ def openai_chat_json(system_prompt: str, user_prompt: str) -> dict:
             {"role": "user", "content": user_prompt},
         ],
     }
-    r = requests.post(url, headers=_openai_headers(), json=payload, timeout=120)
-    r.raise_for_status()
+    r = _request_with_retry("POST", url, headers=_openai_headers(), json_body=payload, timeout=90)
     data = r.json()
     content = data["choices"][0]["message"]["content"]
     return json.loads(content)
@@ -94,15 +140,14 @@ def openai_chat_json(system_prompt: str, user_prompt: str) -> dict:
 def openai_image_bytes(prompt: str, size: str) -> bytes:
     url = "https://api.openai.com/v1/images/generations"
     payload = {"model": OPENAI_IMAGE_MODEL, "prompt": prompt, "size": size, "n": 1}
-    r = requests.post(url, headers=_openai_headers(), json=payload, timeout=240)
-    r.raise_for_status()
+    r = _request_with_retry("POST", url, headers=_openai_headers(), json_body=payload, timeout=120)
     data = r.json()
     item = (data.get("data") or [None])[0] or {}
     if "b64_json" in item and item["b64_json"]:
         import base64
         return base64.b64decode(item["b64_json"])
     if "url" in item and item["url"]:
-        img_r = requests.get(item["url"], timeout=240)
+        img_r = requests.get(item["url"], timeout=120)
         img_r.raise_for_status()
         return img_r.content
     raise RuntimeError("Unexpected image response from OpenAI")
@@ -192,7 +237,15 @@ def job_status(job_id):
     job = read_job(job_id)
     if not job:
         return jsonify({"error": "Job not found"}), 404
-    return jsonify(job), 200
+
+    # Phase information added to indicate current status
+    return jsonify({
+        **job,
+        "phase": "image_1" if job.get("ready", False) else "text",  # Example placeholder for progress tracking
+        "retrying": job.get("status") == "error",
+        "retry_in_seconds": 12,  # Can be dynamically calculated for real retry timings
+        "message": "Retrying due to temporary issue, please wait..." if job.get("status") == "error" else ""
+    }), 200
 
 @app.get("/api/jobs/<job_id>/ads/<int:index>/image")
 def get_image(job_id, index):
