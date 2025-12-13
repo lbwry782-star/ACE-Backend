@@ -4,8 +4,6 @@ import time
 import threading
 from io import BytesIO
 from zipfile import ZipFile
-import base64
-import re
 
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
@@ -19,15 +17,25 @@ OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
 # In-memory job store (simple MVP)
 JOBS = {}
 
-# Valid tiny JPEG (base64). Robust decode (handles missing padding / whitespace).
-_TINY_JPG_B64 = """/9j/4AAQSkZJRgABAQAAAQABAAD/2wCEAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAALCAABAAEBAREA/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAb/xAAUEQEAAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCkA//Z"""
+# Valid tiny JPEG bytes embedded as HEX (no base64 -> no padding issues)
+_TINY_JPG_HEX = """
+ffd8ffe000104a46494600010100000100010000ffdb00430006040506050406060506070706080a100a0a09090a140e0f0c1017141818171416161a
+1d251f1a1b231c1616202c20232627292a29191f2d302d283025282928ffdb0043010707070a080a130a0a13281a161a282828282828282828282828
+2828282828282828282828282828282828282828282828282828282828282828282828282828ffc00011080001000103012200021101031101ffc400
+1f0000010501010101010100000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d010203000411051221
+31410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a434445464748494a53545556
+5758595a636465666768696a737475767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6
+c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9faffc4001f0100030101010101010101010000000000000102030405
+060708090a0bffc400b51100020102040403040705040400010277000102031104052131061241510761711322328108144291a1b1c109233352f015
+6272d10a162434e125f11718191a262728292a35363738393a434445464748494a535455565758595a636465666768696a737475767778797a828384
+85868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae2e3e4e5e6e7e8e9ea
+f2f3f4f5f6f7f8f9faffda000c03010002110311003f00faa68a28a00fffd9
+"""
 
-def _b64decode_loose(s: str) -> bytes:
-    s = re.sub(r"[^A-Za-z0-9+/=]", "", s)
-    s += "==="  # padding safety
-    return base64.b64decode(s)
+def _hex_to_bytes(s: str) -> bytes:
+    return bytes.fromhex("".join(s.split()))
 
-TINY_JPG_BYTES = _b64decode_loose(_TINY_JPG_B64)
+TINY_JPG_BYTES = _hex_to_bytes(_TINY_JPG_HEX)
 
 @app.get("/health")
 def health():
@@ -41,10 +49,9 @@ def run_generation(job_id: str, product_name: str, product_description: str, siz
 
         ads = []
         for i in range(1, 4):
-            # Store image bytes (valid JPG)
             JOBS[job_id]["images"][i] = TINY_JPG_BYTES
 
-            # 50-word-ish marketing text placeholder
+            # Placeholder copy for MVP; real engine will generate 50-word copy per ad
             text = (
                 f"{product_name} helps you reach your goal with a clear, practical approach. "
                 f"Built for people who need results fast, it reduces friction, saves time, "
