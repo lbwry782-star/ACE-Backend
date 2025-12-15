@@ -2,15 +2,20 @@
 import os
 import uuid
 from flask import Flask, jsonify, request
+from flask_cors import CORS
 
 app = Flask(__name__)
+
+# Allow browser frontend to call this API from a different domain (GitHub Pages/custom domain)
+CORS(app, resources={r"/api/*": {"origins": "*"}})
+
 jobs = {}
 
 @app.get("/health")
 def health():
     return "ok", 200
 
-@app.post("/api/generate")
+@app.route("/api/generate", methods=["POST", "OPTIONS"])
 def generate():
     job_id = str(uuid.uuid4())
     jobs[job_id] = {
@@ -21,7 +26,7 @@ def generate():
     }
     return jsonify({"job_id": job_id, **jobs[job_id]["ad"], "ads_created": 1, "max_ads": 3})
 
-@app.post("/api/next-ad")
+@app.route("/api/next-ad", methods=["POST", "OPTIONS"])
 def next_ad():
     data = request.get_json(silent=True) or {}
     job_id = data.get("job_id")
