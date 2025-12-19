@@ -1,9 +1,10 @@
-# ACE Backend — V2
+# ACE Backend — V3
 
-Fixes:
-- CORS: uses FRONTEND_URL if set; otherwise allows all origins.
-- OpenAI text uses chat.completions (no responses API).
-- Sizes: 1024x1024 / 1024x1792 / 1792x1024 (legacy sizes mapped).
+Fixes in this version:
+- Image sizes aligned to OpenAI image endpoint supported values for gpt-image-1:
+  1024x1024, 1024x1536, 1536x1024
+- Frontend dropdown updated accordingly.
+- Backend maps any incoming 1024x1792/1792x1024 to supported equivalents.
 
 Render start command:
 gunicorn app:app --timeout 600

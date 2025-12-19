@@ -14,8 +14,8 @@ from werkzeug.utils import secure_filename
 from openai import OpenAI
 from openai import APIError, RateLimitError, APIConnectionError
 
-ALLOWED_SIZES = {"1024x1024", "1024x1792", "1792x1024"}
-SIZE_MAP = {"1024x1536": "1024x1792", "1536x1024": "1792x1024"}
+ALLOWED_SIZES = {"1024x1024", "1024x1536", "1536x1024"}
+SIZE_MAP = {"1024x1536": "1024x1536", "1536x1024": "1536x1024", "1024x1536": "1024x1536", "1536x1024": "1536x1024"}
 
 OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
 OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
