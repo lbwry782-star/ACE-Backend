@@ -1,299 +1,308 @@
-
 import os
+import io
 import time
+import json
 import uuid
-import threading
-import base64
-from dataclasses import dataclass, asdict
-from typing import Dict, Optional, Any
+import zipfile
+import logging
+from typing import Dict, Any, List, Optional, Tuple
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
+from werkzeug.utils import secure_filename
 
-# Optional OpenAI dependency (works in "mock mode" without a key)
-try:
-    from openai import OpenAI  # type: ignore
-except Exception:
-    OpenAI = None  # type: ignore
+from openai import OpenAI
+from openai import APIError, RateLimitError, APIConnectionError
 
-APP_VERSION = "FINAL-1.0"
+# -----------------------
+# Config
+# -----------------------
+ALLOWED_SIZES = {"1024x1024", "1024x1536", "1536x1024"}
 
-# ---------- Config ----------
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
-IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
+OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
+OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "").strip()
+PORT = int(os.getenv("PORT", "10000"))
 
-# If you keep hitting 429, increase these.
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", "6"))
-BASE_BACKOFF_SECONDS = float(os.getenv("BASE_BACKOFF_SECONDS", "2.0"))
-MAX_BACKOFF_SECONDS = float(os.getenv("MAX_BACKOFF_SECONDS", "30.0"))
+# Local storage (Render/container friendly)
+DATA_DIR = os.path.join(os.getcwd(), "generated")
+os.makedirs(DATA_DIR, exist_ok=True)
 
-# Basic server-side throttling to reduce account-wide 429 spikes.
-# (Not a payment gate — just safety.)
-MIN_SECONDS_BETWEEN_OPENAI_CALLS = float(os.getenv("MIN_SECONDS_BETWEEN_OPENAI_CALLS", "2.5"))
+# In-memory jobs
+JOBS: Dict[str, Dict[str, Any]] = {}
 
-# ---------- App ----------
+# Logging
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("ace-backend")
+
+# OpenAI client
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# -----------------------
+# App
+# -----------------------
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
 
-_last_openai_call_lock = threading.Lock()
-_last_openai_call_ts = 0.0
-
-def _sleep_until_next_openai_slot():
-    global _last_openai_call_ts
-    with _last_openai_call_lock:
-        now = time.time()
-        wait = (_last_openai_call_ts + MIN_SECONDS_BETWEEN_OPENAI_CALLS) - now
-        if wait > 0:
-            time.sleep(wait)
-        _last_openai_call_ts = time.time()
-
-@dataclass
-class JobState:
-    job_id: str
-    status: str  # queued | running | ready | error
-    phase: str   # text | image | done | error
-    message: str
-    ready: bool
-    retrying: bool
-    retry_in_seconds: int
-    requested_size: str
-    size: str
-    ad: Optional[Dict[str, Any]]
-    error: Optional[str]
-    created_at: float
-    updated_at: float
-
-JOBS: Dict[str, JobState] = {}
-JOBS_LOCK = threading.Lock()
-
-def _now():
-    return time.time()
-
-def _make_placeholder_png_base64(label: str = "AD") -> str:
-    # Create a simple SVG and base64 it as data: image/svg+xml; this avoids pillow dependency.
-    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024">
-      <defs>
-        <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stop-color="#111827"/>
-          <stop offset="100%" stop-color="#0f172a"/>
-        </linearGradient>
-      </defs>
-      <rect width="100%" height="100%" fill="url(#g)"/>
-      <rect x="80" y="80" width="864" height="864" rx="60" fill="none" stroke="#94a3b8" stroke-width="6"/>
-      <text x="512" y="520" font-family="Arial, Helvetica, sans-serif" font-size="120" fill="#e5e7eb" text-anchor="middle">{label}</text>
-      <text x="512" y="610" font-family="Arial, Helvetica, sans-serif" font-size="36" fill="#9ca3af" text-anchor="middle">Mock image (no OpenAI key)</text>
-    </svg>"""
-    b64 = base64.b64encode(svg.encode("utf-8")).decode("utf-8")
-    return "data:image/svg+xml;base64," + b64
-
-def _openai_client():
-    if not OPENAI_API_KEY or OpenAI is None:
-        return None
-    return OpenAI(api_key=OPENAI_API_KEY)
-
-def _is_retryable_error(err_text: str) -> bool:
-    # Handle 429 and transient 5xx/timeout patterns.
-    t = (err_text or "").lower()
-    return ("429" in t) or ("too many requests" in t) or ("timeout" in t) or ("temporar" in t) or ("502" in t) or ("503" in t) or ("504" in t)
-
-def _retry_sleep_seconds(attempt: int) -> int:
-    # Exponential backoff with jitter
-    import random
-    s = min(MAX_BACKOFF_SECONDS, BASE_BACKOFF_SECONDS * (2 ** max(0, attempt - 1)))
-    s = s * (0.7 + random.random() * 0.6)
-    return int(max(1, round(s)))
-
-def _generate_marketing_text(client_name: str, prompt: str) -> Dict[str, str]:
-    # Produces headline + primary text. One set only per ad.
-    client = _openai_client()
-    if client is None:
-        return {
-            "headline": f"{client_name}: results that feel effortless",
-            "primary_text": f"{client_name} helps you reach your goal with clarity and speed. {prompt.strip()[:140]}",
-            "cta": "Learn more"
-        }
-
-    sys = (
-        "You are a senior performance marketer. Create ONE ad text set. "
-        "Return STRICT JSON with keys: headline, primary_text, cta. "
-        "English only. No emojis. Headline <= 40 chars. Primary text 2-3 sentences."
-    )
-    user = {
-        "client_name": client_name,
-        "brief": prompt
-    }
-
-    _sleep_until_next_openai_slot()
-    r = client.responses.create(
-        model=TEXT_MODEL,
-        input=[
-            {"role": "system", "content": sys},
-            {"role": "user", "content": json.dumps(user)}
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.8,
-    )
-    # openai Responses: output_text contains JSON string
-    txt = r.output_text
-    data = json.loads(txt)
-    # guard keys
-    return {
-        "headline": str(data.get("headline", "")).strip()[:60],
-        "primary_text": str(data.get("primary_text", "")).strip(),
-        "cta": str(data.get("cta", "Learn more")).strip()[:30],
-    }
-
-def _generate_image_data_url(client_name: str, prompt: str, size: str) -> str:
-    client = _openai_client()
-    if client is None:
-        return _make_placeholder_png_base64("AD")
-
-    image_prompt = (
-        f"Create a modern, high-converting ad visual for: {client_name}. "
-        f"Concept: {prompt}. "
-        f"Style: clean, premium, photoreal or high-end design. "
-        f"Do NOT include any text, logos, UI elements, or watermarks."
-    )
-
-    _sleep_until_next_openai_slot()
-    img = client.images.generate(
-        model=IMAGE_MODEL,
-        prompt=image_prompt,
-        size=size,
-    )
-    # SDK returns base64 in data[0].b64_json for gpt-image-1
-    b64 = img.data[0].b64_json
-    return "data:image/png;base64," + b64
-
-def _run_job(job_id: str, client_name: str, prompt: str, size: str):
-    def update(**kwargs):
-        with JOBS_LOCK:
-            st = JOBS.get(job_id)
-            if not st:
-                return
-            for k, v in kwargs.items():
-                setattr(st, k, v)
-            st.updated_at = _now()
-
-    update(status="running", phase="text", message="Generating ad copy...", ready=False, retrying=False, retry_in_seconds=0, error=None, ad=None)
-
-    # --- TEXT with retries ---
-    last_err = None
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            txt = _generate_marketing_text(client_name, prompt)
-            update(phase="image", message="Generating image...", retrying=False, retry_in_seconds=0)
-            last_err = None
-            break
-        except Exception as e:
-            last_err = str(e)
-            if _is_retryable_error(last_err) and attempt < MAX_RETRIES:
-                wait_s = _retry_sleep_seconds(attempt)
-                update(
-                    status="error",
-                    phase="text",
-                    message="Retrying due to temporary issue, please wait...",
-                    retrying=True,
-                    retry_in_seconds=wait_s,
-                    error=last_err,
-                    ready=False,
-                )
-                time.sleep(wait_s)
-                update(status="running", phase="text", message="Retrying...", retrying=False, retry_in_seconds=0)
-                continue
-            update(status="error", phase="error", message="Failed. Please try again later.", retrying=False, retry_in_seconds=0, error=last_err, ready=False)
-            return
-
-    if last_err is not None:
-        # shouldn't happen, but keep safe
-        update(status="error", phase="error", message="Failed. Please try again later.", retrying=False, retry_in_seconds=0, error=last_err, ready=False)
-        return
-
-    # --- IMAGE with retries ---
-    last_err = None
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            img_url = _generate_image_data_url(client_name, prompt, size)
-            ad = {
-                "headline": txt["headline"],
-                "primary_text": txt["primary_text"],
-                "cta": txt.get("cta", "Learn more"),
-                "image_data_url": img_url,
-                "size": size,
-            }
-            update(status="ready", phase="done", message="Ready", ready=True, retrying=False, retry_in_seconds=0, error=None, ad=ad)
-            return
-        except Exception as e:
-            last_err = str(e)
-            if _is_retryable_error(last_err) and attempt < MAX_RETRIES:
-                wait_s = _retry_sleep_seconds(attempt)
-                update(
-                    status="error",
-                    phase="image",
-                    message="Retrying due to temporary issue, please wait...",
-                    retrying=True,
-                    retry_in_seconds=wait_s,
-                    error=last_err,
-                    ready=False,
-                )
-                time.sleep(wait_s)
-                update(status="running", phase="image", message="Retrying...", retrying=False, retry_in_seconds=0)
-                continue
-            update(status="error", phase="error", message="Failed. Please try again later.", retrying=False, retry_in_seconds=0, error=last_err, ready=False)
-            return
+# CORS: prefer allow only FRONTEND_URL; else allow all (temporary)
+if FRONTEND_URL:
+    CORS(app, resources={r"/*": {"origins": [FRONTEND_URL]}})
+else:
+    CORS(app)
 
 @app.get("/health")
 def health():
-    return jsonify({"ok": True, "version": APP_VERSION})
+    return jsonify({"status": "ok"}), 200
 
-@app.options("/api/generate")
-def generate_options():
-    return ("", 204)
+def _error(status: int, message: str, code: str = "error"):
+    return jsonify({"error": code, "message": message}), status
 
-@app.post("/api/generate")
+def _validate_payload(payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], str, Optional[Any]]:
+    product = (payload.get("product") or "").strip()
+    description = (payload.get("description") or "").strip()
+    size = (payload.get("size") or "").strip() or "1024x1024"
+
+    if not product:
+        return None, None, "", _error(400, "Missing or empty 'product'.", "bad_request")
+    if not description:
+        return None, None, "", _error(400, "Missing or empty 'description'.", "bad_request")
+    if size not in ALLOWED_SIZES:
+        return None, None, "", _error(400, f"Invalid 'size'. Must be one of: {sorted(ALLOWED_SIZES)}", "bad_request")
+
+    return product, description, size, None
+
+def _retry_backoff(fn, *, max_retries: int = 3, delays: List[float] = [2.0, 5.0, 10.0]):
+    """Retry wrapper for OpenAI rate limits (429) and transient network errors."""
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except RateLimitError as e:
+            last_exc = e
+            wait = delays[min(attempt, len(delays) - 1)]
+            log.warning("OpenAI 429 RateLimitError. Retry %s/%s after %ss", attempt + 1, max_retries, wait)
+            time.sleep(wait)
+        except APIConnectionError as e:
+            last_exc = e
+            wait = delays[min(attempt, len(delays) - 1)]
+            log.warning("OpenAI connection error. Retry %s/%s after %ss", attempt + 1, max_retries, wait)
+            time.sleep(wait)
+    raise last_exc
+
+def _system_prompt_engine() -> str:
+    return (
+        "You are ACE ENGINE. Follow rules H00-H10 strictly with zero interpretation. "
+        "No conceptual similarity; only strict visual/projection shape similarity. "
+        "Output must be ONLY valid JSON, no commentary."
+    )
+
+def _text_prompt_for_one_ad(product: str, description: str, size: str, ad_index: int) -> str:
+    # IMPORTANT: escape braces for JSON example so the model sees literal JSON
+    return f"""
+Create ONE advertising ad spec for the product below, following ACE ENGINE H00-H10 strictly.
+
+PRODUCT:
+- name: {product}
+- description: {description}
+- size: {size}
+- ad_number: {ad_index}
+
+STRICT RULES (must follow):
+- Derive audience ONLY from product name+description (H00).
+- Each ad has a DIFFERENT advertising goal (H01).
+- Produce 80 physical, real, everyday objects from the goal (H02) (objects only, not abstract ideas).
+- Select A (central meaning object) first, then B (emphasis object) (H03). A and B are not part of the same natural object.
+- Choose a viewing angle/projection that maximizes shape similarity BEFORE finalizing the pair (H04).
+- Shape similarity law (H05): if similarity is clearly high -> HYBRID; if medium -> SIDE_BY_SIDE; if not immediately obvious -> reject and choose another pair.
+- No forced perspective tricks. Similarity must be immediately obvious to an average human eye.
+- No objects with text/logos/letters/numbers/printed graphics unless it is physically engraved as part of the object (H03 rules).
+- Background must be the classic background of object A (H06), even for side-by-side.
+- Visual must be photorealistic (H09). No vector/illustration/3D/AI look.
+- Ad includes ONLY VISUAL + HEADLINE (H07). Headline includes product name, 3-7 words, original, not a quote nor a variation of the product description. Headline is NOT on the image.
+- Marketing text is exactly 50 words (H08) and is NOT on the image.
+
+OUTPUT FORMAT (JSON ONLY):
+{{
+  "ad_number": {ad_index},
+  "audience": {{
+    "age_range": "...",
+    "lifestyle": "...",
+    "needs": "...",
+    "knowledge_level": "...",
+    "pains": "..."
+  }},
+  "ad_goal": "...",
+  "objects_80": ["...","..."],
+  "A": "...",
+  "B": "...",
+  "mode": "HYBRID" | "SIDE_BY_SIDE",
+  "projection_angle": "...",
+  "headline": "...",
+  "marketing_text_50_words": "...",
+  "image_prompt": "A single prompt for gpt-image-1 that produces ONLY the photorealistic VISUAL (no text). Must reflect HYBRID or SIDE_BY_SIDE and use classic background of A. Must maximize projection shape visibility."
+}}
+
+The marketing_text_50_words must be EXACTLY 50 words. Return valid JSON only.
+""".strip()
+
+def _generate_text_spec(product: str, description: str, size: str, ad_index: int) -> Dict[str, Any]:
+    prompt = _text_prompt_for_one_ad(product, description, size, ad_index)
+
+    def call():
+        resp = client.responses.create(
+            model=OPENAI_TEXT_MODEL,
+            input=[
+                {"role": "system", "content": _system_prompt_engine()},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+        )
+        return resp.output_text
+
+    raw = _retry_backoff(call)
+    try:
+        return json.loads(raw)
+    except Exception:
+        s = (raw or "").strip()
+        start = s.find("{")
+        end = s.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return json.loads(s[start:end + 1])
+        raise ValueError("Text model did not return valid JSON.")
+
+def _save_image_b64(b64: str, filename: str) -> str:
+    import base64
+    path = os.path.join(DATA_DIR, filename)
+    with open(path, "wb") as f:
+        f.write(base64.b64decode(b64))
+    return path
+
+def _generate_image(image_prompt: str, size: str, filename: str) -> str:
+    def call():
+        img = client.images.generate(
+            model=OPENAI_IMAGE_MODEL,
+            prompt=image_prompt,
+            size=size,
+        )
+        return img.data[0].b64_json
+
+    b64 = _retry_backoff(call)
+    return _save_image_b64(b64, filename)
+
+def _word_count(text: str) -> int:
+    return len([w for w in (text or "").strip().split() if w])
+
+def _normalize_headline(headline: str, product: str) -> str:
+    h = (headline or "").strip()
+    if product.lower() not in h.lower():
+        h = f"{product} {h}".strip()
+    words = h.split()
+    if len(words) < 3:
+        h = f"{product} Made For You"
+    if len(h.split()) > 7:
+        h = " ".join(h.split()[:7])
+    return h
+
+def _ensure_50_words(text: str) -> str:
+    words = [w for w in (text or "").strip().split() if w]
+    if len(words) == 50:
+        return " ".join(words)
+    if len(words) > 50:
+        return " ".join(words[:50])
+    filler = ["today", "with", "ease", "and", "confidence"]
+    i = 0
+    while len(words) < 50:
+        words.append(filler[i % len(filler)])
+        i += 1
+    return " ".join(words[:50])
+
+@app.post("/generate")
 def generate():
-    data = request.get_json(silent=True) or {}
-    client_name = str(data.get("client_name", "")).strip() or "Client"
-    prompt = str(data.get("prompt", "")).strip() or "Create a compelling ad."
-    size = str(data.get("size", "1024x1024")).strip() or "1024x1024"
-
-    # Normalize size to allowed values (gpt-image-1 supports common sizes)
-    allowed = {"1024x1024", "1024x1536", "1536x1024"}
-    if size not in allowed:
-        size = "1024x1024"
+    payload = request.get_json(silent=True) or {}
+    product, description, size, err = _validate_payload(payload)
+    if err:
+        return err
 
     job_id = str(uuid.uuid4())
-    st = JobState(
-        job_id=job_id,
-        status="queued",
-        phase="text",
-        message="Queued",
-        ready=False,
-        retrying=False,
-        retry_in_seconds=0,
-        requested_size=str(data.get("size", size)),
-        size=size,
-        ad=None,
-        error=None,
-        created_at=_now(),
-        updated_at=_now(),
+    log.info("Generate request received job_id=%s size=%s", job_id, size)
+
+    ads_out = []
+    for ad_index in (1, 2, 3):
+        try:
+            log.info("Generating ad %s/3 job_id=%s", ad_index, job_id)
+            spec = _generate_text_spec(product, description, size, ad_index)
+
+            headline = _normalize_headline(spec.get("headline", ""), product)
+            marketing = _ensure_50_words(spec.get("marketing_text_50_words", ""))
+
+            image_prompt = (spec.get("image_prompt") or "").strip()
+            if not image_prompt:
+                raise ValueError("Missing image_prompt from text model.")
+
+            img_filename = f"{job_id}_ad{ad_index}.jpg"
+            _generate_image(image_prompt, size, img_filename)
+
+            txt_filename = f"{job_id}_ad{ad_index}.txt"
+            txt_path = os.path.join(DATA_DIR, txt_filename)
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(marketing)
+
+            root = request.url_root.rstrip("/")
+            image_url = f"{root}/file/{img_filename}"
+            zip_url = f"{root}/zip/{job_id}/{ad_index}"
+
+            ads_out.append({
+                "ad_number": ad_index,
+                "headline": headline,
+                "text": marketing,
+                "image_url": image_url,
+                "zip_url": zip_url
+            })
+
+        except RateLimitError:
+            return _error(503, "OpenAI rate limit (429). Please try again in a moment.", "rate_limited")
+        except (APIConnectionError, APIError):
+            log.exception("OpenAI/API error on ad %s job_id=%s", ad_index, job_id)
+            return _error(500, "Network / OpenAI error. Please try again.", "upstream_error")
+        except Exception:
+            log.exception("Unexpected error on ad %s job_id=%s", ad_index, job_id)
+            return _error(500, "Generation failed. Please try again.", "generation_error")
+
+    JOBS[job_id] = {"ads": ads_out, "created_at": time.time()}
+    return jsonify({"job_id": job_id, "ads": ads_out}), 200
+
+@app.get("/file/<path:filename>")
+def file_get(filename: str):
+    safe = secure_filename(filename)
+    path = os.path.join(DATA_DIR, safe)
+    if not os.path.exists(path):
+        return _error(404, "File not found.", "not_found")
+    return send_file(path)
+
+@app.get("/zip/<job_id>/<int:ad_number>")
+def zip_get(job_id: str, ad_number: int):
+    if ad_number not in (1, 2, 3):
+        return _error(400, "Invalid ad number.", "bad_request")
+
+    img_name = f"{job_id}_ad{ad_number}.jpg"
+    txt_name = f"{job_id}_ad{ad_number}.txt"
+    img_path = os.path.join(DATA_DIR, img_name)
+    txt_path = os.path.join(DATA_DIR, txt_name)
+
+    if not os.path.exists(img_path) or not os.path.exists(txt_path):
+        return _error(404, "ZIP content not found. Generate first.", "not_found")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        z.write(img_path, arcname=f"ad_{ad_number}.jpg")
+        z.write(txt_path, arcname=f"ad_{ad_number}.txt")
+    buf.seek(0)
+
+    return send_file(
+        buf,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"ACE_ad_{ad_number}.zip"
     )
-    with JOBS_LOCK:
-        JOBS[job_id] = st
-
-    t = threading.Thread(target=_run_job, args=(job_id, client_name, prompt, size), daemon=True)
-    t.start()
-    return jsonify({"job_id": job_id})
-
-@app.get("/api/job/<job_id>")
-def job(job_id: str):
-    with JOBS_LOCK:
-        st = JOBS.get(job_id)
-        if not st:
-            return jsonify({"error": "Job not found"}), 404
-        return jsonify(asdict(st))
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=PORT)
