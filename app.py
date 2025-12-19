@@ -150,16 +150,16 @@ def _generate_text_spec(product: str, description: str, size: str, ad_index: int
     def call():
         resp = client.chat.completions.create(
             model=OPENAI_TEXT_MODEL,
-        messages=[
-            {"role": "system", "content": _system_prompt_engine()},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.7,
-    )
-    return resp.choices[0].message.content
-
+            messages=[
+                {"role": "system", "content": _system_prompt_engine()},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+        )
+        return resp.choices[0].message.content  # <-- חייב להיות כאן, בתוך call()
 
     raw = _retry_backoff(call)
+
     try:
         return json.loads(raw)
     except Exception:
