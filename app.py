@@ -8,8 +8,6 @@ import logging
 import re
 from typing import Dict, Any, List, Optional, Tuple
 
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
-
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
@@ -120,7 +118,8 @@ STRICT RULES (must follow):
 - No objects with text/logos/letters/numbers/printed graphics unless it is physically engraved as part of the object (H03 rules).
 - Background must be the classic background of object A (H06), even for side-by-side.
 - Visual must be photorealistic (H09). No vector/illustration/3D/AI look.
-- Ad includes ONLY VISUAL + HEADLINE (H07). Headline includes product name, 3-7 words, original, not a quote nor a variation of the product description. Headline is NOT on the image.
+- Ad includes ONLY VISUAL + HEADLINE (H07). Headline includes product name, 3-7 words, original, not a quote nor a variation of the product description.
+- Headline IS PART OF THE IMAGE COMPOSITION: it appears above/below/next-to the visual, on the BACKGROUND of object A (negative space), never on top of A/B.
 - Marketing text is exactly 50 words (H08) and is NOT on the image.
 
 OUTPUT FORMAT (JSON ONLY):
@@ -179,23 +178,132 @@ def _save_image_b64(b64: str, filename: str) -> str:
         f.write(base64.b64decode(b64))
     return path
 
-
-def _build_image_prompt_no_text(base_prompt: str) -> str:
+def _add_headline_to_image(image_path: str, headline: str) -> None:
+    """Draw headline directly onto the image (no special bar/background), within safe margins.
+    Headline must sit on the BACKGROUND area (negative space) of object A, not on the A/B objects.
+    We can't 'detect' A/B, so we enforce a top-area placement and require the prompt to leave space.
     """
-    Engine rule (updated):
-    - The VISUAL returned by the image model must contain NO TEXT at all.
-    - We will add the HEADLINE ourselves as part of the final image on a clean background area
-      (above/below/side), never covering the visual objects.
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except Exception as e:
+        raise RuntimeError("Pillow is required to render headline. Add 'pillow' to requirements.txt") from e
+
+    h = (headline or "").strip()
+    if not h:
+        return
+
+    img = Image.open(image_path).convert("RGB")
+    W, H = img.size
+
+    pad_x = int(W * 0.05)
+    pad_y = int(H * 0.04)
+    region_h = int(H * 0.18)
+
+    draw = ImageDraw.Draw(img)
+
+    font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    font = None
+    base_size = max(18, int(W * 0.045))
+    for fp in font_paths:
+        if os.path.exists(fp):
+            font = ImageFont.truetype(fp, size=base_size)
+            break
+    if font is None:
+        font = ImageFont.load_default()
+
+    max_w = W - 2 * pad_x
+
+    def measure(text: str, fnt):
+        bbox = draw.textbbox((0, 0), text, font=fnt, stroke_width=3)
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+    def wrap_lines(fnt):
+        words = h.split()
+        lines = []
+        line = ""
+        for w in words:
+            test = (line + " " + w).strip()
+            tw, _ = measure(test, fnt)
+            if tw <= max_w:
+                line = test
+            else:
+                if line:
+                    lines.append(line)
+                line = w
+        if line:
+            lines.append(line)
+        return lines
+
+    def total_height(lines, fnt):
+        hh = 0
+        for ln in lines:
+            _, th = measure(ln, fnt)
+            hh += th
+        hh += int(len(lines) * (H * 0.01))
+        return hh
+
+    lines = wrap_lines(font)
+
+    # shrink font until lines fit in region height (prefer <=2 lines)
+    for _ in range(14):
+        th = total_height(lines, font)
+        if th <= region_h and len(lines) <= 2:
+            break
+        # shrink
+        new_size = max(12, int(getattr(font, "size", base_size) * 0.9))
+        try:
+            if os.path.exists(font_paths[0]):
+                font = ImageFont.truetype(font_paths[0], size=new_size)
+            elif os.path.exists(font_paths[1]):
+                font = ImageFont.truetype(font_paths[1], size=new_size)
+            else:
+                font = ImageFont.load_default()
+        except Exception:
+            font = ImageFont.load_default()
+        lines = wrap_lines(font)
+
+    y = pad_y
+    for ln in lines:
+        tw, th = measure(ln, font)
+        x = pad_x + max(0, (max_w - tw) // 2)
+        draw.text(
+            (x, y),
+            ln,
+            font=font,
+            fill=(255, 255, 255),
+            stroke_width=3,
+            stroke_fill=(0, 0, 0),
+        )
+        y += th + int(H * 0.01)
+
+    img.save(image_path, format="JPEG", quality=92, optimize=True)
+
+
+def _build_image_prompt_visual_only(base_prompt: str) -> str:
+    """Return an image prompt that produces ONLY the photorealistic visual (no text).
+    We will render the headline ourselves in backend to guarantee correctness.
     """
     rules = (
-        "PHOTOREALISTIC ADVERTISEMENT VISUAL (no text).\n"
-        "- Absolutely NO words, letters, numbers, logos, watermarks, captions, UI text, labels, or readable screens.\n"
-        "- Focus only on the visual objects and background.\n\n"
-        "BASE VISUAL PROMPT:\n"
+        "FINISHED ADVERTISEMENT PHOTO (photorealistic).
+"
+        "NO TEXT IN IMAGE: Do not render any letters, numbers, logos, labels, signs, watermarks, UI, or captions.
+"
+        "COMPOSITION: Leave clean negative space on the BACKGROUND of object A (top/side/bottom) so a headline can be placed there later, "
+        "without touching or covering the visual objects A/B.
+"
+        "BACKGROUND: Must be the classic background of object A (H06), even in SIDE BY SIDE.
+"
+        "STRICT: A/B must be the only visual focal objects.
+
+"
+        "BASE VISUAL PROMPT:
+"
     )
-    return rules + (base_prompt or '').strip() + "\n\n"
-
-
+    return rules + (base_prompt or "").strip() + "
+"
 
 def _generate_image(image_prompt: str, size: str, filename: str) -> str:
     def call():
@@ -212,130 +320,6 @@ def _generate_image(image_prompt: str, size: str, filename: str) -> str:
 def _word_count(text: str) -> int:
     return len([w for w in (text or "").strip().split() if w])
 
-
-def _compose_final_ad_with_headline(image_path: str, headline: str, placement: str = "top") -> None:
-    """
-    Create a finished ad image by adding a clean background area for the headline.
-    Headline is drawn on the background area ONLY (top by default), never over the visual objects.
-    This edits the file in-place.
-    """
-    h = (headline or "").strip()
-    if not h:
-        return
-
-    img = Image.open(image_path).convert("RGB")
-    w, h_img = img.size
-
-    # band height ~ 18% of image height (clamped)
-    band_h = max(140, int(h_img * 0.18))
-    band_h = min(band_h, int(h_img * 0.30))
-
-    # create background band from a blurred strip of the original image
-    strip = img.crop((0, 0, w, min(80, h_img)))
-    band = strip.resize((w, band_h)).filter(ImageFilter.GaussianBlur(radius=12))
-
-    # assemble canvas
-    if placement == "top":
-        canvas = Image.new("RGB", (w, h_img + band_h))
-        canvas.paste(band, (0, 0))
-        canvas.paste(img, (0, band_h))
-        text_box = (0, 0, w, band_h)
-    else:
-        # bottom
-        canvas = Image.new("RGB", (w, h_img + band_h))
-        canvas.paste(img, (0, 0))
-        canvas.paste(band, (0, h_img))
-        text_box = (0, h_img, w, h_img + band_h)
-
-    draw = ImageDraw.Draw(canvas)
-
-    # choose font
-    font_paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ]
-    font = None
-    for fp in font_paths:
-        if os.path.exists(fp):
-            font = ImageFont.truetype(fp, size=10)
-            break
-    if font is None:
-        font = ImageFont.load_default()
-
-    # fit font size & wrap
-    max_width = int(w * 0.92)
-    max_height = int(band_h * 0.82)
-
-    def wrap_lines(text: str, fnt, max_w: int) -> List[str]:
-        words = text.split()
-        lines = []
-        cur = ""
-        for word in words:
-            test = (cur + " " + word).strip()
-            tw = draw.textlength(test, font=fnt)
-            if tw <= max_w or not cur:
-                cur = test
-            else:
-                lines.append(cur)
-                cur = word
-        if cur:
-            lines.append(cur)
-        return lines
-
-    # find a font size that fits
-    best = None
-    for size in range(96, 18, -2):
-        try:
-            fnt = font if isinstance(font, ImageFont.ImageFont) and not hasattr(font, "path") else None
-        except Exception:
-            fnt = None
-        try:
-            if hasattr(font, "path"):
-                fnt = ImageFont.truetype(font.path, size=size)
-            elif any(os.path.exists(p) for p in font_paths):
-                # reload first available path
-                for fp in font_paths:
-                    if os.path.exists(fp):
-                        fnt = ImageFont.truetype(fp, size=size)
-                        break
-            else:
-                fnt = ImageFont.load_default()
-        except Exception:
-            fnt = ImageFont.load_default()
-
-        lines = wrap_lines(headline, fnt, max_width)
-        # measure
-        line_h = int(size * 1.15)
-        total_h = line_h * len(lines)
-        if total_h <= max_height and all(draw.textlength(line, font=fnt) <= max_width for line in lines):
-            best = (fnt, lines, line_h, total_h)
-            break
-
-    if best is None:
-        fnt = ImageFont.load_default()
-        lines = wrap_lines(headline, fnt, max_width)
-        line_h = 14
-        total_h = line_h * len(lines)
-    else:
-        fnt, lines, line_h, total_h = best
-
-    # draw a subtle dark overlay for readability
-    x0, y0, x1, y1 = text_box
-    overlay = Image.new("RGBA", (x1 - x0, y1 - y0), (0, 0, 0, 80))
-    canvas_rgba = canvas.convert("RGBA")
-    canvas_rgba.alpha_composite(overlay, (x0, y0))
-    canvas = canvas_rgba.convert("RGB")
-    draw = ImageDraw.Draw(canvas)
-
-    # center text
-    y_text = y0 + (band_h - total_h) // 2
-    for line in lines:
-        tw = draw.textlength(line, font=fnt)
-        x_text = (w - tw) // 2
-        draw.text((x_text, y_text), line, font=fnt, fill=(255, 255, 255))
-        y_text += line_h
-
-    canvas.save(image_path, format="JPEG", quality=92, optimize=True)
 def _normalize_headline(headline: str, product: str) -> str:
     h = (headline or "").strip()
     h = h.replace('"', '').replace("'", "")
@@ -428,9 +412,8 @@ def generate():
             raise ValueError("Missing image_prompt from text model.")
 
         img_filename = f"{job_id}_ad{ad_number}.jpg"
-        _generate_image(_build_image_prompt_no_text(image_prompt), size, img_filename)
-        # Add headline on clean background area (part of the image), never over the visual
-        _compose_final_ad_with_headline(os.path.join(DATA_DIR, img_filename), headline, placement='top')
+        _generate_image(_build_image_prompt_visual_only(image_prompt), size, img_filename)
+        _add_headline_to_image(os.path.join(DATA_DIR, img_filename), headline)
 
         txt_filename = f"{job_id}_ad{ad_number}.txt"
         txt_path = os.path.join(DATA_DIR, txt_filename)

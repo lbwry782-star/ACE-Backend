@@ -1,8 +1,8 @@
-# ACE — BACKEND V8 (Headline inside image)
+# ACE — BACKEND V9 (Headline rendered by backend)
 
-Change:
-- Headline is now rendered INSIDE the image on the BACKGROUND only (not on the visual objects A/B),
-  as part of the photographed scene (not HTML/CSS overlay).
+- Headline is drawn by the BACKEND onto the image (no special bar), placed on BACKGROUND negative space of object A.
+- Base image is generated with NO TEXT.
 
 Render start command:
+
 gunicorn app:app --timeout 600
