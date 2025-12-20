@@ -262,53 +262,73 @@ def generate():
     if err:
         return err
 
-    job_id = str(uuid.uuid4())
-    log.info("Generate request received job_id=%s size=%s", job_id, size)
+    # sequential attempts: frontend sends attempt 1..3
+    ad_number = int(payload.get("ad_number") or payload.get("attempt") or 1)
+    if ad_number < 1: ad_number = 1
+    if ad_number > 3: ad_number = 3
 
-    ads_out = []
-    for ad_index in (1, 2, 3):
-        try:
-            log.info("Generating ad %s/3 job_id=%s", ad_index, job_id)
-            spec = _generate_text_spec(product, description, size, ad_index)
+    job_id = (payload.get("job_id") or "").strip() or str(uuid.uuid4())
+    log.info("Generate request received job_id=%s ad_number=%s size=%s", job_id, ad_number, size)
 
-            headline = _normalize_headline(spec.get("headline", ""), product)
-            marketing = _ensure_50_words(spec.get("marketing_text_50_words", ""))
+    try:
+        spec = _generate_text_spec(product, description, size, ad_number)
 
-            image_prompt = (spec.get("image_prompt") or "").strip()
-            if not image_prompt:
-                raise ValueError("Missing image_prompt from text model.")
+        headline = _normalize_headline(spec.get("headline", ""), product)
+        if _headline_too_similar(headline, description):
+            headline = _regen_headline(product, description, spec.get("intent", ""))
 
-            img_filename = f"{job_id}_ad{ad_index}.jpg"
-            _generate_image(image_prompt, size, img_filename)
+        marketing = _ensure_50_words(spec.get("marketing_text_50_words", ""))
 
-            txt_filename = f"{job_id}_ad{ad_index}.txt"
-            txt_path = os.path.join(DATA_DIR, txt_filename)
-            with open(txt_path, "w", encoding="utf-8") as f:
-                f.write(marketing)
+        image_prompt = (spec.get("image_prompt") or "").strip()
+        if not image_prompt:
+            raise ValueError("Missing image_prompt from text model.")
 
-            root = request.url_root.rstrip("/")
-            image_url = f"{root}/file/{img_filename}"
-            zip_url = f"{root}/zip/{job_id}/{ad_index}"
+        img_filename = f"{job_id}_ad{ad_number}.jpg"
+        _generate_image(image_prompt, size, img_filename)
 
-            ads_out.append({
-                "ad_number": ad_index,
-                "headline": headline,
-                "text": marketing,
-                "image_url": image_url,
-                "zip_url": zip_url
-            })
+        txt_filename = f"{job_id}_ad{ad_number}.txt"
+        txt_path = os.path.join(DATA_DIR, txt_filename)
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write(marketing)
 
-        except RateLimitError:
-            return _error(503, "OpenAI rate limit (429). Please try again in a moment.", "rate_limited")
-        except (APIConnectionError, APIError):
-            log.exception("OpenAI/API error on ad %s job_id=%s", ad_index, job_id)
-            return _error(500, "Network / OpenAI error. Please try again.", "upstream_error")
-        except Exception:
-            log.exception("Unexpected error on ad %s job_id=%s", ad_index, job_id)
-            return _error(500, "Generation failed. Please try again.", "generation_error")
+        # build data URL so frontend can show immediately (no storage dependency)
+        import base64
+        img_path = os.path.join(DATA_DIR, img_filename)
+        with open(img_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+        image_data_url = "data:image/jpeg;base64," + b64
 
-    JOBS[job_id] = {"ads": ads_out, "created_at": time.time()}
-    return jsonify({"job_id": job_id, "ads": ads_out}), 200
+        root = request.url_root.rstrip("/")
+        zip_url = f"{root}/zip/{job_id}/{ad_number}"
+
+        ad_obj = {
+            "ad_number": ad_number,
+            "headline": headline,
+            "text": marketing,
+            "image_data_url": image_data_url,
+            "zip_url": zip_url
+        }
+
+        # store/merge in JOBS
+        job = JOBS.get(job_id) or {"ads": [], "created_at": time.time()}
+        # replace if exists
+        ads = [a for a in job.get("ads", []) if int(a.get("ad_number",0)) != ad_number]
+        ads.append({k:v for k,v in ad_obj.items() if k != "image_data_url"})  # store lightweight (no big b64)
+        ads.sort(key=lambda x: int(x.get("ad_number", 0)))
+        job["ads"] = ads
+        JOBS[job_id] = job
+
+        return jsonify({"job_id": job_id, "ad": ad_obj}), 200
+
+    except RateLimitError:
+        return _error(503, "OpenAI rate limit (429). Please try again in a moment.", "rate_limited")
+    except (APIConnectionError, APIError):
+        log.exception("OpenAI/API error job_id=%s ad_number=%s", job_id, ad_number)
+        return _error(500, "Network / OpenAI error. Please try again.", "upstream_error")
+    except Exception:
+        log.exception("Unexpected error job_id=%s ad_number=%s", job_id, ad_number)
+        return _error(500, "Generation failed. Please try again.", "generation_error")
+
 
 @app.get("/file/<path:filename>")
 def file_get(filename: str):
