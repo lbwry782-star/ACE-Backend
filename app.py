@@ -5,7 +5,6 @@ import json
 import uuid
 import zipfile
 import logging
-import re
 from typing import Dict, Any, List, Optional, Tuple
 
 from flask import Flask, request, jsonify, send_file
@@ -15,40 +14,31 @@ from werkzeug.utils import secure_filename
 from openai import OpenAI
 from openai import APIError, RateLimitError, APIConnectionError
 
-# -----------------------
-# Config
-# -----------------------
-ALLOWED_SIZES = {"1024x1024", "1024x1536", "1536x1024"}
+ALLOWED_SIZES = {"1024x1024", "1024x1792", "1792x1024"}
+SIZE_MAP = {"1024x1536": "1024x1792", "1536x1024": "1792x1024"}
 
 OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
 OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "").strip()
+FRONTEND_URL = (os.getenv("FRONTEND_URL") or "").strip()
 PORT = int(os.getenv("PORT", "10000"))
 
-# Local storage (Render/container friendly)
 DATA_DIR = os.path.join(os.getcwd(), "generated")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# In-memory jobs
-JOBS: Dict[str, Dict[str, Any]] = {}
-
-# Logging
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("ace-backend")
 
-# OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# -----------------------
-# App
-# -----------------------
 app = Flask(__name__)
 
-# CORS: prefer allow only FRONTEND_URL; else allow all (temporary)
+# Robust CORS: restrict if FRONTEND_URL set, else allow all (temporary safety net)
 if FRONTEND_URL:
     CORS(app, resources={r"/*": {"origins": [FRONTEND_URL]}})
+    log.info("CORS restricted to FRONTEND_URL=%s", FRONTEND_URL)
 else:
     CORS(app)
+    log.warning("FRONTEND_URL not set; CORS allows all origins (temporary)")
 
 @app.get("/health")
 def health():
@@ -57,10 +47,16 @@ def health():
 def _error(status: int, message: str, code: str = "error"):
     return jsonify({"error": code, "message": message}), status
 
+def _normalize_size(size_raw: str) -> str:
+    size = (size_raw or "").strip()
+    if not size:
+        return "1024x1024"
+    return SIZE_MAP.get(size, size)
+
 def _validate_payload(payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], str, Optional[Any]]:
     product = (payload.get("product") or "").strip()
     description = (payload.get("description") or "").strip()
-    size = (payload.get("size") or "").strip() or "1024x1024"
+    size = _normalize_size(payload.get("size") or "")
 
     if not product:
         return None, None, "", _error(400, "Missing or empty 'product'.", "bad_request")
@@ -68,38 +64,31 @@ def _validate_payload(payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[
         return None, None, "", _error(400, "Missing or empty 'description'.", "bad_request")
     if size not in ALLOWED_SIZES:
         return None, None, "", _error(400, f"Invalid 'size'. Must be one of: {sorted(ALLOWED_SIZES)}", "bad_request")
-
     return product, description, size, None
 
 def _retry_backoff(fn, *, max_retries: int = 3, delays: List[float] = [2.0, 5.0, 10.0]):
-    """Retry wrapper for OpenAI rate limits (429) and transient network errors."""
     last_exc = None
     for attempt in range(max_retries):
         try:
             return fn()
         except RateLimitError as e:
             last_exc = e
-            wait = delays[min(attempt, len(delays) - 1)]
-            log.warning("OpenAI 429 RateLimitError. Retry %s/%s after %ss", attempt + 1, max_retries, wait)
+            wait = delays[min(attempt, len(delays)-1)]
+            log.warning("OpenAI 429 RateLimitError. Retry %s/%s after %ss", attempt+1, max_retries, wait)
             time.sleep(wait)
         except APIConnectionError as e:
             last_exc = e
-            wait = delays[min(attempt, len(delays) - 1)]
-            log.warning("OpenAI connection error. Retry %s/%s after %ss", attempt + 1, max_retries, wait)
+            wait = delays[min(attempt, len(delays)-1)]
+            log.warning("OpenAI connection error. Retry %s/%s after %ss", attempt+1, max_retries, wait)
             time.sleep(wait)
     raise last_exc
 
 def _system_prompt_engine() -> str:
-    return (
-        "You are ACE ENGINE. Follow rules H00-H10 strictly with zero interpretation. "
-        "No conceptual similarity; only strict visual/projection shape similarity. "
-        "Output must be ONLY valid JSON, no commentary."
-    )
+    return "You are ACE ENGINE. Output ONLY valid JSON. No extra text."
 
 def _text_prompt_for_one_ad(product: str, description: str, size: str, ad_index: int) -> str:
-    # IMPORTANT: escape braces for JSON example so the model sees literal JSON
     return f"""
-Create ONE advertising ad spec for the product below, following ACE ENGINE H00-H10 strictly.
+Create ONE advertising ad spec for the product below.
 
 PRODUCT:
 - name: {product}
@@ -107,42 +96,17 @@ PRODUCT:
 - size: {size}
 - ad_number: {ad_index}
 
-STRICT RULES (must follow):
-- Derive audience ONLY from product name+description (H00).
-- Each ad has a DIFFERENT advertising goal (H01).
-- Produce 80 physical, real, everyday objects from the goal (H02) (objects only, not abstract ideas).
-- Select A (central meaning object) first, then B (emphasis object) (H03). A and B are not part of the same natural object.
-- Choose a viewing angle/projection that maximizes shape similarity BEFORE finalizing the pair (H04).
-- Shape similarity law (H05): if similarity is clearly high -> HYBRID; if medium -> SIDE_BY_SIDE; if not immediately obvious -> reject and choose another pair.
-- No forced perspective tricks. Similarity must be immediately obvious to an average human eye.
-- No objects with text/logos/letters/numbers/printed graphics unless it is physically engraved as part of the object (H03 rules).
-- Background must be the classic background of object A (H06), even for side-by-side.
-- Visual must be photorealistic (H09). No vector/illustration/3D/AI look.
-- Ad includes ONLY VISUAL + HEADLINE (H07). Headline includes product name, 3-7 words, original, not a quote nor a variation of the product description. Headline is NOT on the image.
-- Marketing text is exactly 50 words (H08) and is NOT on the image.
-
-OUTPUT FORMAT (JSON ONLY):
+Return JSON ONLY:
 {{
   "ad_number": {ad_index},
-  "audience": {{
-    "age_range": "...",
-    "lifestyle": "...",
-    "needs": "...",
-    "knowledge_level": "...",
-    "pains": "..."
-  }},
-  "ad_goal": "...",
-  "objects_80": ["...","..."],
-  "A": "...",
-  "B": "...",
-  "mode": "HYBRID" | "SIDE_BY_SIDE",
-  "projection_angle": "...",
   "headline": "...",
   "marketing_text_50_words": "...",
-  "image_prompt": "A single prompt for gpt-image-1 that produces ONLY the photorealistic VISUAL (no text). Must reflect HYBRID or SIDE_BY_SIDE and use classic background of A. Must maximize projection shape visibility."
+  "image_prompt": "Photorealistic prompt for gpt-image-1, NO text on image."
 }}
 
-The marketing_text_50_words must be EXACTLY 50 words. Return valid JSON only.
+Rules:
+- Headline: 3-7 words, includes product name, not a quote, not copied from description, not on image.
+- Marketing text: EXACTLY 50 words, not on image.
 """.strip()
 
 def _generate_text_spec(product: str, description: str, size: str, ad_index: int) -> Dict[str, Any]:
@@ -167,7 +131,7 @@ def _generate_text_spec(product: str, description: str, size: str, ad_index: int
         start = s.find("{")
         end = s.rfind("}")
         if start != -1 and end != -1 and end > start:
-            return json.loads(s[start:end + 1])
+            return json.loads(s[start:end+1])
         raise ValueError("Text model did not return valid JSON.")
 
 def _save_image_b64(b64: str, filename: str) -> str:
@@ -177,66 +141,6 @@ def _save_image_b64(b64: str, filename: str) -> str:
         f.write(base64.b64decode(b64))
     return path
 
-
-
-
-def _build_image_prompt_with_headline(base_prompt: str, headline: str, size: str) -> str:
-    """
-    Engine rules:
-    - Headline must be rendered INSIDE the image (pixels), placed on BACKGROUND only.
-    - Headline must NOT overlap/touch the visual objects (A/B or hybrid).
-    - Canvas-aware composition: reserve negative space for headline based on aspect ratio,
-      and keep all important elements fully inside safe margins (no cropping).
-    """
-    h = (headline or "").strip()
-    base = (base_prompt or "").strip()
-    if not h:
-        return base
-
-    # Choose placement hint based on size/aspect ratio
-    # size values expected like "1024x1024", "1024x1536", "1536x1024"
-    placement_hint = "TOP"
-    reserve_hint = "Reserve clean negative space on TOP for the headline."
-    if size == "1536x1024":
-        placement_hint = "LEFT"
-        reserve_hint = "Reserve ~22% of the canvas width on the LEFT as clean negative space for the headline."
-    elif size == "1024x1536":
-        placement_hint = "TOP"
-        reserve_hint = "Reserve ~18% of the canvas height on the TOP as clean negative space for the headline."
-    else:
-        placement_hint = "TOP"
-        reserve_hint = "Reserve ~16% of the canvas height on the TOP as clean negative space for the headline."
-
-    rules = "
-".join([
-        "FINISHED ADVERTISEMENT PHOTO (photorealistic).",
-        "",
-        f"CANVAS: EXACTLY {size}.",
-        "CANVAS-AWARE COMPOSITION (anti-crop):",
-        "- All important elements (visual objects A/B or hybrid) must be FULLY inside the frame with safe margins",
-        "- Do NOT place important elements near the edges",
-        "- Do NOT crop the visual objects; keep them comfortably inside the canvas",
-        f"- HEADLINE PLACEMENT AREA: {placement_hint}",
-        f"- {reserve_hint}",
-        "",
-        "TEXT IN IMAGE (headline):",
-        f'- Render this EXACT headline text inside the image: "{h}"',
-        "- Place the headline ONLY on the BACKGROUND negative-space area (not on the objects)",
-        "- Do NOT overlap or touch the main visual objects",
-        "- The headline must look naturally integrated into the photographed scene (printed/painted on a background plane),",
-        "  NOT as a digital overlay, sticker, UI caption, watermark, or floating text",
-        "- High-contrast, clean advertising typography, clearly readable",
-        "",
-        "STRICT TEXT RULE:",
-        "- No other text anywhere (no extra words, no logos, no labels, no signage, no readable screens). Only the exact headline above.",
-        "",
-        "BASE VISUAL PROMPT:",
-        base
-    ]).strip() + "
-"
-
-    return rules
-
 def _generate_image(image_prompt: str, size: str, filename: str) -> str:
     def call():
         img = client.images.generate(
@@ -245,62 +149,8 @@ def _generate_image(image_prompt: str, size: str, filename: str) -> str:
             size=size,
         )
         return img.data[0].b64_json
-
     b64 = _retry_backoff(call)
     return _save_image_b64(b64, filename)
-
-def _word_count(text: str) -> int:
-    return len([w for w in (text or "").strip().split() if w])
-
-def _normalize_headline(headline: str, product: str) -> str:
-    h = (headline or "").strip()
-    h = h.replace('"', '').replace("'", "")
-    if product and product.lower() not in h.lower():
-        h = f"{product} {h}".strip() if h else f"{product} Made For You"
-    words = [w for w in h.split() if w]
-    if len(words) < 3:
-        h = f"{product} Made For You".strip()
-        words = h.split()
-    if len(words) > 7:
-        h = " ".join(words[:7])
-    return h
-
-def _headline_too_similar(headline: str, description: str) -> bool:
-    h_words = [w.lower() for w in re.findall(r"[a-zA-Z0-9]+", headline or "") if w]
-    d_words = set(w.lower() for w in re.findall(r"[a-zA-Z0-9]+", description or "") if w)
-    if not h_words:
-        return True
-    overlap = sum(1 for w in h_words if w in d_words)
-    return (overlap / max(1, len(h_words))) >= 0.6
-
-def _regen_headline(product: str, description: str, intent: str) -> str:
-    prompt = f"""Create ONE advertising headline.
-
-Rules:
-- 3 to 7 words ONLY
-- Must include the product name: {product}
-- Must be original (not a quote, not a rephrase of the product description)
-- No quotes
-- No heavy punctuation
-
-Product description: {description}
-Ad intent: {intent}
-
-Return ONLY the headline text."""
-
-    def call():
-        resp = client.chat.completions.create(
-            model=OPENAI_TEXT_MODEL,
-            messages=[
-                {"role": "system", "content": "Return only the headline text."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.7,
-        )
-        return resp.choices[0].message.content
-
-    raw = _retry_backoff(call)
-    return _normalize_headline(raw, product)
 
 def _ensure_50_words(text: str) -> str:
     words = [w for w in (text or "").strip().split() if w]
@@ -308,12 +158,21 @@ def _ensure_50_words(text: str) -> str:
         return " ".join(words)
     if len(words) > 50:
         return " ".join(words[:50])
-    filler = ["today", "with", "ease", "and", "confidence"]
+    filler = ["today","with","ease","and","confidence"]
     i = 0
     while len(words) < 50:
-        words.append(filler[i % len(filler)])
-        i += 1
+        words.append(filler[i % len(filler)]); i += 1
     return " ".join(words[:50])
+
+def _normalize_headline(headline: str, product: str) -> str:
+    h = (headline or "").strip()
+    if product and product.lower() not in h.lower():
+        h = f"{product} {h}".strip()
+    if len(h.split()) < 3:
+        h = f"{product} Made For You"
+    if len(h.split()) > 7:
+        h = " ".join(h.split()[:7])
+    return h
 
 @app.post("/generate")
 def generate():
@@ -322,73 +181,45 @@ def generate():
     if err:
         return err
 
-    # sequential attempts: frontend sends attempt 1..3
-    ad_number = int(payload.get("ad_number") or payload.get("attempt") or 1)
-    if ad_number < 1: ad_number = 1
-    if ad_number > 3: ad_number = 3
+    job_id = str(uuid.uuid4())
+    log.info("Generate request received job_id=%s size=%s origin=%s", job_id, size, request.headers.get("Origin"))
 
-    job_id = (payload.get("job_id") or "").strip() or str(uuid.uuid4())
-    log.info("Generate request received job_id=%s ad_number=%s size=%s", job_id, ad_number, size)
+    ads_out = []
+    for ad_index in (1,2,3):
+        try:
+            spec = _generate_text_spec(product, description, size, ad_index)
+            headline = _normalize_headline(spec.get("headline",""), product)
+            marketing = _ensure_50_words(spec.get("marketing_text_50_words",""))
+            image_prompt = (spec.get("image_prompt") or "").strip()
+            if not image_prompt:
+                raise ValueError("Missing image_prompt")
 
-    try:
-        spec = _generate_text_spec(product, description, size, ad_number)
+            img_filename = f"{job_id}_ad{ad_index}.jpg"
+            _generate_image(image_prompt, size, img_filename)
 
-        headline = _normalize_headline(spec.get("headline", ""), product)
-        if _headline_too_similar(headline, description):
-            headline = _regen_headline(product, description, spec.get("intent", ""))
+            txt_filename = f"{job_id}_ad{ad_index}.txt"
+            with open(os.path.join(DATA_DIR, txt_filename), "w", encoding="utf-8") as f:
+                f.write(marketing)
 
-        marketing = _ensure_50_words(spec.get("marketing_text_50_words", ""))
+            root = request.url_root.rstrip("/")
+            ads_out.append({
+                "ad_number": ad_index,
+                "headline": headline,
+                "text": marketing,
+                "image_url": f"{root}/file/{img_filename}",
+                "zip_url": f"{root}/zip/{job_id}/{ad_index}",
+            })
 
-        image_prompt = (spec.get("image_prompt") or "").strip()
-        if not image_prompt:
-            raise ValueError("Missing image_prompt from text model.")
+        except RateLimitError:
+            return _error(503, "OpenAI rate limit (429). Please try again in a moment.", "rate_limited")
+        except (APIConnectionError, APIError):
+            log.exception("OpenAI/API error")
+            return _error(500, "Network / OpenAI error. Please try again.", "upstream_error")
+        except Exception:
+            log.exception("Generation error")
+            return _error(500, "Generation failed. Please try again.", "generation_error")
 
-        img_filename = f"{job_id}_ad{ad_number}.jpg"
-        _generate_image(_build_image_prompt_with_headline(image_prompt, headline, size), size, img_filename)
-
-        txt_filename = f"{job_id}_ad{ad_number}.txt"
-        txt_path = os.path.join(DATA_DIR, txt_filename)
-        with open(txt_path, "w", encoding="utf-8") as f:
-            f.write(marketing)
-
-        # build data URL so frontend can show immediately (no storage dependency)
-        import base64
-        img_path = os.path.join(DATA_DIR, img_filename)
-        with open(img_path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode("ascii")
-        image_data_url = "data:image/jpeg;base64," + b64
-
-        root = request.url_root.rstrip("/")
-        zip_url = f"{root}/zip/{job_id}/{ad_number}"
-
-        ad_obj = {
-            "ad_number": ad_number,
-            "headline": headline,
-            "text": marketing,
-            "image_data_url": image_data_url,
-            "zip_url": zip_url
-        }
-
-        # store/merge in JOBS
-        job = JOBS.get(job_id) or {"ads": [], "created_at": time.time()}
-        # replace if exists
-        ads = [a for a in job.get("ads", []) if int(a.get("ad_number",0)) != ad_number]
-        ads.append({k:v for k,v in ad_obj.items() if k != "image_data_url"})  # store lightweight (no big b64)
-        ads.sort(key=lambda x: int(x.get("ad_number", 0)))
-        job["ads"] = ads
-        JOBS[job_id] = job
-
-        return jsonify({"job_id": job_id, "ad": ad_obj}), 200
-
-    except RateLimitError:
-        return _error(503, "OpenAI rate limit (429). Please try again in a moment.", "rate_limited")
-    except (APIConnectionError, APIError):
-        log.exception("OpenAI/API error job_id=%s ad_number=%s", job_id, ad_number)
-        return _error(500, "Network / OpenAI error. Please try again.", "upstream_error")
-    except Exception:
-        log.exception("Unexpected error job_id=%s ad_number=%s", job_id, ad_number)
-        return _error(500, "Generation failed. Please try again.", "generation_error")
-
+    return jsonify({"job_id": job_id, "ads": ads_out}), 200
 
 @app.get("/file/<path:filename>")
 def file_get(filename: str):
@@ -400,7 +231,7 @@ def file_get(filename: str):
 
 @app.get("/zip/<job_id>/<int:ad_number>")
 def zip_get(job_id: str, ad_number: int):
-    if ad_number not in (1, 2, 3):
+    if ad_number not in (1,2,3):
         return _error(400, "Invalid ad number.", "bad_request")
 
     img_name = f"{job_id}_ad{ad_number}.jpg"
@@ -417,12 +248,7 @@ def zip_get(job_id: str, ad_number: int):
         z.write(txt_path, arcname=f"ad_{ad_number}.txt")
     buf.seek(0)
 
-    return send_file(
-        buf,
-        mimetype="application/zip",
-        as_attachment=True,
-        download_name=f"ACE_ad_{ad_number}.zip"
-    )
+    return send_file(buf, mimetype="application/zip", as_attachment=True, download_name=f"ACE_ad_{ad_number}.zip")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
