@@ -149,15 +149,15 @@ def _generate_text_spec(product: str, description: str, size: str, ad_index: int
     prompt = _text_prompt_for_one_ad(product, description, size, ad_index)
 
     def call():
-        resp = client.responses.create(
+        resp = client.chat.completions.create(
             model=OPENAI_TEXT_MODEL,
-            input=[
+            messages=[
                 {"role": "system", "content": _system_prompt_engine()},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.7,
         )
-        return resp.output_text
+        return resp.choices[0].message.content
 
     raw = _retry_backoff(call)
     try:
