@@ -28,7 +28,6 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 app = Flask(__name__)
 
-# Robust CORS: restrict if FRONTEND_URL set, else allow all
 if FRONTEND_URL:
     CORS(app, resources={r"/*": {"origins": [FRONTEND_URL]}})
     log.info("CORS restricted to FRONTEND_URL=%s", FRONTEND_URL)
@@ -36,9 +35,9 @@ else:
     CORS(app)
     log.warning("FRONTEND_URL not set; CORS allows all origins")
 
-# In-memory cache: job_id -> {"img": bytes, "txt": str, "ts": float}
+# In-memory cache: job_id -> {"ads": { "1": {"img": bytes, "txt": str}, ... }, "ts": float}
 CACHE: Dict[str, Dict[str, Any]] = {}
-CACHE_TTL_SECONDS = 15 * 60  # 15 minutes
+CACHE_TTL_SECONDS = 30 * 60  # 30 minutes
 
 @app.get("/health")
 def health():
@@ -49,27 +48,30 @@ def _error(status: int, message: str, code: str = "error"):
 
 def _cleanup_cache():
     now = time.time()
-    dead = [k for k,v in CACHE.items() if now - float(v.get("ts", 0)) > CACHE_TTL_SECONDS]
-    for k in dead:
-        CACHE.pop(k, None)
+    dead = [job_id for job_id, data in CACHE.items() if now - float(data.get("ts", 0)) > CACHE_TTL_SECONDS]
+    for job_id in dead:
+        CACHE.pop(job_id, None)
 
-def _validate_payload(payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], str, Optional[Any]]:
+def _validate_payload(payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], str, int, str, Optional[Any]]:
     product = (payload.get("product") or "").strip()
     description = (payload.get("description") or "").strip()
     size = (payload.get("size") or "").strip() or "1024x1024"
+    ad_number = int(payload.get("ad_number") or 1)
+    job_id = (payload.get("job_id") or "").strip()
 
     if not product:
-        return None, None, "", _error(400, "Missing or empty 'product'.", "bad_request")
+        return None, None, "", 0, "", _error(400, "Missing or empty 'product'.", "bad_request")
     if not description:
-        return None, None, "", _error(400, "Missing or empty 'description'.", "bad_request")
+        return None, None, "", 0, "", _error(400, "Missing or empty 'description'.", "bad_request")
     if size not in ALLOWED_SIZES:
-        return None, None, "", _error(400, f"Invalid 'size'. Must be one of: {sorted(ALLOWED_SIZES)}", "bad_request")
-    return product, description, size, None
+        return None, None, "", 0, "", _error(400, f"Invalid 'size'. Must be one of: {sorted(ALLOWED_SIZES)}", "bad_request")
+    if ad_number not in (1,2,3):
+        return None, None, "", 0, "", _error(400, "Invalid 'ad_number'. Must be 1, 2, or 3.", "bad_request")
+    if not job_id:
+        job_id = str(uuid.uuid4())
+    return product, description, size, ad_number, job_id, None
 
-def _retry_backoff(fn, *, max_retries: int = 4, delays: List[float] = [2.0, 5.0, 10.0, 20.0]):
-    """
-    Handles OpenAI 429 with backoff + transient connection errors.
-    """
+def _retry_backoff(fn, *, max_retries: int = 5, delays: List[float] = [2.0, 5.0, 10.0, 20.0, 30.0]):
     last_exc = None
     for attempt in range(max_retries):
         try:
@@ -89,29 +91,54 @@ def _retry_backoff(fn, *, max_retries: int = 4, delays: List[float] = [2.0, 5.0,
 def _system_prompt_engine() -> str:
     return "You are ACE ENGINE. Output ONLY valid JSON. No extra text."
 
-def _text_prompt_for_one_ad(product: str, description: str, size: str) -> str:
+def _engine_prompt(product: str, description: str, size: str, ad_number: int) -> str:
     return f"""
-Create ONE advertising ad spec for the product below.
+Follow exactly the ACE ENGINE rules (H00–H10). No interpretation.
 
-PRODUCT:
-- name: {product}
-- description: {description}
+INPUT:
+- product_name: {product}
+- product_description: {description}
 - size: {size}
+- ad_number: {ad_number} (attempt {ad_number}/3; each attempt MUST use a different advertising intent)
 
-Return JSON ONLY:
+APPLY THESE RULES (strict):
+H00 Audience: infer only from product+description.
+H01: define 1 unique intent for this ad_number (different from other attempts).
+H02: generate EXACTLY 80 associative PHYSICAL objects derived from the intent (no abstract).
+H03: pick A first (central meaning), then B (highlight) from the 80. No objects with printed text/logos/labels.
+H04: choose the camera angle/projection that maximizes silhouette similarity between A and B.
+H05: if high similarity -> HYBRID; if medium -> SIDE_BY_SIDE; if not immediate -> reject and re-pick A/B until valid. No perspective tricks.
+H06: background MUST be the classic background of A, even in SIDE_BY_SIDE.
+H07: headline 3–7 words, includes product name, original (not a quote; not a variation of description). Not on image.
+H08: marketing text EXACTLY 50 words. Not on image.
+H09: photorealistic photo. No vector/illustration/3D/AI-art.
+NO TEXT ON IMAGE: no letters, no words, no logos, no labels, no signage, no UI, no readable screens.
+
+Return JSON ONLY in this schema:
 {{
+  "ad_number": {ad_number},
+  "audience": {{
+    "age_range": "...",
+    "lifestyle": "...",
+    "needs": "...",
+    "knowledge_level": "...",
+    "pain_points": "..."
+  }},
+  "intent": "...",
+  "objects_80": ["obj1", "...", "obj80"],
+  "A": "...",
+  "B": "...",
+  "projection_angle": "...",
+  "composition_mode": "HYBRID" | "SIDE_BY_SIDE",
+  "classic_background_of_A": "...",
   "headline": "...",
   "marketing_text_50_words": "...",
-  "image_prompt": "Photorealistic prompt for gpt-image-1, NO text on image."
+  "image_prompt": "Photorealistic prompt for gpt-image-1. Describe HYBRID or SIDE_BY_SIDE; emphasize projection; classic background of A. No text."
 }}
-
-Rules:
-- Headline: 3-7 words, includes product name, not a quote, not copied from description, not on image.
-- Marketing text: EXACTLY 50 words, not on image.
 """.strip()
 
-def _generate_text_spec(product: str, description: str, size: str) -> Dict[str, Any]:
-    prompt = _text_prompt_for_one_ad(product, description, size)
+def _generate_engine_spec(product: str, description: str, size: str, ad_number: int) -> Dict[str, Any]:
+    prompt = _engine_prompt(product, description, size, ad_number)
 
     def call():
         resp = client.chat.completions.create(
@@ -120,7 +147,7 @@ def _generate_text_spec(product: str, description: str, size: str) -> Dict[str, 
                 {"role": "system", "content": _system_prompt_engine()},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.7,
+            temperature=0.6,
         )
         return resp.choices[0].message.content
 
@@ -158,10 +185,13 @@ def _normalize_headline(headline: str, product: str) -> str:
     return h
 
 def _generate_image_bytes(image_prompt: str, size: str) -> bytes:
+    anti_text = " No text, no letters, no words, no logos, no labels, no signage, no UI, no readable screens. "
+    prompt = (image_prompt or "").strip() + anti_text
+
     def call():
         img = client.images.generate(
             model=OPENAI_IMAGE_MODEL,
-            prompt=image_prompt,
+            prompt=prompt,
             size=size,
         )
         return img.data[0].b64_json
@@ -174,15 +204,14 @@ def generate():
     _cleanup_cache()
 
     payload = request.get_json(silent=True) or {}
-    product, description, size, err = _validate_payload(payload)
+    product, description, size, ad_number, job_id, err = _validate_payload(payload)
     if err:
         return err
 
-    job_id = str(uuid.uuid4())
-    log.info("Generate request received job_id=%s size=%s origin=%s", job_id, size, request.headers.get("Origin"))
+    log.info("Generate request job_id=%s ad_number=%s size=%s origin=%s", job_id, ad_number, size, request.headers.get("Origin"))
 
     try:
-        spec = _generate_text_spec(product, description, size)
+        spec = _generate_engine_spec(product, description, size, ad_number)
         headline = _normalize_headline(spec.get("headline",""), product)
         marketing = _ensure_50_words(spec.get("marketing_text_50_words",""))
         image_prompt = (spec.get("image_prompt") or "").strip()
@@ -191,25 +220,26 @@ def generate():
 
         image_bytes = _generate_image_bytes(image_prompt, size)
 
-        # cache for ZIP endpoint
-        CACHE[job_id] = {"img": image_bytes, "txt": marketing, "ts": time.time()}
+        job = CACHE.get(job_id) or {"ads": {}, "ts": time.time()}
+        job["ads"][str(ad_number)] = {"img": image_bytes, "txt": marketing}
+        job["ts"] = time.time()
+        CACHE[job_id] = job
 
-        # embed only the image in response (small enough); ZIP served separately
         image_b64 = base64.b64encode(image_bytes).decode("ascii")
         root = request.url_root.rstrip("/")
 
         return jsonify({
             "job_id": job_id,
+            "ad_number": ad_number,
             "ad": {
                 "headline": headline,
                 "text": marketing,
                 "image_data_url": f"data:image/jpeg;base64,{image_b64}",
-                "zip_url": f"{root}/zip/{job_id}"
+                "zip_url": f"{root}/zip/{job_id}/{ad_number}"
             }
         }), 200
 
     except RateLimitError:
-        # IMPORTANT: this is your 429 scenario
         return _error(503, "OpenAI rate limit (429). Please try again in a moment.", "rate_limited")
     except (APIConnectionError, APIError):
         log.exception("OpenAI/API error")
@@ -218,24 +248,28 @@ def generate():
         log.exception("Generation error")
         return _error(500, "Generation failed. Please try again.", "generation_error")
 
-@app.get("/zip/<job_id>")
-def zip_get(job_id: str):
+@app.get("/zip/<job_id>/<int:ad_number>")
+def zip_get(job_id: str, ad_number: int):
     _cleanup_cache()
-    item = CACHE.get(job_id)
-    if not item:
+    job = CACHE.get(job_id)
+    if not job:
         return _error(404, "ZIP content not found (expired). Please generate again.", "not_found")
+
+    item = (job.get("ads") or {}).get(str(ad_number))
+    if not item:
+        return _error(404, "ZIP content not found for this ad. Please generate that ad again.", "not_found")
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        z.writestr("ad_1.jpg", item["img"])
-        z.writestr("ad_1.txt", item["txt"])
+        z.writestr(f"ad_{ad_number}.jpg", item["img"])
+        z.writestr(f"ad_{ad_number}.txt", item["txt"])
     buf.seek(0)
 
     return send_file(
         buf,
         mimetype="application/zip",
         as_attachment=True,
-        download_name="ACE_ad_1.zip"
+        download_name=f"ACE_ad_{ad_number}.zip"
     )
 
 if __name__ == "__main__":

@@ -1,17 +1,12 @@
-# ACE Backend — V5 (Single Ad + Stable ZIP)
+# ACE — V6
 
-Why V4 got 502:
-- Embedding 3 images + 3 ZIPs as base64 made the /generate response huge and heavy.
+Two fixes:
+- H01 + H10: 3 ads are generated as 3 sequential attempts (Generate / Generate Again).
+- Engine rules are enforced in the prompt: audience -> intent -> 80 physical objects -> A/B -> projection -> HYBRID or side-by-side -> classic background of A -> photorealistic -> no text on image.
 
-What V5 does:
-- Generates ONLY 1 ad (as requested).
-- Returns image as `image_data_url` (base64).
-- Returns `zip_url` that downloads ZIP from an in-memory cache (TTL 15 minutes).
-- Includes robust 429 handling with retries/backoff.
+429 handling:
+- retries + backoff
+- sequential attempts reduce burst load
 
 Render start command:
 gunicorn app:app --timeout 600
-
-Env:
-FRONTEND_URL=https://ace-advertising.agency
-WEB_CONCURRENCY=1
