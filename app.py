@@ -179,81 +179,63 @@ def _save_image_b64(b64: str, filename: str) -> str:
 
 
 
+
 def _build_image_prompt_with_headline(base_prompt: str, headline: str, size: str) -> str:
     """
-    Engine rule: The headline must be inside the image, placed on the BACKGROUND only,
-    never overlapping A/B (the visual objects). Also enforce canvas-aware safe margins
-    to prevent cropping on non-square sizes.
+    Engine rules:
+    - Headline must be rendered INSIDE the image (pixels), placed on BACKGROUND only.
+    - Headline must NOT overlap/touch the visual objects (A/B or hybrid).
+    - Canvas-aware composition: reserve negative space for headline based on aspect ratio,
+      and keep all important elements fully inside safe margins (no cropping).
     """
     h = (headline or "").strip()
+    base = (base_prompt or "").strip()
     if not h:
-        return (base_prompt or "").strip()
+        return base
 
-    # Parse size like "1024x1024" / "1536x1024" / "1024x1536"
-    w = hgt = None
-    try:
-        parts = (size or "").lower().split("x")
-        if len(parts) == 2:
-            w = int(parts[0]); hgt = int(parts[1])
-    except Exception:
-        w = hgt = None
+    # Choose placement hint based on size/aspect ratio
+    # size values expected like "1024x1024", "1024x1536", "1536x1024"
+    placement_hint = "TOP"
+    reserve_hint = "Reserve clean negative space on TOP for the headline."
+    if size == "1536x1024":
+        placement_hint = "LEFT"
+        reserve_hint = "Reserve ~22% of the canvas width on the LEFT as clean negative space for the headline."
+    elif size == "1024x1536":
+        placement_hint = "TOP"
+        reserve_hint = "Reserve ~18% of the canvas height on the TOP as clean negative space for the headline."
+    else:
+        placement_hint = "TOP"
+        reserve_hint = "Reserve ~16% of the canvas height on the TOP as clean negative space for the headline."
 
-    # Decide layout guidance based on aspect ratio
-    placement_hint = "TOP"  # default
-    reserve_hint = "Reserve ~18% of the canvas height as clean negative space."
-    if w and hgt:
-        if w > hgt:
-            placement_hint = "RIGHT"
-            reserve_hint = "Reserve ~30% of the canvas width on the RIGHT as clean negative space for the headline."
-        elif hgt > w:
-            placement_hint = "TOP"
-            reserve_hint = "Reserve ~20% of the canvas height on the TOP as clean negative space for the headline."
-        else:
-            placement_hint = "TOP"
-            reserve_hint = "Reserve ~18% of the canvas height on the TOP as clean negative space for the headline."
-
-    rules = (
-        "FINISHED ADVERTISEMENT PHOTO (photorealistic).
-
-"
-        f"CANVAS: EXACTLY {size}.
-"
-        "CANVAS-AWARE COMPOSITION (anti-crop):
-"
-        "- All important elements (visual objects A/B or hybrid) must be FULLY inside the frame with safe margins
-"
-        "- Do NOT place important elements near the edges
-"
-        f"- {reserve_hint}
-"
-        f"- Place the headline in that negative space on the {placement_hint} area
-
-"
-        "TEXT IN IMAGE (headline placement):
-"
-        f"- Render this EXACT headline text inside the image: \"{h}\"
-"
-        "- The headline must be printed ONLY on the BACKGROUND area (negative space), not on A or B
-"
-        "- Do NOT overlap or touch the main visual objects
-"
-        "- The headline must look naturally integrated into the photographed scene (e.g., printed on a background plane/surface), "
-        "  NOT as a digital overlay, sticker, UI caption, watermark, or floating text
-"
-        "- High-contrast, clean advertising typography, clearly readable
-
-"
-        "STRICT TEXT RULE:
-"
-        "- No other text anywhere (no extra words, no logos, no labels, no signage, no readable screens). Only the exact headline above.
-
-"
-        "BASE VISUAL PROMPT:
-"
-    )
-    return rules + (base_prompt or "").strip() + "
+    rules = "
+".join([
+        "FINISHED ADVERTISEMENT PHOTO (photorealistic).",
+        "",
+        f"CANVAS: EXACTLY {size}.",
+        "CANVAS-AWARE COMPOSITION (anti-crop):",
+        "- All important elements (visual objects A/B or hybrid) must be FULLY inside the frame with safe margins",
+        "- Do NOT place important elements near the edges",
+        "- Do NOT crop the visual objects; keep them comfortably inside the canvas",
+        f"- HEADLINE PLACEMENT AREA: {placement_hint}",
+        f"- {reserve_hint}",
+        "",
+        "TEXT IN IMAGE (headline):",
+        f'- Render this EXACT headline text inside the image: "{h}"',
+        "- Place the headline ONLY on the BACKGROUND negative-space area (not on the objects)",
+        "- Do NOT overlap or touch the main visual objects",
+        "- The headline must look naturally integrated into the photographed scene (printed/painted on a background plane),",
+        "  NOT as a digital overlay, sticker, UI caption, watermark, or floating text",
+        "- High-contrast, clean advertising typography, clearly readable",
+        "",
+        "STRICT TEXT RULE:",
+        "- No other text anywhere (no extra words, no logos, no labels, no signage, no readable screens). Only the exact headline above.",
+        "",
+        "BASE VISUAL PROMPT:",
+        base
+    ]).strip() + "
 "
 
+    return rules
 
 def _generate_image(image_prompt: str, size: str, filename: str) -> str:
     def call():
