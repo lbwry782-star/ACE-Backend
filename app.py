@@ -4,26 +4,23 @@ import time
 import json
 import uuid
 import zipfile
+import base64
 import logging
 from typing import Dict, Any, List, Optional, Tuple
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify
 from flask_cors import CORS
-from werkzeug.utils import secure_filename
 
 from openai import OpenAI
 from openai import APIError, RateLimitError, APIConnectionError
 
+# gpt-image-1 supported sizes (as confirmed by API error message)
 ALLOWED_SIZES = {"1024x1024", "1024x1536", "1536x1024"}
-SIZE_MAP = {"1024x1536": "1024x1536", "1536x1024": "1536x1024", "1024x1536": "1024x1536", "1536x1024": "1536x1024"}
 
 OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
 OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
 FRONTEND_URL = (os.getenv("FRONTEND_URL") or "").strip()
 PORT = int(os.getenv("PORT", "10000"))
-
-DATA_DIR = os.path.join(os.getcwd(), "generated")
-os.makedirs(DATA_DIR, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("ace-backend")
@@ -47,16 +44,10 @@ def health():
 def _error(status: int, message: str, code: str = "error"):
     return jsonify({"error": code, "message": message}), status
 
-def _normalize_size(size_raw: str) -> str:
-    size = (size_raw or "").strip()
-    if not size:
-        return "1024x1024"
-    return SIZE_MAP.get(size, size)
-
 def _validate_payload(payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], str, Optional[Any]]:
     product = (payload.get("product") or "").strip()
     description = (payload.get("description") or "").strip()
-    size = _normalize_size(payload.get("size") or "")
+    size = (payload.get("size") or "").strip() or "1024x1024"
 
     if not product:
         return None, None, "", _error(400, "Missing or empty 'product'.", "bad_request")
@@ -134,24 +125,6 @@ def _generate_text_spec(product: str, description: str, size: str, ad_index: int
             return json.loads(s[start:end+1])
         raise ValueError("Text model did not return valid JSON.")
 
-def _save_image_b64(b64: str, filename: str) -> str:
-    import base64
-    path = os.path.join(DATA_DIR, filename)
-    with open(path, "wb") as f:
-        f.write(base64.b64decode(b64))
-    return path
-
-def _generate_image(image_prompt: str, size: str, filename: str) -> str:
-    def call():
-        img = client.images.generate(
-            model=OPENAI_IMAGE_MODEL,
-            prompt=image_prompt,
-            size=size,
-        )
-        return img.data[0].b64_json
-    b64 = _retry_backoff(call)
-    return _save_image_b64(b64, filename)
-
 def _ensure_50_words(text: str) -> str:
     words = [w for w in (text or "").strip().split() if w]
     if len(words) == 50:
@@ -174,6 +147,25 @@ def _normalize_headline(headline: str, product: str) -> str:
         h = " ".join(h.split()[:7])
     return h
 
+def _generate_image_bytes(image_prompt: str, size: str) -> bytes:
+    def call():
+        img = client.images.generate(
+            model=OPENAI_IMAGE_MODEL,
+            prompt=image_prompt,
+            size=size,
+        )
+        return img.data[0].b64_json
+
+    b64 = _retry_backoff(call)
+    return base64.b64decode(b64)
+
+def _zip_bytes(ad_number: int, image_bytes: bytes, marketing_text: str) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        z.writestr(f"ad_{ad_number}.jpg", image_bytes)
+        z.writestr(f"ad_{ad_number}.txt", marketing_text)
+    return buf.getvalue()
+
 @app.post("/generate")
 def generate():
     payload = request.get_json(silent=True) or {}
@@ -194,20 +186,17 @@ def generate():
             if not image_prompt:
                 raise ValueError("Missing image_prompt")
 
-            img_filename = f"{job_id}_ad{ad_index}.jpg"
-            _generate_image(image_prompt, size, img_filename)
+            image_bytes = _generate_image_bytes(image_prompt, size)
 
-            txt_filename = f"{job_id}_ad{ad_index}.txt"
-            with open(os.path.join(DATA_DIR, txt_filename), "w", encoding="utf-8") as f:
-                f.write(marketing)
+            image_b64 = base64.b64encode(image_bytes).decode("ascii")
+            zip_b64 = base64.b64encode(_zip_bytes(ad_index, image_bytes, marketing)).decode("ascii")
 
-            root = request.url_root.rstrip("/")
             ads_out.append({
                 "ad_number": ad_index,
                 "headline": headline,
                 "text": marketing,
-                "image_url": f"{root}/file/{img_filename}",
-                "zip_url": f"{root}/zip/{job_id}/{ad_index}",
+                "image_data_url": f"data:image/jpeg;base64,{image_b64}",
+                "zip_data_url": f"data:application/zip;base64,{zip_b64}"
             })
 
         except RateLimitError:
@@ -221,34 +210,14 @@ def generate():
 
     return jsonify({"job_id": job_id, "ads": ads_out}), 200
 
+# Legacy endpoints intentionally disabled (filesystem-less V4)
 @app.get("/file/<path:filename>")
 def file_get(filename: str):
-    safe = secure_filename(filename)
-    path = os.path.join(DATA_DIR, safe)
-    if not os.path.exists(path):
-        return _error(404, "File not found.", "not_found")
-    return send_file(path)
+    return _error(410, "File endpoint disabled. Use embedded image_data_url.", "gone")
 
 @app.get("/zip/<job_id>/<int:ad_number>")
 def zip_get(job_id: str, ad_number: int):
-    if ad_number not in (1,2,3):
-        return _error(400, "Invalid ad number.", "bad_request")
-
-    img_name = f"{job_id}_ad{ad_number}.jpg"
-    txt_name = f"{job_id}_ad{ad_number}.txt"
-    img_path = os.path.join(DATA_DIR, img_name)
-    txt_path = os.path.join(DATA_DIR, txt_name)
-
-    if not os.path.exists(img_path) or not os.path.exists(txt_path):
-        return _error(404, "ZIP content not found. Generate first.", "not_found")
-
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        z.write(img_path, arcname=f"ad_{ad_number}.jpg")
-        z.write(txt_path, arcname=f"ad_{ad_number}.txt")
-    buf.seek(0)
-
-    return send_file(buf, mimetype="application/zip", as_attachment=True, download_name=f"ACE_ad_{ad_number}.zip")
+    return _error(410, "ZIP endpoint disabled. Use embedded zip_data_url.", "gone")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)

@@ -1,10 +1,11 @@
-# ACE Backend — V3
+# ACE Backend — V4 (Embedded ZIP + Image)
 
-Fixes in this version:
-- Image sizes aligned to OpenAI image endpoint supported values for gpt-image-1:
-  1024x1024, 1024x1536, 1536x1024
-- Frontend dropdown updated accordingly.
-- Backend maps any incoming 1024x1792/1792x1024 to supported equivalents.
+This version fixes 'ZIP content not found' by **removing filesystem dependency**.
+The `/generate` response includes:
+- `image_data_url` (data:image/jpeg;base64,....)
+- `zip_data_url` (data:application/zip;base64,....)
+
+So the frontend can display images and download ZIPs immediately without calling `/zip/...`.
 
 Render start command:
 gunicorn app:app --timeout 600
