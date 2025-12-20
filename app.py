@@ -188,13 +188,9 @@ def _build_image_prompt_no_text(base_prompt: str) -> str:
       (above/below/side), never covering the visual objects.
     """
     rules = (
-        "PHOTOREALISTIC ADVERTISEMENT VISUAL (no text).
-"
-        "- Absolutely NO words, letters, numbers, logos, watermarks, captions, UI text, labels, or readable screens.
-"
-        "- Focus only on the visual objects and background.
-
-"
+        "PHOTOREALISTIC ADVERTISEMENT VISUAL (no text).\n"
+        "- Absolutely NO words, letters, numbers, logos, watermarks, captions, UI text, labels, or readable screens.\n"
+        "- Focus only on the visual objects and background.\n\n"
         "BASE VISUAL PROMPT:\n"
     )
     return rules + (base_prompt or '').strip() + "\n\n"
