@@ -1,12 +1,9 @@
-# ACE — V6
+# ACE — V7
 
-Two fixes:
-- H01 + H10: 3 ads are generated as 3 sequential attempts (Generate / Generate Again).
-- Engine rules are enforced in the prompt: audience -> intent -> 80 physical objects -> A/B -> projection -> HYBRID or side-by-side -> classic background of A -> photorealistic -> no text on image.
-
-429 handling:
-- retries + backoff
-- sequential attempts reduce burst load
+Changes:
+- After ad #3, the Generate button becomes disabled and shows **CONSUMED** (no restart).
+- Headline enforcement: 3–7 words, includes product name, regenerated if too similar to description.
+- UI shows headline prominently.
 
 Render start command:
 gunicorn app:app --timeout 600
