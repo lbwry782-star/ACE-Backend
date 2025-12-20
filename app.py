@@ -177,6 +177,32 @@ def _save_image_b64(b64: str, filename: str) -> str:
         f.write(base64.b64decode(b64))
     return path
 
+
+def _build_image_prompt_with_headline(base_prompt: str, headline: str) -> str:
+    """
+    Engine rule: The headline must be inside the image, placed on the BACKGROUND only,
+    never overlapping A/B (the visual objects). The headline must feel like part of the photographed scene.
+    """
+    h = (headline or "").strip()
+    if not h:
+        return (base_prompt or "").strip()
+
+    rules = (
+        "FINISHED ADVERTISEMENT PHOTO (photorealistic).\n\n"
+        "TEXT IN IMAGE (headline placement):\n"
+        f"- Render this EXACT headline text inside the image: \"{h}\"\n"
+        "- Place the headline ONLY on the BACKGROUND area (negative space), not on A or B\n"
+        "- Do NOT overlap or touch the main visual objects\n"
+        "- The headline must look naturally integrated into the photographed scene (e.g., printed on a background plane/surface), "
+        "  NOT as a digital overlay, sticker, UI caption, watermark, or floating text\n"
+        "- High-contrast, clean advertising typography, clearly readable\n\n"
+        "STRICT TEXT RULE:\n"
+        "- No other text anywhere (no extra words, no logos, no labels, no signage, no readable screens). Only the exact headline above.\n\n"
+        "BASE VISUAL PROMPT:\n"
+    )
+    return rules + (base_prompt or "").strip() + "\n"
+
+
 def _generate_image(image_prompt: str, size: str, filename: str) -> str:
     def call():
         img = client.images.generate(
@@ -284,7 +310,7 @@ def generate():
             raise ValueError("Missing image_prompt from text model.")
 
         img_filename = f"{job_id}_ad{ad_number}.jpg"
-        _generate_image(image_prompt, size, img_filename)
+        _generate_image(_build_image_prompt_with_headline(image_prompt, headline), size, img_filename)
 
         txt_filename = f"{job_id}_ad{ad_number}.txt"
         txt_path = os.path.join(DATA_DIR, txt_filename)

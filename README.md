@@ -1,9 +1,8 @@
-# ACE — V7
+# ACE — BACKEND V8 (Headline inside image)
 
-Changes:
-- After ad #3, the Generate button becomes disabled and shows **CONSUMED** (no restart).
-- Headline enforcement: 3–7 words, includes product name, regenerated if too similar to description.
-- UI shows headline prominently.
+Change:
+- Headline is now rendered INSIDE the image on the BACKGROUND only (not on the visual objects A/B),
+  as part of the photographed scene (not HTML/CSS overlay).
 
 Render start command:
 gunicorn app:app --timeout 600
