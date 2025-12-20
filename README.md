@@ -1,15 +1,17 @@
-# ACE Backend — V4 (Embedded ZIP + Image)
+# ACE Backend — V5 (Single Ad + Stable ZIP)
 
-This version fixes 'ZIP content not found' by **removing filesystem dependency**.
-The `/generate` response includes:
-- `image_data_url` (data:image/jpeg;base64,....)
-- `zip_data_url` (data:application/zip;base64,....)
+Why V4 got 502:
+- Embedding 3 images + 3 ZIPs as base64 made the /generate response huge and heavy.
 
-So the frontend can display images and download ZIPs immediately without calling `/zip/...`.
+What V5 does:
+- Generates ONLY 1 ad (as requested).
+- Returns image as `image_data_url` (base64).
+- Returns `zip_url` that downloads ZIP from an in-memory cache (TTL 15 minutes).
+- Includes robust 429 handling with retries/backoff.
 
 Render start command:
 gunicorn app:app --timeout 600
 
-Recommended Render env:
+Env:
 FRONTEND_URL=https://ace-advertising.agency
 WEB_CONCURRENCY=1

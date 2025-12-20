@@ -8,13 +8,12 @@ import base64
 import logging
 from typing import Dict, Any, List, Optional, Tuple
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 
 from openai import OpenAI
 from openai import APIError, RateLimitError, APIConnectionError
 
-# gpt-image-1 supported sizes (as confirmed by API error message)
 ALLOWED_SIZES = {"1024x1024", "1024x1536", "1536x1024"}
 
 OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
@@ -29,13 +28,17 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 app = Flask(__name__)
 
-# Robust CORS: restrict if FRONTEND_URL set, else allow all (temporary safety net)
+# Robust CORS: restrict if FRONTEND_URL set, else allow all
 if FRONTEND_URL:
     CORS(app, resources={r"/*": {"origins": [FRONTEND_URL]}})
     log.info("CORS restricted to FRONTEND_URL=%s", FRONTEND_URL)
 else:
     CORS(app)
-    log.warning("FRONTEND_URL not set; CORS allows all origins (temporary)")
+    log.warning("FRONTEND_URL not set; CORS allows all origins")
+
+# In-memory cache: job_id -> {"img": bytes, "txt": str, "ts": float}
+CACHE: Dict[str, Dict[str, Any]] = {}
+CACHE_TTL_SECONDS = 15 * 60  # 15 minutes
 
 @app.get("/health")
 def health():
@@ -43,6 +46,12 @@ def health():
 
 def _error(status: int, message: str, code: str = "error"):
     return jsonify({"error": code, "message": message}), status
+
+def _cleanup_cache():
+    now = time.time()
+    dead = [k for k,v in CACHE.items() if now - float(v.get("ts", 0)) > CACHE_TTL_SECONDS]
+    for k in dead:
+        CACHE.pop(k, None)
 
 def _validate_payload(payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], str, Optional[Any]]:
     product = (payload.get("product") or "").strip()
@@ -57,7 +66,10 @@ def _validate_payload(payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[
         return None, None, "", _error(400, f"Invalid 'size'. Must be one of: {sorted(ALLOWED_SIZES)}", "bad_request")
     return product, description, size, None
 
-def _retry_backoff(fn, *, max_retries: int = 3, delays: List[float] = [2.0, 5.0, 10.0]):
+def _retry_backoff(fn, *, max_retries: int = 4, delays: List[float] = [2.0, 5.0, 10.0, 20.0]):
+    """
+    Handles OpenAI 429 with backoff + transient connection errors.
+    """
     last_exc = None
     for attempt in range(max_retries):
         try:
@@ -77,7 +89,7 @@ def _retry_backoff(fn, *, max_retries: int = 3, delays: List[float] = [2.0, 5.0,
 def _system_prompt_engine() -> str:
     return "You are ACE ENGINE. Output ONLY valid JSON. No extra text."
 
-def _text_prompt_for_one_ad(product: str, description: str, size: str, ad_index: int) -> str:
+def _text_prompt_for_one_ad(product: str, description: str, size: str) -> str:
     return f"""
 Create ONE advertising ad spec for the product below.
 
@@ -85,11 +97,9 @@ PRODUCT:
 - name: {product}
 - description: {description}
 - size: {size}
-- ad_number: {ad_index}
 
 Return JSON ONLY:
 {{
-  "ad_number": {ad_index},
   "headline": "...",
   "marketing_text_50_words": "...",
   "image_prompt": "Photorealistic prompt for gpt-image-1, NO text on image."
@@ -100,8 +110,8 @@ Rules:
 - Marketing text: EXACTLY 50 words, not on image.
 """.strip()
 
-def _generate_text_spec(product: str, description: str, size: str, ad_index: int) -> Dict[str, Any]:
-    prompt = _text_prompt_for_one_ad(product, description, size, ad_index)
+def _generate_text_spec(product: str, description: str, size: str) -> Dict[str, Any]:
+    prompt = _text_prompt_for_one_ad(product, description, size)
 
     def call():
         resp = client.chat.completions.create(
@@ -159,15 +169,10 @@ def _generate_image_bytes(image_prompt: str, size: str) -> bytes:
     b64 = _retry_backoff(call)
     return base64.b64decode(b64)
 
-def _zip_bytes(ad_number: int, image_bytes: bytes, marketing_text: str) -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        z.writestr(f"ad_{ad_number}.jpg", image_bytes)
-        z.writestr(f"ad_{ad_number}.txt", marketing_text)
-    return buf.getvalue()
-
 @app.post("/generate")
 def generate():
+    _cleanup_cache()
+
     payload = request.get_json(silent=True) or {}
     product, description, size, err = _validate_payload(payload)
     if err:
@@ -176,48 +181,62 @@ def generate():
     job_id = str(uuid.uuid4())
     log.info("Generate request received job_id=%s size=%s origin=%s", job_id, size, request.headers.get("Origin"))
 
-    ads_out = []
-    for ad_index in (1,2,3):
-        try:
-            spec = _generate_text_spec(product, description, size, ad_index)
-            headline = _normalize_headline(spec.get("headline",""), product)
-            marketing = _ensure_50_words(spec.get("marketing_text_50_words",""))
-            image_prompt = (spec.get("image_prompt") or "").strip()
-            if not image_prompt:
-                raise ValueError("Missing image_prompt")
+    try:
+        spec = _generate_text_spec(product, description, size)
+        headline = _normalize_headline(spec.get("headline",""), product)
+        marketing = _ensure_50_words(spec.get("marketing_text_50_words",""))
+        image_prompt = (spec.get("image_prompt") or "").strip()
+        if not image_prompt:
+            raise ValueError("Missing image_prompt")
 
-            image_bytes = _generate_image_bytes(image_prompt, size)
+        image_bytes = _generate_image_bytes(image_prompt, size)
 
-            image_b64 = base64.b64encode(image_bytes).decode("ascii")
-            zip_b64 = base64.b64encode(_zip_bytes(ad_index, image_bytes, marketing)).decode("ascii")
+        # cache for ZIP endpoint
+        CACHE[job_id] = {"img": image_bytes, "txt": marketing, "ts": time.time()}
 
-            ads_out.append({
-                "ad_number": ad_index,
+        # embed only the image in response (small enough); ZIP served separately
+        image_b64 = base64.b64encode(image_bytes).decode("ascii")
+        root = request.url_root.rstrip("/")
+
+        return jsonify({
+            "job_id": job_id,
+            "ad": {
                 "headline": headline,
                 "text": marketing,
                 "image_data_url": f"data:image/jpeg;base64,{image_b64}",
-                "zip_data_url": f"data:application/zip;base64,{zip_b64}"
-            })
+                "zip_url": f"{root}/zip/{job_id}"
+            }
+        }), 200
 
-        except RateLimitError:
-            return _error(503, "OpenAI rate limit (429). Please try again in a moment.", "rate_limited")
-        except (APIConnectionError, APIError):
-            log.exception("OpenAI/API error")
-            return _error(500, "Network / OpenAI error. Please try again.", "upstream_error")
-        except Exception:
-            log.exception("Generation error")
-            return _error(500, "Generation failed. Please try again.", "generation_error")
+    except RateLimitError:
+        # IMPORTANT: this is your 429 scenario
+        return _error(503, "OpenAI rate limit (429). Please try again in a moment.", "rate_limited")
+    except (APIConnectionError, APIError):
+        log.exception("OpenAI/API error")
+        return _error(500, "Network / OpenAI error. Please try again.", "upstream_error")
+    except Exception:
+        log.exception("Generation error")
+        return _error(500, "Generation failed. Please try again.", "generation_error")
 
-    return jsonify({"job_id": job_id, "ads": ads_out}), 200
+@app.get("/zip/<job_id>")
+def zip_get(job_id: str):
+    _cleanup_cache()
+    item = CACHE.get(job_id)
+    if not item:
+        return _error(404, "ZIP content not found (expired). Please generate again.", "not_found")
 
-# Legacy endpoints intentionally disabled (filesystem-less V4)
-@app.get("/file/<path:filename>")
-def file_get(filename: str):
-    return _error(410, "File endpoint disabled. Use embedded image_data_url.", "gone")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        z.writestr("ad_1.jpg", item["img"])
+        z.writestr("ad_1.txt", item["txt"])
+    buf.seek(0)
 
-@app.get("/zip/<job_id>/<int:ad_number>")
-def zip_get(job_id: str, ad_number: int):
-    return _error(410, "ZIP endpoint disabled. Use embedded zip_data_url.", "gone")
+    return send_file(
+        buf,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name="ACE_ad_1.zip"
+    )
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
