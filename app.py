@@ -286,24 +286,15 @@ def _build_image_prompt_visual_only(base_prompt: str) -> str:
     """Return an image prompt that produces ONLY the photorealistic visual (no text).
     We will render the headline ourselves in backend to guarantee correctness.
     """
-    rules = (
-        "FINISHED ADVERTISEMENT PHOTO (photorealistic).
-"
-        "NO TEXT IN IMAGE: Do not render any letters, numbers, logos, labels, signs, watermarks, UI, or captions.
-"
-        "COMPOSITION: Leave clean negative space on the BACKGROUND of object A (top/side/bottom) so a headline can be placed there later, "
-        "without touching or covering the visual objects A/B.
-"
-        "BACKGROUND: Must be the classic background of object A (H06), even in SIDE BY SIDE.
-"
-        "STRICT: A/B must be the only visual focal objects.
+    rules = """FINISHED ADVERTISEMENT PHOTO (photorealistic).
+NO TEXT IN IMAGE: Do not render any letters, numbers, logos, labels, signs, watermarks, UI, or captions.
+COMPOSITION: Leave clean negative space on the BACKGROUND of object A (top/side/bottom) so a headline can be placed there later, without touching or covering the visual objects A/B.
+BACKGROUND: Must be the classic background of object A (H06), even in SIDE BY SIDE.
+STRICT: A/B must be the only visual focal objects.
 
-"
-        "BASE VISUAL PROMPT:
-"
-    )
-    return rules + (base_prompt or "").strip() + "
-"
+BASE VISUAL PROMPT:
+"""
+    return rules + (base_prompt or "").strip() + "\n"
 
 def _generate_image(image_prompt: str, size: str, filename: str) -> str:
     def call():
