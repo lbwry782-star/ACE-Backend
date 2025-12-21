@@ -44,12 +44,8 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # -----------------------
 app = Flask(__name__)
 
-# CORS: prefer allow only FRONTEND_URL; else allow all (temporary)
-if FRONTEND_URL:
-    CORS(app, resources={r"/*": {"origins": [FRONTEND_URL]}})
-else:
-    CORS(app)
-
+# CORS: allow any origin (frontend may be served from GitHub Pages and/or custom domain)
+CORS(app, resources={r"/*": {"origins": "*"}})
 @app.get("/health")
 def health():
     return jsonify({"status": "ok"}), 200
@@ -206,7 +202,7 @@ def _add_headline_to_image(image_path: str, headline: str) -> None:
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ]
     font = None
-    base_size = max(18, int(W * 0.045))
+    base_size = max(32, int(W * 0.075))
     for fp in font_paths:
         if os.path.exists(fp):
             font = ImageFont.truetype(fp, size=base_size)
@@ -217,7 +213,7 @@ def _add_headline_to_image(image_path: str, headline: str) -> None:
     max_w = W - 2 * pad_x
 
     def measure(text: str, fnt):
-        bbox = draw.textbbox((0, 0), text, font=fnt, stroke_width=3)
+        bbox = draw.textbbox((0, 0), text, font=fnt, stroke_width=5)
         return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
     def wrap_lines(fnt):
@@ -274,7 +270,7 @@ def _add_headline_to_image(image_path: str, headline: str) -> None:
             ln,
             font=font,
             fill=(255, 255, 255),
-            stroke_width=3,
+            stroke_width=5,
             stroke_fill=(0, 0, 0),
         )
         y += th + int(H * 0.01)
