@@ -1,8 +1,5 @@
-# ACE — BACKEND V9 (Headline rendered by backend)
+ACE Backend (Render)
 
-- Headline is drawn by the BACKEND onto the image (no special bar), placed on BACKGROUND negative space of object A.
-- Base image is generated with NO TEXT.
-
-Render start command:
-
-gunicorn app:app --timeout 600
+- Start Command: gunicorn app:app --timeout 800
+- Health: /health
+- Generate: POST /generate
