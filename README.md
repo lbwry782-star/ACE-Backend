@@ -34,7 +34,7 @@ Returns health status.
 ```
 
 ### POST /generate
-Generates 3 mock ads based on product information.
+Generates a single mock ad based on product information. The frontend controls sequencing across multiple attempts.
 
 **Request Body:**
 ```json
@@ -47,16 +47,13 @@ Generates 3 mock ads based on product information.
 
 **Response:**
 ```json
-[
-  {
-    "ad_id": 1,
-    "headline": "string (3-7 words)",
-    "marketing_text_50_words": "string (exactly 50 words)",
-    "image_url": "string",
-    "zip_url": "string"
-  },
-  ...
-]
+{
+  "ad_id": 1,
+  "headline": "string (3-7 words)",
+  "marketing_text_50_words": "string (exactly 50 words)",
+  "image_url": "string",
+  "zip_url": "string"
+}
 ```
 
 ## Validation

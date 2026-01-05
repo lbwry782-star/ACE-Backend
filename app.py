@@ -16,7 +16,7 @@ def health():
 
 @app.route('/generate', methods=['POST'])
 def generate():
-    """Generate 3 mock ads based on product information."""
+    """Generate a single mock ad based on product information."""
     # Get JSON body
     data = request.get_json()
     
@@ -54,58 +54,54 @@ def generate():
             "error": f"ad_size must be exactly one of: {', '.join(sorted(VALID_AD_SIZES))}"
         }), 400
     
-    # Generate 3 mock ads (Phase 1)
-    ads = []
-    for ad_id in range(1, 4):
-        # Generate headline: 3-7 words, includes product_name, original
-        headline = f"{product_name} transforms your daily experience"
-        if ad_id == 2:
-            headline = f"Discover {product_name} excellence"
-        elif ad_id == 3:
-            headline = f"{product_name} redefines quality"
-        
-        # Generate exactly 50 words of marketing text
-        # Base template with product-specific content
-        base_text = (
-            f"Experience the innovation of {product_name}. "
-            f"Our product delivers exceptional quality and performance for your needs. "
-            f"Designed with precision and care, {product_name} offers unmatched reliability. "
-            f"Join thousands of satisfied customers who trust our solution. "
-            f"Transform your workflow with cutting-edge technology. "
-            f"Discover why {product_name} stands out from the competition. "
-            f"Get started today and see the difference. "
-            f"Quality craftsmanship meets modern design principles. "
-            f"Trusted by professionals worldwide for consistent results. "
-            f"Elevate your standards with proven excellence."
-        )
-        
-        # Split into words and ensure exactly 50 words
-        words = base_text.split()
-        if len(words) > 50:
-            marketing_text_50_words = " ".join(words[:50])
-        elif len(words) < 50:
-            # Pad with generic marketing phrases to reach exactly 50 words
-            padding_words = [
-                "Quality", "craftsmanship", "meets", "modern", "design", "principles", "every",
-                "time", "you", "use", "it", "Trusted", "by", "professionals", "worldwide",
-                "for", "consistent", "results", "that", "exceed", "expectations", "Elevate",
-                "your", "standards", "with", "proven", "excellence", "and", "innovation"
-            ]
-            all_words = words + padding_words
-            marketing_text_50_words = " ".join(all_words[:50])
-        else:
-            marketing_text_50_words = " ".join(words)
-        
-        ad = {
-            "ad_id": ad_id,
-            "headline": headline,
-            "marketing_text_50_words": marketing_text_50_words,
-            "image_url": "https://placeholder.com/1024x1024",
-            "zip_url": "https://placeholder.com/download/ad.zip"
-        }
-        ads.append(ad)
+    # Generate a single mock ad (Phase 1)
+    # Frontend controls sequencing across attempts
+    ad_id = 1
     
-    return jsonify(ads), 200
+    # Generate headline: 3-7 words, includes product_name, original
+    headline = f"{product_name} transforms your daily experience"
+    
+    # Generate exactly 50 words of marketing text
+    # Base template with product-specific content
+    base_text = (
+        f"Experience the innovation of {product_name}. "
+        f"Our product delivers exceptional quality and performance for your needs. "
+        f"Designed with precision and care, {product_name} offers unmatched reliability. "
+        f"Join thousands of satisfied customers who trust our solution. "
+        f"Transform your workflow with cutting-edge technology. "
+        f"Discover why {product_name} stands out from the competition. "
+        f"Get started today and see the difference. "
+        f"Quality craftsmanship meets modern design principles. "
+        f"Trusted by professionals worldwide for consistent results. "
+        f"Elevate your standards with proven excellence."
+    )
+    
+    # Split into words and ensure exactly 50 words
+    words = base_text.split()
+    if len(words) > 50:
+        marketing_text_50_words = " ".join(words[:50])
+    elif len(words) < 50:
+        # Pad with generic marketing phrases to reach exactly 50 words
+        padding_words = [
+            "Quality", "craftsmanship", "meets", "modern", "design", "principles", "every",
+            "time", "you", "use", "it", "Trusted", "by", "professionals", "worldwide",
+            "for", "consistent", "results", "that", "exceed", "expectations", "Elevate",
+            "your", "standards", "with", "proven", "excellence", "and", "innovation"
+        ]
+        all_words = words + padding_words
+        marketing_text_50_words = " ".join(all_words[:50])
+    else:
+        marketing_text_50_words = " ".join(words)
+    
+    ad = {
+        "ad_id": ad_id,
+        "headline": headline,
+        "marketing_text_50_words": marketing_text_50_words,
+        "image_url": "https://placeholder.com/1024x1024",
+        "zip_url": "https://placeholder.com/download/ad.zip"
+    }
+    
+    return jsonify(ad), 200
 
 
 if __name__ == '__main__':
