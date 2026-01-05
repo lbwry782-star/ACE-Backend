@@ -145,7 +145,7 @@ Requirements:
             model=IMAGE_MODEL,
             prompt=image_prompt,
             size=openai_size,
-            quality="standard",
+            quality="auto",
             n=1
         )
         
