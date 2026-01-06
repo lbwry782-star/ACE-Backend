@@ -825,10 +825,16 @@ def create_zip_in_memory(image_base64, marketing_text, attempt):
 
 
 @app.route('/generate', methods=['POST'])
+@app.route('/api/generate', methods=['POST'])
+@app.route('/api/generate-one', methods=['POST'])
 def generate():
     """Generate a single ad with real OpenAI generation (Phase 2)."""
     # Generate request ID for this request
     request_id = generate_request_id()
+    
+    # Log route hit
+    route_path = request.path
+    logger.info(f"ROUTE_HIT {route_path} request_id={request_id}")
     
     # Top-level try/except to catch ALL exceptions and prevent 502s
     try:
