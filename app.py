@@ -17,12 +17,19 @@ VALID_AD_SIZES = {"1024x1024", "1024x1536", "1536x1024"}
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TEXT_MODEL = os.getenv("TEXT_MODEL", "gpt-4.1-mini")
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-1")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
 
 # Initialize OpenAI client
-if OPENAI_API_KEY:
-    client = OpenAI(api_key=OPENAI_API_KEY)
-else:
+if not OPENAI_API_KEY or not OPENAI_API_KEY.strip():
     client = None
+    print("WARNING: OPENAI_API_KEY is not set or is empty")
+else:
+    # Only set base_url if explicitly provided and non-empty
+    client_kwargs = {"api_key": OPENAI_API_KEY}
+    if OPENAI_BASE_URL and OPENAI_BASE_URL.strip():
+        client_kwargs["base_url"] = OPENAI_BASE_URL
+    client = OpenAI(**client_kwargs)
+    print("INFO: OPENAI_API_KEY is present (client initialized)")
 
 
 @app.route('/health', methods=['GET'])
@@ -228,9 +235,9 @@ def generate():
             "error": f"ad_size must be exactly one of: {', '.join(sorted(VALID_AD_SIZES))}"
         }), 400
     
-    # Check OpenAI API key
-    if not OPENAI_API_KEY or not client:
-        return jsonify({"error": "OpenAI API key not configured"}), 500
+    # Check OpenAI API key - fail fast with clear error
+    if not OPENAI_API_KEY or not OPENAI_API_KEY.strip() or not client:
+        return jsonify({"error": "Server misconfigured: OPENAI_API_KEY is not set"}), 500
     
     try:
         # Generate headline and marketing text
