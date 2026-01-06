@@ -73,9 +73,9 @@ def retry_openai_call(call_func, max_retries=4, operation_name="OpenAI call"):
             else:
                 print(f"OPENAI_RETRY attempt={attempt + 1} wait={wait_time:.2f}s reason={type(e).__name__} code={error_code} operation={operation_name} - MAX RETRIES REACHED")
         except APIError as e:
-            # Check if it's a 5xx server error
+            # Check if it's a retryable error: 429 (rate limit) or 5xx server error
             status_code = getattr(e, 'status_code', None)
-            if status_code and 500 <= status_code < 600:
+            if status_code == 429 or (status_code and 500 <= status_code < 600):
                 last_exception = e
                 base_wait = 2 ** attempt
                 jitter = random.uniform(0, 1)
@@ -140,8 +140,11 @@ Return ONLY a concise description of the advertising goal (1-2 sentences), nothi
         ad_goal = response.choices[0].message.content.strip()
         print(f"AD_GOAL attempt={attempt}: {ad_goal}")
         return ad_goal
+    except RetryableError:
+        # Propagate transient errors - do NOT consume attempt
+        raise
     except Exception as e:
-        # Fallback: use attempt number in goal
+        # Fallback for non-transient errors only
         ad_goal = f"Advertising goal for attempt {attempt}: highlight different aspect of {product_name}"
         print(f"AD_GOAL attempt={attempt}: {ad_goal} (fallback)")
         return ad_goal
@@ -632,8 +635,11 @@ The image MUST show BOTH Object A and Object B. Do not explain. Do not describe.
         image_data_url = f"data:image/jpeg;base64,{image_base64}"
         # Return both image_data_url and selected A for tracking
         return image_data_url, A
+    except RetryableError:
+        # Propagate transient errors - do NOT consume attempt
+        raise
     except Exception as e:
-        # Handle external errors cleanly
+        # Handle non-transient errors
         raise ValueError(f"Image generation failed: {str(e)}")
 
 
@@ -658,56 +664,57 @@ def create_zip_in_memory(image_base64, marketing_text, attempt):
 @app.route('/generate', methods=['POST'])
 def generate():
     """Generate a single ad with real OpenAI generation (Phase 2)."""
-    # Get JSON body
-    data = request.get_json()
-    
-    if not data:
-        return jsonify({"error": "Request body must be JSON"}), 400
-    
-    # Validate required fields
-    product_name = data.get("product_name")
-    product_description = data.get("product_description")
-    ad_size = data.get("ad_size")
-    attempt = data.get("attempt")
-    
-    # Check all fields are present
-    if not product_name:
-        return jsonify({"error": "product_name is required and must be a non-empty string"}), 400
-    
-    if not product_description:
-        return jsonify({"error": "product_description is required and must be a non-empty string"}), 400
-    
-    if not ad_size:
-        return jsonify({"error": "ad_size is required and must be a non-empty string"}), 400
-    
-    if attempt is None:
-        return jsonify({"error": "attempt is required and must be 1, 2, or 3"}), 400
-    
-    # Check all fields are strings (except attempt)
-    if not isinstance(product_name, str) or not product_name.strip():
-        return jsonify({"error": "product_name must be a non-empty string"}), 400
-    
-    if not isinstance(product_description, str) or not product_description.strip():
-        return jsonify({"error": "product_description must be a non-empty string"}), 400
-    
-    if not isinstance(ad_size, str) or not ad_size.strip():
-        return jsonify({"error": "ad_size must be a non-empty string"}), 400
-    
-    # Validate attempt
-    if not isinstance(attempt, int) or attempt not in [1, 2, 3]:
-        return jsonify({"error": "attempt must be exactly 1, 2, or 3"}), 400
-    
-    # Validate ad_size is one of the allowed values
-    if ad_size not in VALID_AD_SIZES:
-        return jsonify({
-            "error": f"ad_size must be exactly one of: {', '.join(sorted(VALID_AD_SIZES))}"
-        }), 400
-    
-    # Check OpenAI API key - fail fast with clear error
-    if not OPENAI_API_KEY or not OPENAI_API_KEY.strip() or not client:
-        return jsonify({"error": "Server misconfigured: OPENAI_API_KEY is not set"}), 500
-    
+    # Top-level try/except to catch ALL exceptions and prevent 502s
     try:
+        # Get JSON body
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"error": "Request body must be JSON"}), 400
+        
+        # Validate required fields
+        product_name = data.get("product_name")
+        product_description = data.get("product_description")
+        ad_size = data.get("ad_size")
+        attempt = data.get("attempt")
+        
+        # Check all fields are present
+        if not product_name:
+            return jsonify({"error": "product_name is required and must be a non-empty string"}), 400
+        
+        if not product_description:
+            return jsonify({"error": "product_description is required and must be a non-empty string"}), 400
+        
+        if not ad_size:
+            return jsonify({"error": "ad_size is required and must be a non-empty string"}), 400
+        
+        if attempt is None:
+            return jsonify({"error": "attempt is required and must be 1, 2, or 3"}), 400
+        
+        # Check all fields are strings (except attempt)
+        if not isinstance(product_name, str) or not product_name.strip():
+            return jsonify({"error": "product_name must be a non-empty string"}), 400
+        
+        if not isinstance(product_description, str) or not product_description.strip():
+            return jsonify({"error": "product_description must be a non-empty string"}), 400
+        
+        if not isinstance(ad_size, str) or not ad_size.strip():
+            return jsonify({"error": "ad_size must be a non-empty string"}), 400
+        
+        # Validate attempt
+        if not isinstance(attempt, int) or attempt not in [1, 2, 3]:
+            return jsonify({"error": "attempt must be exactly 1, 2, or 3"}), 400
+        
+        # Validate ad_size is one of the allowed values
+        if ad_size not in VALID_AD_SIZES:
+            return jsonify({
+                "error": f"ad_size must be exactly one of: {', '.join(sorted(VALID_AD_SIZES))}"
+            }), 400
+        
+        # Check OpenAI API key - fail fast with clear error
+        if not OPENAI_API_KEY or not OPENAI_API_KEY.strip() or not client:
+            return jsonify({"error": "Server misconfigured: OPENAI_API_KEY is not set"}), 500
+        
         # Create product key for tracking used_A
         product_key = (product_name.strip().lower(), product_description.strip().lower())
         
@@ -726,6 +733,7 @@ def generate():
         image_data_url, selected_A = generate_image(product_name, product_description, headline, ad_size, attempt, ad_goal, used_A_list)
         
         # Track the selected A (add to used_A_list if not already present)
+        # NOTE: This only happens on successful generation - transient errors do NOT update used_A
         if selected_A:
             # Check if already tracked (case-insensitive)
             already_tracked = selected_A.lower() in [used.lower() for used in used_A_list]
@@ -756,12 +764,45 @@ def generate():
     except RetryableError as e:
         # Transient OpenAI error after max retries - return 503
         # This does NOT consume an attempt - used_A is only updated after successful generation
-        print(f"OPENAI_RETRY_FAILED returning RETRYABLE_ERROR code={e.code}")
-        return jsonify({"error": "RETRYABLE_ERROR", "code": e.code}), 503
+        print(f"RETURNING RETRYABLE_ERROR (no attempt consumed) code={e.code}")
+        return jsonify({
+            "error": "RETRYABLE_ERROR",
+            "code": e.code,
+            "message": "Temporary overload. Please try again."
+        }), 503
     except ValueError as e:
+        # Non-transient validation errors - return 400
         return jsonify({"error": str(e)}), 400
+    except (RateLimitError, APIConnectionError, APITimeoutError) as e:
+        # Unhandled transient OpenAI errors (shouldn't happen if retry logic works, but catch anyway)
+        error_code = getattr(e, 'status_code', None) or getattr(e, 'code', None) or 429
+        print(f"RETURNING RETRYABLE_ERROR (no attempt consumed) - unhandled transient error: {type(e).__name__} code={error_code}")
+        return jsonify({
+            "error": "RETRYABLE_ERROR",
+            "code": error_code,
+            "message": "Temporary overload. Please try again."
+        }), 503
+    except APIError as e:
+        # Check if it's a 5xx server error (transient)
+        status_code = getattr(e, 'status_code', None)
+        if status_code and 500 <= status_code < 600:
+            print(f"RETURNING RETRYABLE_ERROR (no attempt consumed) - OpenAI 5xx error: code={status_code}")
+            return jsonify({
+                "error": "RETRYABLE_ERROR",
+                "code": status_code,
+                "message": "Temporary overload. Please try again."
+            }), 503
+        else:
+            # Non-transient API error (4xx except 429) - return 400
+            error_msg = getattr(e, 'message', None) or str(e)
+            print(f"RETURNING 400 - non-transient OpenAI error: code={status_code} message={error_msg}")
+            return jsonify({"error": f"OpenAI API error: {error_msg}"}), 400
     except Exception as e:
-        # Handle external errors cleanly without stack traces
+        # Catch-all for any other unexpected exceptions - prevent 502
+        error_type = type(e).__name__
+        error_msg = str(e)
+        print(f"RETURNING 500 - unexpected error: {error_type}: {error_msg}")
+        # Do not expose internal error details to client
         return jsonify({"error": "Generation failed. Please try again."}), 500
 
 
