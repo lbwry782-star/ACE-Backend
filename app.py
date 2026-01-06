@@ -117,12 +117,12 @@ def generate_image(product_name, product_description, headline, ad_size):
         raise ValueError("OpenAI API key not configured")
     
     # Map ad_size to OpenAI format
-    # OpenAI DALL-E supports: 1024x1024, 1024x1792, 1792x1024
+    # OpenAI DALL-E supports: 1024x1024, 1024x1536, 1536x1024
     # We map our sizes to the closest OpenAI-supported sizes
     size_map = {
         "1024x1024": "1024x1024",
-        "1024x1536": "1024x1792",  # Portrait: use closest supported size
-        "1536x1024": "1792x1024"   # Landscape: use closest supported size
+        "1024x1536": "1024x1536",  # Portrait: use closest supported size
+        "1536x1024": "1536x1024"   # Landscape: use closest supported size
     }
     openai_size = size_map.get(ad_size, "1024x1024")
     
