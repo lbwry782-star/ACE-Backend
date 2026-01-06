@@ -1,4 +1,5 @@
 import os
+import json
 import base64
 import io
 import zipfile
@@ -117,39 +118,137 @@ Return ONLY the marketing text, exactly 50 words."""
     return headline, marketing_text
 
 
+def pick_two_objects(product_name, product_description, headline):
+    """Select two physical objects (A and B), layout, and background using text model."""
+    if not client:
+        raise ValueError("OpenAI API key not configured")
+    
+    selection_prompt = f"""You are an ACE engine object selector. Select two physical objects for an advertisement.
+
+Product Name: {product_name}
+Product Description: {product_description}
+Headline: {headline}
+
+Rules:
+1. Generate a list of 80 physical, real, associative objects based on the product and headline.
+2. Objects must be simple, everyday, familiar physical objects — NOT ideas, symbols, abstract concepts, or illustrations.
+3. Objects should be non-functional / not functionally linked.
+4. Do NOT pick objects containing text/logos/letters/numbers/external graphics (unless inherent like playing cards, dice dots, engraved compass letters).
+
+Selection:
+- A = object with central meaning to the ad goal
+- B = object used for conceptual emphasis (but pairing is still only by shape similarity)
+- layout = "HYBRID" if A and B have strong shape similarity (can reach almost geometric overlap), otherwise "SIDE_BY_SIDE"
+- background_classic_of_C = classic natural background for the dominant object (A's projection C)
+
+Return ONLY valid JSON with these exact keys:
+{{
+  "A": "object name",
+  "B": "object name",
+  "layout": "HYBRID" or "SIDE_BY_SIDE",
+  "background_classic_of_C": "description of classic natural background"
+}}
+
+Do not include any explanation or other text."""
+    
+    try:
+        response = client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[
+                {"role": "system", "content": "You are an ACE engine object selector. Always return valid JSON only."},
+                {"role": "user", "content": selection_prompt}
+            ],
+            temperature=0.8,
+            response_format={"type": "json_object"}
+        )
+        
+        result = json.loads(response.choices[0].message.content.strip())
+        
+        # Validate fields exist
+        A = result.get("A", "")
+        B = result.get("B", "")
+        layout = result.get("layout", "SIDE_BY_SIDE")
+        background_classic_of_C = result.get("background_classic_of_C", "")
+        
+        # Validate layout
+        if layout not in ["HYBRID", "SIDE_BY_SIDE"]:
+            layout = "SIDE_BY_SIDE"
+        
+        # Fallback if missing fields
+        if not A or not B:
+            A = "product object"
+            B = "complementary object"
+        
+        return {
+            "A": A,
+            "B": B,
+            "layout": layout,
+            "background_classic_of_C": background_classic_of_C
+        }
+    except Exception as e:
+        # Fallback on error
+        print(f"Warning: Object selection failed: {str(e)}, using fallback")
+        return {
+            "A": "product object",
+            "B": "complementary object",
+            "layout": "SIDE_BY_SIDE",
+            "background_classic_of_C": "natural background"
+        }
+
+
 def generate_image(product_name, product_description, headline, ad_size, attempt):
-    """Generate image using OpenAI DALL-E."""
+    """Generate image using OpenAI DALL-E with strict two-object enforcement."""
     if not client:
         raise ValueError("OpenAI API key not configured")
     
     # Map ad_size to OpenAI format
-    # OpenAI DALL-E supports: 1024x1024, 1024x1536, 1536x1024
-    # We map our sizes to the closest OpenAI-supported sizes
     size_map = {
         "1024x1024": "1024x1024",
-        "1024x1536": "1024x1536",  # Portrait: use closest supported size
-        "1536x1024": "1536x1024"   # Landscape: use closest supported size
+        "1024x1536": "1024x1536",
+        "1536x1024": "1536x1024"
     }
     openai_size = size_map.get(ad_size, "1024x1024")
     
-    # Generate image prompt based on the spec requirements
-    # For Phase 2, we'll create a simple prompt that includes the headline visually
-    image_prompt = f"""
-YOU ARE A PROFESSIONAL ADVERTISING PHOTOGRAPHER.
+    # Step 1: Pick two objects, layout, and background
+    objects = pick_two_objects(product_name, product_description, headline)
+    A = objects["A"]
+    B = objects["B"]
+    layout = objects["layout"]
+    background_classic_of_C = objects["background_classic_of_C"]
+    
+    # Debug log: print selected A, B, layout, and openai_size (NOT full prompt, NOT secrets)
+    print(f"Selected A: {A}")
+    print(f"Selected B: {B}")
+    print(f"Selected layout: {layout}")
+    print(f"Selected ad_size: {ad_size} (OpenAI size: {openai_size})")
+    print(f"Attempt: {attempt}")
+    
+    # Step 2: Build strict image prompt with explicit A/B/layout/background
+    if layout == "HYBRID":
+        layout_instruction = f"""Create a TRUE HYBRID: Object B's projection (D) is perfectly embedded into Object A's projection (C).
+Present the HYBRID at an angle that maximizes both projections' visibility while keeping full photographic realism.
+The objects must be physically fused or overlapped, NOT side-by-side."""
+    else:  # SIDE_BY_SIDE
+        layout_instruction = f"""Place Object A (C projection) and Object B (D projection) SIDE BY SIDE at the same angle.
+Highlight maximal similar area between the projections.
+Place them close together, emphasizing their shape similarity."""
+    
+    image_prompt = f"""YOU ARE A PROFESSIONAL ADVERTISING PHOTOGRAPHER.
 YOU MUST FOLLOW ALL RULES BELOW. NO EXCEPTIONS.
 
-CORE ACE ENGINE RULES (MANDATORY):
-1. The image MUST depict TWO DISTINCT PHYSICAL OBJECTS (A and B).
-2. Objects A and B MUST be REAL, TANGIBLE, PHYSICAL OBJECTS — not concepts or symbols.
-3. Objects A and B MUST have REAL SHAPE SIMILARITY (projection-based similarity).
-4. If shape similarity is strong, YOU MUST create a TRUE HYBRID OBJECT
-   (physical fusion or overlap, not side-by-side).
-5. If shape similarity is insufficient, place the objects SIDE BY SIDE.
-6. NEVER show only one object.
-7. NEVER use abstract, metaphorical, symbolic, or conceptual visuals.
+MANDATORY OBJECTS (BOTH MUST APPEAR):
+- Object A: {A}
+- Object B: {B}
+- YOU MUST SHOW BOTH OBJECT A AND OBJECT B IN THE IMAGE.
+- NEVER show only one object. NEVER show only Object A. NEVER show only Object B.
+- BOTH objects must be clearly visible and recognizable.
+
+LAYOUT INSTRUCTION:
+{layout_instruction}
 
 BACKGROUND RULE:
-- The background MUST be the CLASSIC NATURAL BACKGROUND of the dominant object (C).
+- The background MUST be: {background_classic_of_C}
+- This is the classic natural background of Object A (the dominant object C).
 - NEVER use studio backgrounds, black backgrounds, gradients, or abstract scenes.
 
 STYLE RULES:
@@ -159,36 +258,26 @@ STYLE RULES:
 - NO illustration, NO 3D render, NO CGI, NO AI-art look.
 
 HEADLINE RULES (INSIDE IMAGE):
-- A short headline of 3–7 words MUST appear INSIDE the image.
-- The headline MUST include the PRODUCT NAME.
-- The headline is NOT a quote and NOT the product description.
-- The headline must be clearly readable and visually dominant.
+- The headline "{headline}" MUST appear INSIDE the image.
+- The headline must be clearly readable and visually integrated into the composition.
+- Place it above/below/next-to the objects (never on them).
 
-COMPOSITION:
-- Professional commercial advertising composition.
-- Clear subject focus.
-- Correct depth, lighting, and proportions.
+CRITICAL ENFORCEMENT:
+- YOU MUST SHOW BOTH OBJECT A ({A}) AND OBJECT B ({B}).
+- The image MUST contain BOTH objects. Single-object images are FORBIDDEN.
+- BOTH objects must be clearly visible and recognizable in the final image.
 
-PRODUCT NAME:
-{product_name}
-
-PRODUCT DESCRIPTION:
-{product_description}
-
-HEADLINE TO DISPLAY:
-{headline}
+PRODUCT NAME: {product_name}
+PRODUCT DESCRIPTION: {product_description}
 
 TASK:
 Generate ONE final advertising image that fully follows ALL the rules above.
-Do not explain. Do not describe. Do not add text outside the image.
-"""
+The image MUST show BOTH Object A and Object B. Do not explain. Do not describe."""
 
     # Debug log: print image prompt, ad_size, and attempt
     print("=== IMAGE PROMPT SENT TO OPENAI ===")
     print(image_prompt)
     print("=== END IMAGE PROMPT ===")
-    print(f"Selected ad_size: {ad_size}")
-    print(f"Attempt: {attempt}")
 
     try:
         response = client.images.generate(
