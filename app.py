@@ -27,6 +27,10 @@ VALID_AD_SIZES = {"1024x1024", "1024x1536", "1536x1024"}
 # Key: (product_name, product_description) -> value: list of used A objects
 used_A_tracker = {}
 
+# In-memory storage for tracking used object pairs (A,B) per product
+# Key: (product_name, product_description) -> value: list of canonical pair keys (order-insensitive)
+used_pairs_tracker = {}
+
 # OpenAI configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TEXT_MODEL = os.getenv("TEXT_MODEL", "gpt-4.1-mini")
@@ -49,6 +53,16 @@ else:
 def generate_request_id():
     """Generate a short unique request ID."""
     return str(uuid.uuid4())[:8]
+
+
+def create_pair_key(A, B):
+    """Create a canonical pair key (order-insensitive) for tracking used pairs."""
+    # Normalize and sort to make order-insensitive
+    normalized_A = A.strip().lower()
+    normalized_B = B.strip().lower()
+    # Sort to ensure same pair regardless of order
+    pair = sorted([normalized_A, normalized_B])
+    return "|".join(pair)
 
 
 class RetryableError(Exception):
@@ -270,7 +284,7 @@ Return ONLY the marketing text, exactly 50 words."""
     return headline, marketing_text
 
 
-def pick_two_objects(product_name, product_description, headline, ad_goal, used_A_list=None, attempt=None):
+def pick_two_objects(product_name, product_description, headline, ad_goal, used_A_list=None, used_pairs_list=None, attempt=None):
     """Select two physical objects (A and B), projections, overlap assessment, layout, and background using text model.
     
     Args:
@@ -279,6 +293,7 @@ def pick_two_objects(product_name, product_description, headline, ad_goal, used_
         headline: Generated headline
         ad_goal: Distinct advertising goal for this attempt
         used_A_list: List of Object A values that have been used in previous attempts (forbidden)
+        used_pairs_list: List of canonical pair keys (A|B) that have been used in previous attempts (forbidden)
         attempt: Attempt number (1, 2, or 3) - used to trigger hybrid search for attempt 2
     
     Returns:
@@ -291,10 +306,27 @@ def pick_two_objects(product_name, product_description, headline, ad_goal, used_
     if used_A_list is None:
         used_A_list = []
     
-    # Build forbidden list text
-    forbidden_text = ""
+    if used_pairs_list is None:
+        used_pairs_list = []
+    
+    # Build forbidden A list text
+    forbidden_A_text = ""
     if used_A_list:
-        forbidden_text = f"\n\nCRITICAL: The following objects have already been used as Object A in previous attempts and MUST NOT be selected: {', '.join(used_A_list)}\nYou MUST select a DIFFERENT object for A that is NOT in this list."
+        forbidden_A_text = f"\n\nCRITICAL: The following objects have already been used as Object A in previous attempts and MUST NOT be selected: {', '.join(used_A_list)}\nYou MUST select a DIFFERENT object for A that is NOT in this list."
+    
+    # Build forbidden pairs list text
+    forbidden_pairs_text = ""
+    if used_pairs_list:
+        # Convert canonical keys back to readable format for the prompt
+        readable_pairs = []
+        for pair_key in used_pairs_list:
+            parts = pair_key.split("|")
+            if len(parts) == 2:
+                readable_pairs.append(f"({parts[0]}, {parts[1]})")
+        if readable_pairs:
+            forbidden_pairs_text = f"\n\nCRITICAL: The following object pairs have already been used in previous attempts and MUST NOT be selected (in any order): {', '.join(readable_pairs)}\nYou MUST select a DIFFERENT pair (A,B) that is NOT in this list. The pair is forbidden regardless of which object is A and which is B."
+    
+    forbidden_text = forbidden_A_text + forbidden_pairs_text
     
     def make_selection_prompt():
         return f"""You are an ACE engine object selector. Select two physical objects for an advertisement with strict geometric overlap assessment.
@@ -397,6 +429,12 @@ Do not include any explanation or other text."""
                     print(f"HYBRID_SEARCH attempt=2 try={search_try + 1} REJECTED A (forbidden): {A}")
                     continue  # Skip this result and try again
                 
+                # Check if pair (A,B) is in forbidden pairs list
+                pair_key = create_pair_key(A, B)
+                if used_pairs_list and pair_key in used_pairs_list:
+                    print(f"HYBRID_SEARCH attempt=2 try={search_try + 1} REJECTED PAIR: A={A}, B={B} (forbidden pair)")
+                    continue  # Skip this result and try again
+                
                 # Validate overlap_assessment
                 if overlap_assessment not in ["NEAR_GEOMETRIC_OVERLAP", "ONLY_SIMILAR", "NO_SIMILARITY"]:
                     overlap_assessment = "ONLY_SIMILAR"
@@ -478,8 +516,8 @@ Do not include any explanation or other text."""
     # For attempts 1 and 3, use the original retry logic
     selection_prompt = make_selection_prompt()
     
-    # Retry up to 3 times if A is in forbidden list OR if overlap_assessment is NO_SIMILARITY
-    max_internal_retries = 3
+    # Retry up to 5 times if A is in forbidden list OR pair is forbidden OR if overlap_assessment is NO_SIMILARITY
+    max_internal_retries = 5
     best_result = None  # Store best "ONLY_SIMILAR" result as fallback
     
     for retry_attempt in range(max_internal_retries):
@@ -518,6 +556,16 @@ Do not include any explanation or other text."""
                     continue  # Retry
                 else:
                     print(f"FORBIDDEN_HIT max retries reached, using A anyway: {A}")
+            
+            # Check if pair (A,B) is in forbidden pairs list
+            pair_key = create_pair_key(A, B)
+            if used_pairs_list and pair_key in used_pairs_list:
+                print(f"REJECTED PAIR: A={A}, B={B} (forbidden pair)")
+                if retry_attempt < max_internal_retries - 1:
+                    print(f"FORBIDDEN_PAIR_HIT retrying selector... attempt={retry_attempt + 1} forbidden_pair={pair_key}")
+                    continue  # Retry
+                else:
+                    print(f"FORBIDDEN_PAIR_HIT max retries reached, using pair anyway: A={A}, B={B}")
             
             # Validate overlap_assessment
             if overlap_assessment not in ["NEAR_GEOMETRIC_OVERLAP", "ONLY_SIMILAR", "NO_SIMILARITY"]:
@@ -628,7 +676,7 @@ Do not include any explanation or other text."""
     }
 
 
-def generate_image(product_name, product_description, headline, ad_size, attempt, ad_goal, used_A_list=None):
+def generate_image(product_name, product_description, headline, ad_size, attempt, ad_goal, used_A_list=None, used_pairs_list=None):
     """Generate image using OpenAI DALL-E with strict two-object enforcement."""
     if not client:
         raise ValueError("OpenAI API key not configured")
@@ -647,8 +695,14 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
     else:
         print(f"USED_A so far: [] (first attempt)")
     
-    # Step 1: Pick two objects, projections, overlap assessment, hybrid_mode, layout, and background (with ad_goal, used_A_list, and attempt)
-    objects = pick_two_objects(product_name, product_description, headline, ad_goal, used_A_list, attempt)
+    # Log used_pairs list before selection
+    if used_pairs_list:
+        print(f"USED_PAIRS: {used_pairs_list}")
+    else:
+        print(f"USED_PAIRS: [] (first attempt)")
+    
+    # Step 1: Pick two objects, projections, overlap assessment, hybrid_mode, layout, and background (with ad_goal, used_A_list, used_pairs_list, and attempt)
+    objects = pick_two_objects(product_name, product_description, headline, ad_goal, used_A_list, used_pairs_list, attempt)
     A = objects["A"]
     B = objects["B"]
     C_projection_description = objects["C_projection_description"]
@@ -661,6 +715,10 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
     
     # Log successful selection of A for this attempt
     print(f"SELECTED A for attempt {attempt}: {A}")
+    
+    # Log successful selection of pair for this attempt
+    pair_key = create_pair_key(A, B)
+    print(f"SELECTED PAIR attempt={attempt}: A={A}, B={B} (pair_key: {pair_key})")
     
     # Debug log: print selected A, B, layout, overlap_assessment, hybrid_mode, and openai_size (NOT full prompt, NOT secrets)
     print(f"SELECTED A/B attempt={attempt}: A={A}, B={B}, layout={layout}, overlap_assessment={overlap_assessment}, hybrid_mode={hybrid_mode}, ad_size={ad_size} (OpenAI size: {openai_size})")
@@ -796,8 +854,8 @@ The image MUST show BOTH Object A and Object B. Do not explain. Do not describe.
         image_base64 = response.data[0].b64_json
         
         image_data_url = f"data:image/jpeg;base64,{image_base64}"
-        # Return both image_data_url and selected A for tracking
-        return image_data_url, A
+        # Return image_data_url, selected A, and selected B for tracking
+        return image_data_url, A, B
     except RetryableError:
         # Propagate transient errors - do NOT consume attempt
         raise
@@ -896,14 +954,19 @@ def generate():
             used_A_tracker[product_key] = []
         used_A_list = used_A_tracker[product_key]
         
+        # Get or initialize used_pairs list for this product
+        if product_key not in used_pairs_tracker:
+            used_pairs_tracker[product_key] = []
+        used_pairs_list = used_pairs_tracker[product_key]
+        
         # Generate distinct ad_goal for this attempt
         ad_goal = generate_ad_goal(product_name, product_description, attempt)
         
         # Generate headline and marketing text (with ad_goal)
         headline, marketing_text = generate_headline_and_text(product_name, product_description, attempt, ad_goal)
         
-        # Generate image (with ad_goal and used_A_list) - returns (image_data_url, selected_A)
-        image_data_url, selected_A = generate_image(product_name, product_description, headline, ad_size, attempt, ad_goal, used_A_list)
+        # Generate image (with ad_goal, used_A_list, and used_pairs_list) - returns (image_data_url, selected_A, selected_B)
+        image_data_url, selected_A, selected_B = generate_image(product_name, product_description, headline, ad_size, attempt, ad_goal, used_A_list, used_pairs_list)
         
         # Track the selected A (add to used_A_list if not already present)
         # NOTE: This only happens on successful generation - transient errors do NOT update used_A
@@ -915,6 +978,16 @@ def generate():
                 print(f"TRACKED used_A for product: {selected_A} (total: {len(used_A_tracker[product_key])})")
             else:
                 print(f"WARNING: Selected A '{selected_A}' was already in used_A_list, but was selected anyway")
+        
+        # Track the selected pair (A,B) (add to used_pairs_list if not already present)
+        # NOTE: This only happens on successful generation - transient errors do NOT update used_pairs
+        if selected_A and selected_B:
+            pair_key = create_pair_key(selected_A, selected_B)
+            if pair_key not in used_pairs_list:
+                used_pairs_tracker[product_key].append(pair_key)
+                print(f"TRACKED used_pair for product: {pair_key} (A={selected_A}, B={selected_B}) (total: {len(used_pairs_tracker[product_key])})")
+            else:
+                print(f"WARNING: Selected pair '{pair_key}' (A={selected_A}, B={selected_B}) was already in used_pairs_list, but was selected anyway")
         
         # Extract base64 from data URL for ZIP creation
         image_base64 = image_data_url.split(',')[1] if ',' in image_data_url else image_data_url
