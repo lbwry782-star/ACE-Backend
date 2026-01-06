@@ -882,11 +882,23 @@ def create_zip_in_memory(image_base64, marketing_text, attempt):
     return zip_base64
 
 
-@app.route('/generate', methods=['POST'])
-@app.route('/api/generate', methods=['POST'])
-@app.route('/api/generate-one', methods=['POST'])
+@app.route('/generate', methods=['POST'], strict_slashes=False)
+@app.route('/generate/', methods=['POST'], strict_slashes=False)
+@app.route('/api/generate', methods=['POST'], strict_slashes=False)
+@app.route('/api/generate/', methods=['POST'], strict_slashes=False)
+@app.route('/api/generate-one', methods=['POST'], strict_slashes=False)
+@app.route('/api/generate-one/', methods=['POST'], strict_slashes=False)
 def generate():
-    """Generate a single ad with real OpenAI generation (Phase 2)."""
+    """Generate a single ad with real OpenAI generation (Phase 2).
+    
+    Handles POST requests to:
+    - /generate
+    - /generate/
+    - /api/generate
+    - /api/generate/
+    - /api/generate-one
+    - /api/generate-one/
+    """
     # Generate request ID for this request
     request_id = generate_request_id()
     
