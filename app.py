@@ -241,7 +241,7 @@ Return ONLY the marketing text, exactly 50 words."""
     return headline, marketing_text
 
 
-def pick_two_objects(product_name, product_description, headline, ad_goal, used_A_list=None):
+def pick_two_objects(product_name, product_description, headline, ad_goal, used_A_list=None, attempt=None):
     """Select two physical objects (A and B), projections, overlap assessment, layout, and background using text model.
     
     Args:
@@ -250,6 +250,7 @@ def pick_two_objects(product_name, product_description, headline, ad_goal, used_
         headline: Generated headline
         ad_goal: Distinct advertising goal for this attempt
         used_A_list: List of Object A values that have been used in previous attempts (forbidden)
+        attempt: Attempt number (1, 2, or 3) - used to trigger hybrid search for attempt 2
     
     Returns:
         dict with keys: A, B, C_projection_description, D_projection_description, overlap_assessment, 
@@ -266,7 +267,8 @@ def pick_two_objects(product_name, product_description, headline, ad_goal, used_
     if used_A_list:
         forbidden_text = f"\n\nCRITICAL: The following objects have already been used as Object A in previous attempts and MUST NOT be selected: {', '.join(used_A_list)}\nYou MUST select a DIFFERENT object for A that is NOT in this list."
     
-    selection_prompt = f"""You are an ACE engine object selector. Select two physical objects for an advertisement with strict geometric overlap assessment.
+    def make_selection_prompt():
+        return f"""You are an ACE engine object selector. Select two physical objects for an advertisement with strict geometric overlap assessment.
 
 Product Name: {product_name}
 Product Description: {product_description}
@@ -324,6 +326,128 @@ Return ONLY valid JSON with these exact keys:
 }}
 
 Do not include any explanation or other text."""
+    
+    # HYBRID_SEARCH: For attempt 2 (or any chosen attempt), try up to 8 different A/B candidates to find NEAR_GEOMETRIC_OVERLAP
+    if attempt == 2:
+        max_hybrid_search_tries = 8
+        best_side_by_side_result = None  # Store best SIDE_BY_SIDE result as fallback
+        
+        print(f"HYBRID_SEARCH attempt=2 starting search for NEAR_GEOMETRIC_OVERLAP (max {max_hybrid_search_tries} tries)")
+        
+        for search_try in range(max_hybrid_search_tries):
+            try:
+                selection_prompt = make_selection_prompt()
+                response = retry_openai_call(
+                    lambda: client.chat.completions.create(
+                        model=TEXT_MODEL,
+                        messages=[
+                            {"role": "system", "content": "You are an ACE engine object selector. Always return valid JSON only."},
+                            {"role": "user", "content": selection_prompt}
+                        ],
+                        temperature=0.8,
+                        response_format={"type": "json_object"}
+                    ),
+                    operation_name="hybrid_search_object_selection"
+                )
+                
+                result = json.loads(response.choices[0].message.content.strip())
+                
+                # Validate fields exist
+                A = result.get("A", "").strip()
+                B = result.get("B", "").strip()
+                C_projection_description = result.get("C_projection_description", "").strip()
+                D_projection_description = result.get("D_projection_description", "").strip()
+                overlap_assessment = result.get("overlap_assessment", "").strip()
+                hybrid_mode = result.get("hybrid_mode", "SIDE_BY_SIDE").strip()
+                layout = result.get("layout", "SIDE_BY_SIDE")
+                background_classic_of_C = result.get("background_classic_of_C", "")
+                c_is_dominant = result.get("c_is_dominant", True)
+                
+                # Check if A is in forbidden list
+                if used_A_list and A.lower() in [used.lower() for used in used_A_list]:
+                    print(f"HYBRID_SEARCH attempt=2 try={search_try + 1} REJECTED A (forbidden): {A}")
+                    continue  # Skip this result and try again
+                
+                # Validate overlap_assessment
+                if overlap_assessment not in ["NEAR_GEOMETRIC_OVERLAP", "ONLY_SIMILAR", "NO_SIMILARITY"]:
+                    overlap_assessment = "ONLY_SIMILAR"
+                
+                # Validate hybrid_mode
+                if hybrid_mode not in ["PROJECTION_REPLACEMENT", "SIDE_BY_SIDE"]:
+                    hybrid_mode = "SIDE_BY_SIDE"
+                
+                # Check if we found NEAR_GEOMETRIC_OVERLAP
+                if overlap_assessment == "NEAR_GEOMETRIC_OVERLAP" and hybrid_mode == "PROJECTION_REPLACEMENT":
+                    # Found a valid HYBRID candidate!
+                    layout = "HYBRID"
+                    print(f"HYBRID_FOUND attempt=2 try={search_try + 1} A={A} B={B} overlap={overlap_assessment} hybrid_mode={hybrid_mode}")
+                    
+                    # Validate and return
+                    if not A or not B:
+                        A = "product object"
+                        B = "complementary object"
+                    if not C_projection_description:
+                        C_projection_description = "front view maximizing silhouette area"
+                    if not D_projection_description:
+                        D_projection_description = "front view maximizing silhouette area"
+                    
+                    return {
+                        "A": A,
+                        "B": B,
+                        "C_projection_description": C_projection_description,
+                        "D_projection_description": D_projection_description,
+                        "overlap_assessment": overlap_assessment,
+                        "hybrid_mode": hybrid_mode,
+                        "layout": layout,
+                        "background_classic_of_C": background_classic_of_C,
+                        "c_is_dominant": c_is_dominant
+                    }
+                else:
+                    # Not a HYBRID candidate, but might be a good SIDE_BY_SIDE fallback
+                    if overlap_assessment == "ONLY_SIMILAR":
+                        layout = "SIDE_BY_SIDE"
+                        # Store as best SIDE_BY_SIDE result if we don't have one yet
+                        if best_side_by_side_result is None:
+                            best_side_by_side_result = {
+                                "A": A,
+                                "B": B,
+                                "C_projection_description": C_projection_description,
+                                "D_projection_description": D_projection_description,
+                                "overlap_assessment": overlap_assessment,
+                                "hybrid_mode": hybrid_mode,
+                                "layout": layout,
+                                "background_classic_of_C": background_classic_of_C,
+                                "c_is_dominant": c_is_dominant
+                            }
+                    
+                    print(f"HYBRID_SEARCH attempt=2 try={search_try + 1} overlap={overlap_assessment} hybrid_mode={hybrid_mode} layout={layout} (not HYBRID, continuing search)")
+                    continue  # Continue searching
+                    
+            except Exception as e:
+                print(f"HYBRID_SEARCH attempt=2 try={search_try + 1} error: {str(e)}, continuing search")
+                continue  # Continue searching on error
+        
+        # If we get here, we didn't find a NEAR_GEOMETRIC_OVERLAP after max_hybrid_search_tries
+        if best_side_by_side_result:
+            print(f"HYBRID_NOT_FOUND attempt=2 fallback SIDE_BY_SIDE A={best_side_by_side_result['A']} B={best_side_by_side_result['B']}")
+            return best_side_by_side_result
+        else:
+            print(f"HYBRID_NOT_FOUND attempt=2 no valid result found, using fallback")
+            # Fallback to default
+            return {
+                "A": "product object",
+                "B": "complementary object",
+                "C_projection_description": "front view maximizing silhouette area",
+                "D_projection_description": "front view maximizing silhouette area",
+                "overlap_assessment": "ONLY_SIMILAR",
+                "hybrid_mode": "SIDE_BY_SIDE",
+                "layout": "SIDE_BY_SIDE",
+                "background_classic_of_C": "natural background",
+                "c_is_dominant": True
+            }
+    
+    # For attempts 1 and 3, use the original retry logic
+    selection_prompt = make_selection_prompt()
     
     # Retry up to 3 times if A is in forbidden list OR if overlap_assessment is NO_SIMILARITY
     max_internal_retries = 3
@@ -494,8 +618,8 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
     else:
         print(f"USED_A so far: [] (first attempt)")
     
-    # Step 1: Pick two objects, projections, overlap assessment, hybrid_mode, layout, and background (with ad_goal and used_A_list)
-    objects = pick_two_objects(product_name, product_description, headline, ad_goal, used_A_list)
+    # Step 1: Pick two objects, projections, overlap assessment, hybrid_mode, layout, and background (with ad_goal, used_A_list, and attempt)
+    objects = pick_two_objects(product_name, product_description, headline, ad_goal, used_A_list, attempt)
     A = objects["A"]
     B = objects["B"]
     C_projection_description = objects["C_projection_description"]
