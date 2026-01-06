@@ -356,6 +356,7 @@ Do not include any explanation or other text."""
             
             # Check if A is in forbidden list
             if used_A_list and A.lower() in [used.lower() for used in used_A_list]:
+                print(f"REJECTED A (forbidden): {A}")
                 if retry_attempt < max_internal_retries - 1:
                     print(f"FORBIDDEN_HIT retrying selector... attempt={retry_attempt + 1} forbidden_A={A}")
                     continue  # Retry
@@ -420,6 +421,9 @@ Do not include any explanation or other text."""
             if not D_projection_description:
                 D_projection_description = "front view maximizing silhouette area"
             
+            # Log successful selection (A passed forbidden check or was not forbidden)
+            # Note: attempt number is not available here, will be logged in generate_image
+            
             return {
                 "A": A,
                 "B": B,
@@ -481,6 +485,12 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
     }
     openai_size = size_map.get(ad_size, "1024x1024")
     
+    # Log used_A list before selection
+    if used_A_list:
+        print(f"USED_A so far: {used_A_list}")
+    else:
+        print(f"USED_A so far: [] (first attempt)")
+    
     # Step 1: Pick two objects, projections, overlap assessment, hybrid_mode, layout, and background (with ad_goal and used_A_list)
     objects = pick_two_objects(product_name, product_description, headline, ad_goal, used_A_list)
     A = objects["A"]
@@ -492,6 +502,9 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
     layout = objects["layout"]
     background_classic_of_C = objects["background_classic_of_C"]
     c_is_dominant = objects.get("c_is_dominant", True)
+    
+    # Log successful selection of A for this attempt
+    print(f"SELECTED A for attempt {attempt}: {A}")
     
     # Debug log: print selected A, B, layout, overlap_assessment, hybrid_mode, and openai_size (NOT full prompt, NOT secrets)
     print(f"SELECTED A/B attempt={attempt}: A={A}, B={B}, layout={layout}, overlap_assessment={overlap_assessment}, hybrid_mode={hybrid_mode}, ad_size={ad_size} (OpenAI size: {openai_size})")
@@ -713,9 +726,14 @@ def generate():
         image_data_url, selected_A = generate_image(product_name, product_description, headline, ad_size, attempt, ad_goal, used_A_list)
         
         # Track the selected A (add to used_A_list if not already present)
-        if selected_A and selected_A.lower() not in [used.lower() for used in used_A_list]:
-            used_A_tracker[product_key].append(selected_A)
-            print(f"TRACKED used_A for product: {selected_A} (total: {len(used_A_tracker[product_key])})")
+        if selected_A:
+            # Check if already tracked (case-insensitive)
+            already_tracked = selected_A.lower() in [used.lower() for used in used_A_list]
+            if not already_tracked:
+                used_A_tracker[product_key].append(selected_A)
+                print(f"TRACKED used_A for product: {selected_A} (total: {len(used_A_tracker[product_key])})")
+            else:
+                print(f"WARNING: Selected A '{selected_A}' was already in used_A_list, but was selected anyway")
         
         # Extract base64 from data URL for ZIP creation
         image_base64 = image_data_url.split(',')[1] if ',' in image_data_url else image_data_url
