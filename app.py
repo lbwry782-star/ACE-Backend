@@ -425,6 +425,18 @@ HEADLINE RULES (INSIDE IMAGE):
 - The headline must be clearly readable and visually integrated into the composition.
 - Place it above/below/next-to the objects (never on them).
 
+SAFE MARGIN RULE (CRITICAL - PREVENTS CLIPPING):
+- ALL text (the headline) MUST be positioned at least 8-12% away from EVERY edge of the canvas.
+- Keep the headline at least 8-12% from the top edge, bottom edge, left edge, and right edge.
+- This ensures the headline is NEVER cut off or clipped at the edges.
+- The headline MUST remain fully visible within the safe margin zone.
+
+COMPOSITION RULE (HEADLINE PLACEMENT):
+- The headline MUST be placed on the background area (on A's background), NEVER on top of the projections.
+- The headline must be positioned in an area of the background that does NOT overlap with Object A or Object B projections.
+- The headline must remain fully visible and readable, positioned in a clear background area.
+- If the headline is too long to fit safely, shorten or rephrase it to 3-7 words while still including the product name "{product_name}".
+
 CRITICAL ENFORCEMENT:
 - YOU MUST SHOW BOTH OBJECT A ({A}) AND OBJECT B ({B}).
 - The image MUST contain BOTH objects. Single-object images are FORBIDDEN.
