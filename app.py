@@ -16,6 +16,10 @@ CORS(app)  # Enable CORS for all origins (Phase 1)
 # Valid ad sizes
 VALID_AD_SIZES = {"1024x1024", "1024x1536", "1536x1024"}
 
+# In-memory storage for tracking used Object A per product
+# Key: (product_name, product_description) -> value: list of used A objects
+used_A_tracker = {}
+
 # OpenAI configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TEXT_MODEL = os.getenv("TEXT_MODEL", "gpt-4.1-mini")
@@ -100,7 +104,50 @@ def health():
     return jsonify({"ok": True}), 200
 
 
-def generate_headline_and_text(product_name, product_description, attempt):
+def generate_ad_goal(product_name, product_description, attempt):
+    """Generate a distinct advertising goal for the given attempt (1, 2, or 3)."""
+    if not client:
+        raise ValueError("OpenAI API key not configured")
+    
+    goal_prompt = f"""You are an advertising strategist. Generate a distinct advertising goal for attempt {attempt} of 3.
+
+Product Name: {product_name}
+Product Description: {product_description}
+
+Requirements:
+- This is attempt {attempt} of 3 total attempts
+- Each attempt must have a DIFFERENT advertising goal
+- Infer the target audience from product name + description only (age, lifestyle, needs, knowledge level, pains)
+- Generate a specific, distinct advertising goal for this attempt
+- The goal should be different from goals for attempts 1, 2, and 3
+
+Return ONLY a concise description of the advertising goal (1-2 sentences), nothing else."""
+
+    try:
+        response = retry_openai_call(
+            lambda: client.chat.completions.create(
+                model=TEXT_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are an advertising strategist. Generate distinct advertising goals."},
+                    {"role": "user", "content": goal_prompt}
+                ],
+                temperature=0.9,
+                max_tokens=150
+            ),
+            operation_name="ad_goal_generation"
+        )
+        
+        ad_goal = response.choices[0].message.content.strip()
+        print(f"AD_GOAL attempt={attempt}: {ad_goal}")
+        return ad_goal
+    except Exception as e:
+        # Fallback: use attempt number in goal
+        ad_goal = f"Advertising goal for attempt {attempt}: highlight different aspect of {product_name}"
+        print(f"AD_GOAL attempt={attempt}: {ad_goal} (fallback)")
+        return ad_goal
+
+
+def generate_headline_and_text(product_name, product_description, attempt, ad_goal):
     """Generate headline and exactly 50-word marketing text using OpenAI."""
     if not client:
         raise ValueError("OpenAI API key not configured")
@@ -111,6 +158,7 @@ def generate_headline_and_text(product_name, product_description, attempt):
 - Must include the product name: "{product_name}"
 - Must be original and NOT a quote or variation of the product description
 - Must be a compelling promise or benefit statement
+- Must align with the advertising goal: {ad_goal}
 - Product description (for context only, do not copy): {product_description}
 
 Return ONLY the headline, nothing else."""
@@ -143,6 +191,7 @@ Return ONLY the headline, nothing else."""
 - Must be based on the product: {product_name}
 - Product description: {product_description}
 - Headline (already used, do not repeat): {headline}
+- Must align with the advertising goal: {ad_goal}
 - Must be compelling, professional, and persuasive
 - Do not include the headline in the word count
 
@@ -189,25 +238,46 @@ Return ONLY the marketing text, exactly 50 words."""
     return headline, marketing_text
 
 
-def pick_two_objects(product_name, product_description, headline):
-    """Select two physical objects (A and B), layout, and background using text model."""
+def pick_two_objects(product_name, product_description, headline, ad_goal, used_A_list=None):
+    """Select two physical objects (A and B), layout, and background using text model.
+    
+    Args:
+        product_name: Product name
+        product_description: Product description
+        headline: Generated headline
+        ad_goal: Distinct advertising goal for this attempt
+        used_A_list: List of Object A values that have been used in previous attempts (forbidden)
+    
+    Returns:
+        dict with keys: A, B, layout, background_classic_of_C
+    """
     if not client:
         raise ValueError("OpenAI API key not configured")
+    
+    if used_A_list is None:
+        used_A_list = []
+    
+    # Build forbidden list text
+    forbidden_text = ""
+    if used_A_list:
+        forbidden_text = f"\n\nCRITICAL: The following objects have already been used as Object A in previous attempts and MUST NOT be selected: {', '.join(used_A_list)}\nYou MUST select a DIFFERENT object for A that is NOT in this list."
     
     selection_prompt = f"""You are an ACE engine object selector. Select two physical objects for an advertisement.
 
 Product Name: {product_name}
 Product Description: {product_description}
 Headline: {headline}
+Advertising Goal: {ad_goal}
 
 Rules:
-1. Generate a list of 80 physical, real, associative objects based on the product and headline.
+1. Generate a list of 80 physical, real, associative objects based on the product, headline, and advertising goal.
 2. Objects must be simple, everyday, familiar physical objects — NOT ideas, symbols, abstract concepts, or illustrations.
 3. Objects should be non-functional / not functionally linked.
 4. Do NOT pick objects containing text/logos/letters/numbers/external graphics (unless inherent like playing cards, dice dots, engraved compass letters).
+{forbidden_text}
 
 Selection:
-- A = object with central meaning to the ad goal
+- A = object with central meaning to the ad goal (MUST be different from previously used A objects)
 - B = object used for conceptual emphasis (but pairing is still only by shape similarity)
 - layout = "HYBRID" if A and B have strong shape similarity (can reach almost geometric overlap), otherwise "SIDE_BY_SIDE"
 - background_classic_of_C = classic natural background for the dominant object (A's projection C)
@@ -222,55 +292,78 @@ Return ONLY valid JSON with these exact keys:
 
 Do not include any explanation or other text."""
     
-    try:
-        response = retry_openai_call(
-            lambda: client.chat.completions.create(
-                model=TEXT_MODEL,
-                messages=[
-                    {"role": "system", "content": "You are an ACE engine object selector. Always return valid JSON only."},
-                    {"role": "user", "content": selection_prompt}
-                ],
-                temperature=0.8,
-                response_format={"type": "json_object"}
-            ),
-            operation_name="object_selection"
-        )
-        
-        result = json.loads(response.choices[0].message.content.strip())
-        
-        # Validate fields exist
-        A = result.get("A", "")
-        B = result.get("B", "")
-        layout = result.get("layout", "SIDE_BY_SIDE")
-        background_classic_of_C = result.get("background_classic_of_C", "")
-        
-        # Validate layout
-        if layout not in ["HYBRID", "SIDE_BY_SIDE"]:
-            layout = "SIDE_BY_SIDE"
-        
-        # Fallback if missing fields
-        if not A or not B:
-            A = "product object"
-            B = "complementary object"
-        
-        return {
-            "A": A,
-            "B": B,
-            "layout": layout,
-            "background_classic_of_C": background_classic_of_C
-        }
-    except Exception as e:
-        # Fallback on error
-        print(f"Warning: Object selection failed: {str(e)}, using fallback")
-        return {
-            "A": "product object",
-            "B": "complementary object",
-            "layout": "SIDE_BY_SIDE",
-            "background_classic_of_C": "natural background"
-        }
+    # Retry up to 3 times if A is in forbidden list
+    max_internal_retries = 3
+    for retry_attempt in range(max_internal_retries):
+        try:
+            response = retry_openai_call(
+                lambda: client.chat.completions.create(
+                    model=TEXT_MODEL,
+                    messages=[
+                        {"role": "system", "content": "You are an ACE engine object selector. Always return valid JSON only."},
+                        {"role": "user", "content": selection_prompt}
+                    ],
+                    temperature=0.8,
+                    response_format={"type": "json_object"}
+                ),
+                operation_name="object_selection"
+            )
+            
+            result = json.loads(response.choices[0].message.content.strip())
+            
+            # Validate fields exist
+            A = result.get("A", "").strip()
+            B = result.get("B", "").strip()
+            layout = result.get("layout", "SIDE_BY_SIDE")
+            background_classic_of_C = result.get("background_classic_of_C", "")
+            
+            # Check if A is in forbidden list
+            if used_A_list and A.lower() in [used.lower() for used in used_A_list]:
+                if retry_attempt < max_internal_retries - 1:
+                    print(f"FORBIDDEN_HIT retrying selector... attempt={retry_attempt + 1} forbidden_A={A}")
+                    continue  # Retry
+                else:
+                    print(f"FORBIDDEN_HIT max retries reached, using A anyway: {A}")
+            
+            # Validate layout
+            if layout not in ["HYBRID", "SIDE_BY_SIDE"]:
+                layout = "SIDE_BY_SIDE"
+            
+            # Fallback if missing fields
+            if not A or not B:
+                A = "product object"
+                B = "complementary object"
+            
+            return {
+                "A": A,
+                "B": B,
+                "layout": layout,
+                "background_classic_of_C": background_classic_of_C
+            }
+        except Exception as e:
+            if retry_attempt < max_internal_retries - 1:
+                print(f"Warning: Object selection failed (retry {retry_attempt + 1}): {str(e)}")
+                continue
+            else:
+                # Fallback on error after all retries
+                print(f"Warning: Object selection failed after {max_internal_retries} retries: {str(e)}, using fallback")
+                return {
+                    "A": "product object",
+                    "B": "complementary object",
+                    "layout": "SIDE_BY_SIDE",
+                    "background_classic_of_C": "natural background"
+                }
+    
+    # Should not reach here, but fallback
+    return {
+        "A": "product object",
+        "B": "complementary object",
+        "layout": "SIDE_BY_SIDE",
+        "background_classic_of_C": "natural background"
+    }
 
 
-def generate_image(product_name, product_description, headline, ad_size, attempt):
+def generate_image(product_name, product_description, headline, ad_size, attempt, ad_goal, used_A_list=None):
     """Generate image using OpenAI DALL-E with strict two-object enforcement."""
     if not client:
         raise ValueError("OpenAI API key not configured")
@@ -283,19 +376,15 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
     }
     openai_size = size_map.get(ad_size, "1024x1024")
     
-    # Step 1: Pick two objects, layout, and background
-    objects = pick_two_objects(product_name, product_description, headline)
+    # Step 1: Pick two objects, layout, and background (with ad_goal and used_A_list)
+    objects = pick_two_objects(product_name, product_description, headline, ad_goal, used_A_list)
     A = objects["A"]
     B = objects["B"]
     layout = objects["layout"]
     background_classic_of_C = objects["background_classic_of_C"]
     
     # Debug log: print selected A, B, layout, and openai_size (NOT full prompt, NOT secrets)
-    print(f"Selected A: {A}")
-    print(f"Selected B: {B}")
-    print(f"Selected layout: {layout}")
-    print(f"Selected ad_size: {ad_size} (OpenAI size: {openai_size})")
-    print(f"Attempt: {attempt}")
+    print(f"SELECTED A/B attempt={attempt}: A={A}, B={B}, layout={layout}, ad_size={ad_size} (OpenAI size: {openai_size})")
     
     # Step 2: Build strict image prompt with explicit A/B/layout/background
     if layout == "HYBRID":
@@ -372,7 +461,9 @@ The image MUST show BOTH Object A and Object B. Do not explain. Do not describe.
         # Use b64_json from OpenAI response (no URL fetch needed)
         image_base64 = response.data[0].b64_json
         
-        return f"data:image/jpeg;base64,{image_base64}"
+        image_data_url = f"data:image/jpeg;base64,{image_base64}"
+        # Return both image_data_url and selected A for tracking
+        return image_data_url, A
     except Exception as e:
         # Handle external errors cleanly
         raise ValueError(f"Image generation failed: {str(e)}")
@@ -449,11 +540,27 @@ def generate():
         return jsonify({"error": "Server misconfigured: OPENAI_API_KEY is not set"}), 500
     
     try:
-        # Generate headline and marketing text
-        headline, marketing_text = generate_headline_and_text(product_name, product_description, attempt)
+        # Create product key for tracking used_A
+        product_key = (product_name.strip().lower(), product_description.strip().lower())
         
-        # Generate image
-        image_data_url = generate_image(product_name, product_description, headline, ad_size, attempt)
+        # Get or initialize used_A list for this product
+        if product_key not in used_A_tracker:
+            used_A_tracker[product_key] = []
+        used_A_list = used_A_tracker[product_key]
+        
+        # Generate distinct ad_goal for this attempt
+        ad_goal = generate_ad_goal(product_name, product_description, attempt)
+        
+        # Generate headline and marketing text (with ad_goal)
+        headline, marketing_text = generate_headline_and_text(product_name, product_description, attempt, ad_goal)
+        
+        # Generate image (with ad_goal and used_A_list) - returns (image_data_url, selected_A)
+        image_data_url, selected_A = generate_image(product_name, product_description, headline, ad_size, attempt, ad_goal, used_A_list)
+        
+        # Track the selected A (add to used_A_list if not already present)
+        if selected_A and selected_A.lower() not in [used.lower() for used in used_A_list]:
+            used_A_tracker[product_key].append(selected_A)
+            print(f"TRACKED used_A for product: {selected_A} (total: {len(used_A_tracker[product_key])})")
         
         # Extract base64 from data URL for ZIP creation
         image_base64 = image_data_url.split(',')[1] if ',' in image_data_url else image_data_url
