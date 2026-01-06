@@ -755,6 +755,8 @@ def generate():
     
     except RetryableError as e:
         # Transient OpenAI error after max retries - return 503
+        # This does NOT consume an attempt - used_A is only updated after successful generation
+        print(f"OPENAI_RETRY_FAILED returning RETRYABLE_ERROR code={e.code}")
         return jsonify({"error": "RETRYABLE_ERROR", "code": e.code}), 503
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
