@@ -117,7 +117,7 @@ Return ONLY the marketing text, exactly 50 words."""
     return headline, marketing_text
 
 
-def generate_image(product_name, product_description, headline, ad_size):
+def generate_image(product_name, product_description, headline, ad_size, attempt):
     """Generate image using OpenAI DALL-E."""
     if not client:
         raise ValueError("OpenAI API key not configured")
@@ -145,6 +145,13 @@ Requirements:
 - Professional, clean design
 - No other text beyond the headline
 - High quality, realistic photography style"""
+
+    # Debug log: print image prompt, ad_size, and attempt
+    print("=== IMAGE PROMPT SENT TO OPENAI ===")
+    print(image_prompt)
+    print("=== END IMAGE PROMPT ===")
+    print(f"Selected ad_size: {ad_size}")
+    print(f"Attempt: {attempt}")
 
     try:
         response = client.images.generate(
@@ -243,7 +250,7 @@ def generate():
         headline, marketing_text = generate_headline_and_text(product_name, product_description, attempt)
         
         # Generate image
-        image_data_url = generate_image(product_name, product_description, headline, ad_size)
+        image_data_url = generate_image(product_name, product_description, headline, ad_size, attempt)
         
         # Extract base64 from data URL for ZIP creation
         image_base64 = image_data_url.split(',')[1] if ',' in image_data_url else image_data_url
