@@ -2,7 +2,6 @@ import os
 import base64
 import io
 import zipfile
-import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
@@ -153,15 +152,16 @@ Requirements:
             prompt=image_prompt,
             size=openai_size,
             quality="auto",
-            n=1
+            n=1,
+            response_format="b64_json"
         )
         
-        image_url = response.data[0].url
+        # Debug: log which keys exist in the response
+        response_keys = list(response.data[0].__dict__.keys()) if hasattr(response.data[0], '__dict__') else []
+        print(f"OpenAI image response keys: {response_keys}")
         
-        # Download image and convert to base64
-        img_response = requests.get(image_url)
-        img_response.raise_for_status()
-        image_base64 = base64.b64encode(img_response.content).decode('utf-8')
+        # Use b64_json from OpenAI response (no URL fetch needed)
+        image_base64 = response.data[0].b64_json
         
         return f"data:image/jpeg;base64,{image_base64}"
     except Exception as e:
