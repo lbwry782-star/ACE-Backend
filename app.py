@@ -152,8 +152,7 @@ Requirements:
             prompt=image_prompt,
             size=openai_size,
             quality="auto",
-            n=1,
-            response_format="b64_json"
+            n=1
         )
         
         # Debug: log which keys exist in the response
