@@ -239,7 +239,7 @@ Return ONLY the marketing text, exactly 50 words."""
 
 
 def pick_two_objects(product_name, product_description, headline, ad_goal, used_A_list=None):
-    """Select two physical objects (A and B), layout, and background using text model.
+    """Select two physical objects (A and B), projections, overlap assessment, layout, and background using text model.
     
     Args:
         product_name: Product name
@@ -249,7 +249,8 @@ def pick_two_objects(product_name, product_description, headline, ad_goal, used_
         used_A_list: List of Object A values that have been used in previous attempts (forbidden)
     
     Returns:
-        dict with keys: A, B, layout, background_classic_of_C
+        dict with keys: A, B, C_projection_description, D_projection_description, overlap_assessment, 
+                        layout, background_classic_of_C, c_is_dominant
     """
     if not client:
         raise ValueError("OpenAI API key not configured")
@@ -262,7 +263,7 @@ def pick_two_objects(product_name, product_description, headline, ad_goal, used_
     if used_A_list:
         forbidden_text = f"\n\nCRITICAL: The following objects have already been used as Object A in previous attempts and MUST NOT be selected: {', '.join(used_A_list)}\nYou MUST select a DIFFERENT object for A that is NOT in this list."
     
-    selection_prompt = f"""You are an ACE engine object selector. Select two physical objects for an advertisement.
+    selection_prompt = f"""You are an ACE engine object selector. Select two physical objects for an advertisement with strict geometric overlap assessment.
 
 Product Name: {product_name}
 Product Description: {product_description}
@@ -279,21 +280,46 @@ Rules:
 Selection:
 - A = object with central meaning to the ad goal (MUST be different from previously used A objects)
 - B = object used for conceptual emphasis (but pairing is still only by shape similarity)
-- layout = "HYBRID" if A and B have strong shape similarity (can reach almost geometric overlap), otherwise "SIDE_BY_SIDE"
+
+Projection Selection:
+- C_projection_description = how to view Object A to maximize its silhouette area (camera angle, perspective, orientation)
+- D_projection_description = how to view Object B to maximize its silhouette area (camera angle, perspective, orientation)
+- Both projections must be clean silhouettes, no confusing details
+- Choose the projection with the largest visible dominant area for each object
+
+Geometric Overlap Assessment (CRITICAL):
+Compare the simplified shapes E (from C) and F (from D) after permitted adjustments (scale/angle/proportion without distortion).
+- "NEAR_GEOMETRIC_OVERLAP": E and F can reach almost geometric overlap - the projection silhouettes are nearly identical after permitted adjustments. This is clear and immediate to an average human eye.
+- "ONLY_SIMILAR": E and F are similar but NOT nearly geometric overlap - they share some shape similarity but cannot reach near-geometric overlap even with adjustments.
+- "NO_SIMILARITY": E and F have no clear shape similarity - an average human eye would not see them as similar.
+
+Layout Decision:
+- layout = "HYBRID" ONLY if overlap_assessment == "NEAR_GEOMETRIC_OVERLAP"
+- layout = "SIDE_BY_SIDE" if overlap_assessment is "ONLY_SIMILAR" or "NO_SIMILARITY"
+- Never force HYBRID if overlap is not clear and immediate to an average human eye
+
+Background:
 - background_classic_of_C = classic natural background for the dominant object (A's projection C)
+- c_is_dominant = true (C always controls lighting/texture/composition/background)
 
 Return ONLY valid JSON with these exact keys:
 {{
   "A": "object name",
   "B": "object name",
-  "layout": "HYBRID" or "SIDE_BY_SIDE",
-  "background_classic_of_C": "description of classic natural background"
+  "C_projection_description": "how to view A to maximize silhouette area (camera angle/perspective)",
+  "D_projection_description": "how to view B to maximize silhouette area (camera angle/perspective)",
+  "overlap_assessment": "NEAR_GEOMETRIC_OVERLAP" or "ONLY_SIMILAR" or "NO_SIMILARITY",
+  "layout": "HYBRID" (only if overlap_assessment is NEAR_GEOMETRIC_OVERLAP) or "SIDE_BY_SIDE",
+  "background_classic_of_C": "description of classic natural background",
+  "c_is_dominant": true
 }}
 
 Do not include any explanation or other text."""
     
-    # Retry up to 3 times if A is in forbidden list
+    # Retry up to 3 times if A is in forbidden list OR if overlap_assessment is NO_SIMILARITY
     max_internal_retries = 3
+    best_result = None  # Store best "ONLY_SIMILAR" result as fallback
+    
     for retry_attempt in range(max_internal_retries):
         try:
             response = retry_openai_call(
@@ -314,8 +340,12 @@ Do not include any explanation or other text."""
             # Validate fields exist
             A = result.get("A", "").strip()
             B = result.get("B", "").strip()
+            C_projection_description = result.get("C_projection_description", "").strip()
+            D_projection_description = result.get("D_projection_description", "").strip()
+            overlap_assessment = result.get("overlap_assessment", "").strip()
             layout = result.get("layout", "SIDE_BY_SIDE")
             background_classic_of_C = result.get("background_classic_of_C", "")
+            c_is_dominant = result.get("c_is_dominant", True)
             
             # Check if A is in forbidden list
             if used_A_list and A.lower() in [used.lower() for used in used_A_list]:
@@ -325,20 +355,65 @@ Do not include any explanation or other text."""
                 else:
                     print(f"FORBIDDEN_HIT max retries reached, using A anyway: {A}")
             
-            # Validate layout
-            if layout not in ["HYBRID", "SIDE_BY_SIDE"]:
+            # Validate overlap_assessment
+            if overlap_assessment not in ["NEAR_GEOMETRIC_OVERLAP", "ONLY_SIMILAR", "NO_SIMILARITY"]:
+                overlap_assessment = "ONLY_SIMILAR"  # Default to conservative
+            
+            # Enforce layout based on overlap_assessment
+            if overlap_assessment == "NEAR_GEOMETRIC_OVERLAP":
+                layout = "HYBRID"
+            elif overlap_assessment == "ONLY_SIMILAR":
+                layout = "SIDE_BY_SIDE"
+                # Store as best result for fallback
+                if best_result is None:
+                    best_result = {
+                        "A": A,
+                        "B": B,
+                        "C_projection_description": C_projection_description,
+                        "D_projection_description": D_projection_description,
+                        "overlap_assessment": overlap_assessment,
+                        "layout": layout,
+                        "background_classic_of_C": background_classic_of_C,
+                        "c_is_dominant": c_is_dominant
+                    }
+            elif overlap_assessment == "NO_SIMILARITY":
+                # Re-pick a new pair (retry)
+                if retry_attempt < max_internal_retries - 1:
+                    print(f"NO_SIMILARITY retrying selector... attempt={retry_attempt + 1} A={A} B={B}")
+                    continue  # Retry to get a better pair
+                else:
+                    # Max retries reached - use best "ONLY_SIMILAR" result or fallback to SIDE_BY_SIDE
+                    if best_result:
+                        print(f"NO_SIMILARITY max retries reached, using best ONLY_SIMILAR result")
+                        return best_result
+                    else:
+                        # No good result found, force SIDE_BY_SIDE
+                        layout = "SIDE_BY_SIDE"
+                        overlap_assessment = "ONLY_SIMILAR"
+            
+            # Validate layout matches overlap_assessment
+            if layout == "HYBRID" and overlap_assessment != "NEAR_GEOMETRIC_OVERLAP":
                 layout = "SIDE_BY_SIDE"
             
-            # Fallback if missing fields
+            # Fallback if missing critical fields
             if not A or not B:
                 A = "product object"
                 B = "complementary object"
             
+            if not C_projection_description:
+                C_projection_description = "front view maximizing silhouette area"
+            if not D_projection_description:
+                D_projection_description = "front view maximizing silhouette area"
+            
             return {
                 "A": A,
                 "B": B,
+                "C_projection_description": C_projection_description,
+                "D_projection_description": D_projection_description,
+                "overlap_assessment": overlap_assessment,
                 "layout": layout,
-                "background_classic_of_C": background_classic_of_C
+                "background_classic_of_C": background_classic_of_C,
+                "c_is_dominant": c_is_dominant
             }
         except Exception as e:
             if retry_attempt < max_internal_retries - 1:
@@ -347,19 +422,31 @@ Do not include any explanation or other text."""
             else:
                 # Fallback on error after all retries
                 print(f"Warning: Object selection failed after {max_internal_retries} retries: {str(e)}, using fallback")
+                if best_result:
+                    return best_result
                 return {
                     "A": "product object",
                     "B": "complementary object",
+                    "C_projection_description": "front view maximizing silhouette area",
+                    "D_projection_description": "front view maximizing silhouette area",
+                    "overlap_assessment": "ONLY_SIMILAR",
                     "layout": "SIDE_BY_SIDE",
-                    "background_classic_of_C": "natural background"
+                    "background_classic_of_C": "natural background",
+                    "c_is_dominant": True
                 }
     
     # Should not reach here, but fallback
+    if best_result:
+        return best_result
     return {
         "A": "product object",
         "B": "complementary object",
+        "C_projection_description": "front view maximizing silhouette area",
+        "D_projection_description": "front view maximizing silhouette area",
+        "overlap_assessment": "ONLY_SIMILAR",
         "layout": "SIDE_BY_SIDE",
-        "background_classic_of_C": "natural background"
+        "background_classic_of_C": "natural background",
+        "c_is_dominant": True
     }
 
 
@@ -376,25 +463,47 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
     }
     openai_size = size_map.get(ad_size, "1024x1024")
     
-    # Step 1: Pick two objects, layout, and background (with ad_goal and used_A_list)
+    # Step 1: Pick two objects, projections, overlap assessment, layout, and background (with ad_goal and used_A_list)
     objects = pick_two_objects(product_name, product_description, headline, ad_goal, used_A_list)
     A = objects["A"]
     B = objects["B"]
+    C_projection_description = objects["C_projection_description"]
+    D_projection_description = objects["D_projection_description"]
+    overlap_assessment = objects["overlap_assessment"]
     layout = objects["layout"]
     background_classic_of_C = objects["background_classic_of_C"]
+    c_is_dominant = objects.get("c_is_dominant", True)
     
-    # Debug log: print selected A, B, layout, and openai_size (NOT full prompt, NOT secrets)
-    print(f"SELECTED A/B attempt={attempt}: A={A}, B={B}, layout={layout}, ad_size={ad_size} (OpenAI size: {openai_size})")
+    # Debug log: print selected A, B, layout, overlap_assessment, and openai_size (NOT full prompt, NOT secrets)
+    print(f"SELECTED A/B attempt={attempt}: A={A}, B={B}, layout={layout}, overlap_assessment={overlap_assessment}, ad_size={ad_size} (OpenAI size: {openai_size})")
     
-    # Step 2: Build strict image prompt with explicit A/B/layout/background
+    # Step 2: Build strict image prompt with explicit A/B/projections/layout/background
+    # Camera angle instructions based on projection descriptions
+    camera_instruction = f"""CAMERA ANGLE INSTRUCTIONS (CRITICAL):
+- Object A (C projection): {C_projection_description}
+- Object B (D projection): {D_projection_description}
+- The camera angle and perspective MUST match these projection descriptions exactly.
+- Both objects must be viewed from the angles that maximize their silhouette areas."""
+    
     if layout == "HYBRID":
-        layout_instruction = f"""Create a TRUE HYBRID: Object B's projection (D) is perfectly embedded into Object A's projection (C).
-Present the HYBRID at an angle that maximizes both projections' visibility while keeping full photographic realism.
-The objects must be physically fused or overlapped, NOT side-by-side."""
+        # HYBRID is ONLY allowed if overlap_assessment is NEAR_GEOMETRIC_OVERLAP
+        if overlap_assessment != "NEAR_GEOMETRIC_OVERLAP":
+            # Force SIDE_BY_SIDE if overlap is not near-geometric
+            layout = "SIDE_BY_SIDE"
+            print(f"HYBRID_REJECTED: overlap_assessment={overlap_assessment}, forcing SIDE_BY_SIDE")
+        
+        layout_instruction = f"""Create a TRUE HYBRID with NEAR-GEOMETRIC OVERLAP:
+- Object B's projection (D, simplified as F) must be perfectly embedded into Object A's projection (C, simplified as E).
+- The silhouette F must be nearly geometrically overlapped with silhouette E after permitted adjustments (scale/angle/proportion without distortion).
+- This overlap must be clear and immediate to an average human eye - the shapes must be nearly identical.
+- Present the HYBRID at an angle that maximizes both projections' visibility while keeping full photographic realism.
+- The objects must be physically fused or overlapped in a near-geometric way, NOT side-by-side.
+- If the overlap is not clear and immediate, REJECT this layout and output SIDE_BY_SIDE instead."""
     else:  # SIDE_BY_SIDE
         layout_instruction = f"""Place Object A (C projection) and Object B (D projection) SIDE BY SIDE at the same angle.
-Highlight maximal similar area between the projections.
-Place them close together, emphasizing their shape similarity."""
+- Highlight maximal similar area between the projections.
+- Place them close together, emphasizing their shape similarity.
+- Both objects must be viewed from angles matching their projection descriptions."""
     
     image_prompt = f"""YOU ARE A PROFESSIONAL ADVERTISING PHOTOGRAPHER.
 YOU MUST FOLLOW ALL RULES BELOW. NO EXCEPTIONS.
@@ -406,13 +515,19 @@ MANDATORY OBJECTS (BOTH MUST APPEAR):
 - NEVER show only one object. NEVER show only Object A. NEVER show only Object B.
 - BOTH objects must be clearly visible and recognizable.
 
+{camera_instruction}
+
 LAYOUT INSTRUCTION:
 {layout_instruction}
 
-BACKGROUND RULE:
+BACKGROUND AND LIGHTING RULE (CRITICAL - ENGINE 05H):
 - The background MUST be: {background_classic_of_C}
 - This is the classic natural background of Object A (the dominant object C).
+- C (Object A's projection) controls lighting, texture, composition, and background.
+- D (Object B's projection) must NOT change C's background or lighting.
+- Background and lighting must match ONLY C. D must not affect background/lighting.
 - NEVER use studio backgrounds, black backgrounds, gradients, or abstract scenes.
+- The entire scene's lighting, texture, and composition must be determined by C only.
 
 STYLE RULES:
 - Ultra-realistic photography ONLY.
