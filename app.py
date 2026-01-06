@@ -5,6 +5,9 @@ import io
 import zipfile
 import time
 import random
+import logging
+import uuid
+import traceback
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
@@ -12,6 +15,10 @@ from openai import RateLimitError, APIError, APIConnectionError, APITimeoutError
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all origins (Phase 1)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Valid ad sizes
 VALID_AD_SIZES = {"1024x1024", "1024x1536", "1536x1024"}
@@ -29,14 +36,19 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
 # Initialize OpenAI client
 if not OPENAI_API_KEY or not OPENAI_API_KEY.strip():
     client = None
-    print("WARNING: OPENAI_API_KEY is not set or is empty")
+    logger.warning("OPENAI_API_KEY is not set or is empty")
 else:
     # Only set base_url if explicitly provided and non-empty
     client_kwargs = {"api_key": OPENAI_API_KEY}
     if OPENAI_BASE_URL and OPENAI_BASE_URL.strip():
         client_kwargs["base_url"] = OPENAI_BASE_URL
     client = OpenAI(**client_kwargs)
-    print("INFO: OPENAI_API_KEY is present (client initialized)")
+    logger.info("OPENAI_API_KEY is present (client initialized)")
+
+
+def generate_request_id():
+    """Generate a short unique request ID."""
+    return str(uuid.uuid4())[:8]
 
 
 class RetryableError(Exception):
@@ -68,10 +80,10 @@ def retry_openai_call(call_func, max_retries=4, operation_name="OpenAI call"):
             wait_time = base_wait + jitter
             
             if attempt < max_retries - 1:
-                print(f"OPENAI_RETRY attempt={attempt + 1} wait={wait_time:.2f}s reason={type(e).__name__} code={error_code} operation={operation_name}")
+                logger.info(f"OPENAI_RETRY attempt={attempt + 1} wait={wait_time:.2f}s reason={type(e).__name__} code={error_code} operation={operation_name}")
                 time.sleep(wait_time)
             else:
-                print(f"OPENAI_RETRY attempt={attempt + 1} wait={wait_time:.2f}s reason={type(e).__name__} code={error_code} operation={operation_name} - MAX RETRIES REACHED")
+                logger.warning(f"OPENAI_RETRY attempt={attempt + 1} wait={wait_time:.2f}s reason={type(e).__name__} code={error_code} operation={operation_name} - MAX RETRIES REACHED")
         except APIError as e:
             # Check if it's a retryable error: 429 (rate limit) or 5xx server error
             status_code = getattr(e, 'status_code', None)
@@ -82,10 +94,10 @@ def retry_openai_call(call_func, max_retries=4, operation_name="OpenAI call"):
                 wait_time = base_wait + jitter
                 
                 if attempt < max_retries - 1:
-                    print(f"OPENAI_RETRY attempt={attempt + 1} wait={wait_time:.2f}s reason=APIError code={status_code} operation={operation_name}")
+                    logger.info(f"OPENAI_RETRY attempt={attempt + 1} wait={wait_time:.2f}s reason=APIError code={status_code} operation={operation_name}")
                     time.sleep(wait_time)
                 else:
-                    print(f"OPENAI_RETRY attempt={attempt + 1} wait={wait_time:.2f}s reason=APIError code={status_code} operation={operation_name} - MAX RETRIES REACHED")
+                    logger.warning(f"OPENAI_RETRY attempt={attempt + 1} wait={wait_time:.2f}s reason=APIError code={status_code} operation={operation_name} - MAX RETRIES REACHED")
             else:
                 # Non-retryable API error (4xx except 429)
                 raise
@@ -95,7 +107,24 @@ def retry_openai_call(call_func, max_retries=4, operation_name="OpenAI call"):
     
     # If we get here, all retries failed
     error_code = getattr(last_exception, 'status_code', None) or getattr(last_exception, 'code', None) or 429
+    logger.error(f"OPENAI_RETRY_FAILED returning RETRYABLE_ERROR after {max_retries} retries code={error_code} operation={operation_name}")
     raise RetryableError(f"OpenAI call failed after {max_retries} retries", error_code)
+
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    """Global exception handler to prevent 502 errors and ensure JSON responses."""
+    request_id = generate_request_id()
+    
+    # Log full traceback
+    logger.exception(f"Unhandled exception (request_id={request_id}): {type(e).__name__}: {str(e)}")
+    
+    # Return JSON error response
+    return jsonify({
+        "error": "INTERNAL_ERROR",
+        "message": "Server error",
+        "request_id": request_id
+    }), 500
 
 
 @app.route('/health', methods=['GET'])
@@ -788,13 +817,16 @@ def create_zip_in_memory(image_base64, marketing_text, attempt):
 @app.route('/generate', methods=['POST'])
 def generate():
     """Generate a single ad with real OpenAI generation (Phase 2)."""
+    # Generate request ID for this request
+    request_id = generate_request_id()
+    
     # Top-level try/except to catch ALL exceptions and prevent 502s
     try:
         # Get JSON body
         data = request.get_json()
         
         if not data:
-            return jsonify({"error": "Request body must be JSON"}), 400
+            return jsonify({"error": "Request body must be JSON", "request_id": request_id}), 400
         
         # Validate required fields
         product_name = data.get("product_name")
@@ -804,40 +836,41 @@ def generate():
         
         # Check all fields are present
         if not product_name:
-            return jsonify({"error": "product_name is required and must be a non-empty string"}), 400
+            return jsonify({"error": "product_name is required and must be a non-empty string", "request_id": request_id}), 400
         
         if not product_description:
-            return jsonify({"error": "product_description is required and must be a non-empty string"}), 400
+            return jsonify({"error": "product_description is required and must be a non-empty string", "request_id": request_id}), 400
         
         if not ad_size:
-            return jsonify({"error": "ad_size is required and must be a non-empty string"}), 400
+            return jsonify({"error": "ad_size is required and must be a non-empty string", "request_id": request_id}), 400
         
         if attempt is None:
-            return jsonify({"error": "attempt is required and must be 1, 2, or 3"}), 400
+            return jsonify({"error": "attempt is required and must be 1, 2, or 3", "request_id": request_id}), 400
         
         # Check all fields are strings (except attempt)
         if not isinstance(product_name, str) or not product_name.strip():
-            return jsonify({"error": "product_name must be a non-empty string"}), 400
+            return jsonify({"error": "product_name must be a non-empty string", "request_id": request_id}), 400
         
         if not isinstance(product_description, str) or not product_description.strip():
-            return jsonify({"error": "product_description must be a non-empty string"}), 400
+            return jsonify({"error": "product_description must be a non-empty string", "request_id": request_id}), 400
         
         if not isinstance(ad_size, str) or not ad_size.strip():
-            return jsonify({"error": "ad_size must be a non-empty string"}), 400
+            return jsonify({"error": "ad_size must be a non-empty string", "request_id": request_id}), 400
         
         # Validate attempt
         if not isinstance(attempt, int) or attempt not in [1, 2, 3]:
-            return jsonify({"error": "attempt must be exactly 1, 2, or 3"}), 400
+            return jsonify({"error": "attempt must be exactly 1, 2, or 3", "request_id": request_id}), 400
         
         # Validate ad_size is one of the allowed values
         if ad_size not in VALID_AD_SIZES:
             return jsonify({
-                "error": f"ad_size must be exactly one of: {', '.join(sorted(VALID_AD_SIZES))}"
+                "error": f"ad_size must be exactly one of: {', '.join(sorted(VALID_AD_SIZES))}",
+                "request_id": request_id
             }), 400
         
         # Check OpenAI API key - fail fast with clear error
         if not OPENAI_API_KEY or not OPENAI_API_KEY.strip() or not client:
-            return jsonify({"error": "Server misconfigured: OPENAI_API_KEY is not set"}), 500
+            return jsonify({"error": "Server misconfigured: OPENAI_API_KEY is not set", "request_id": request_id}), 500
         
         # Create product key for tracking used_A
         product_key = (product_name.strip().lower(), product_description.strip().lower())
@@ -880,54 +913,63 @@ def generate():
             "marketing_text_50_words": marketing_text,
             "image_data_url": image_data_url,
             "zip_base64": zip_base64,
-            "zip_filename": f"ad_{attempt}.zip"
+            "zip_filename": f"ad_{attempt}.zip",
+            "request_id": request_id
         }
         
+        logger.info(f"Successfully generated ad (request_id={request_id}, attempt={attempt})")
         return jsonify(ad), 200
     
     except RetryableError as e:
         # Transient OpenAI error after max retries - return 503
         # This does NOT consume an attempt - used_A is only updated after successful generation
-        print(f"RETURNING RETRYABLE_ERROR (no attempt consumed) code={e.code}")
+        logger.warning(f"RETURNING RETRYABLE_ERROR (no attempt consumed) request_id={request_id} code={e.code}")
         return jsonify({
             "error": "RETRYABLE_ERROR",
             "code": e.code,
-            "message": "Temporary overload. Please try again."
+            "message": "Temporary overload. Please try again.",
+            "request_id": request_id
         }), 503
     except ValueError as e:
         # Non-transient validation errors - return 400
-        return jsonify({"error": str(e)}), 400
+        logger.warning(f"Validation error (request_id={request_id}): {str(e)}")
+        return jsonify({"error": str(e), "request_id": request_id}), 400
     except (RateLimitError, APIConnectionError, APITimeoutError) as e:
         # Unhandled transient OpenAI errors (shouldn't happen if retry logic works, but catch anyway)
         error_code = getattr(e, 'status_code', None) or getattr(e, 'code', None) or 429
-        print(f"RETURNING RETRYABLE_ERROR (no attempt consumed) - unhandled transient error: {type(e).__name__} code={error_code}")
+        logger.warning(f"RETURNING RETRYABLE_ERROR (no attempt consumed) - unhandled transient error request_id={request_id} type={type(e).__name__} code={error_code}")
         return jsonify({
             "error": "RETRYABLE_ERROR",
             "code": error_code,
-            "message": "Temporary overload. Please try again."
+            "message": "Temporary overload. Please try again.",
+            "request_id": request_id
         }), 503
     except APIError as e:
         # Check if it's a 5xx server error (transient)
         status_code = getattr(e, 'status_code', None)
         if status_code and 500 <= status_code < 600:
-            print(f"RETURNING RETRYABLE_ERROR (no attempt consumed) - OpenAI 5xx error: code={status_code}")
+            logger.warning(f"RETURNING RETRYABLE_ERROR (no attempt consumed) - OpenAI 5xx error request_id={request_id} code={status_code}")
             return jsonify({
                 "error": "RETRYABLE_ERROR",
                 "code": status_code,
-                "message": "Temporary overload. Please try again."
+                "message": "Temporary overload. Please try again.",
+                "request_id": request_id
             }), 503
         else:
             # Non-transient API error (4xx except 429) - return 400
             error_msg = getattr(e, 'message', None) or str(e)
-            print(f"RETURNING 400 - non-transient OpenAI error: code={status_code} message={error_msg}")
-            return jsonify({"error": f"OpenAI API error: {error_msg}"}), 400
+            logger.warning(f"RETURNING 400 - non-transient OpenAI error request_id={request_id} code={status_code} message={error_msg}")
+            return jsonify({"error": f"OpenAI API error: {error_msg}", "request_id": request_id}), 400
     except Exception as e:
         # Catch-all for any other unexpected exceptions - prevent 502
-        error_type = type(e).__name__
-        error_msg = str(e)
-        print(f"RETURNING 500 - unexpected error: {error_type}: {error_msg}")
+        # Log full traceback
+        logger.exception(f"Unexpected error in /generate (request_id={request_id}): {type(e).__name__}: {str(e)}")
         # Do not expose internal error details to client
-        return jsonify({"error": "Generation failed. Please try again."}), 500
+        return jsonify({
+            "error": "INTERNAL_ERROR",
+            "message": "Server error",
+            "request_id": request_id
+        }), 500
 
 
 if __name__ == '__main__':
