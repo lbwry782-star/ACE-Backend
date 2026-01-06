@@ -302,6 +302,11 @@ Background:
 - background_classic_of_C = classic natural background for the dominant object (A's projection C)
 - c_is_dominant = true (C always controls lighting/texture/composition/background)
 
+Hybrid Mode Assessment (CRITICAL for HYBRID):
+- hybrid_mode = "PROJECTION_REPLACEMENT" ONLY if D can geometrically replace an equivalent structural element of C (e.g., one book in a shelf becomes a laptop, branches become USB cables).
+- hybrid_mode = "SIDE_BY_SIDE" if D would be placed on top of, resting on, or beside C as a separate object.
+- HYBRID layout is ONLY allowed if hybrid_mode == "PROJECTION_REPLACEMENT" AND overlap_assessment == "NEAR_GEOMETRIC_OVERLAP"
+
 Return ONLY valid JSON with these exact keys:
 {{
   "A": "object name",
@@ -309,7 +314,8 @@ Return ONLY valid JSON with these exact keys:
   "C_projection_description": "how to view A to maximize silhouette area (camera angle/perspective)",
   "D_projection_description": "how to view B to maximize silhouette area (camera angle/perspective)",
   "overlap_assessment": "NEAR_GEOMETRIC_OVERLAP" or "ONLY_SIMILAR" or "NO_SIMILARITY",
-  "layout": "HYBRID" (only if overlap_assessment is NEAR_GEOMETRIC_OVERLAP) or "SIDE_BY_SIDE",
+  "hybrid_mode": "PROJECTION_REPLACEMENT" (only if true geometric embedding is possible) or "SIDE_BY_SIDE",
+  "layout": "HYBRID" (only if overlap_assessment is NEAR_GEOMETRIC_OVERLAP AND hybrid_mode is PROJECTION_REPLACEMENT) or "SIDE_BY_SIDE",
   "background_classic_of_C": "description of classic natural background",
   "c_is_dominant": true
 }}
@@ -343,6 +349,7 @@ Do not include any explanation or other text."""
             C_projection_description = result.get("C_projection_description", "").strip()
             D_projection_description = result.get("D_projection_description", "").strip()
             overlap_assessment = result.get("overlap_assessment", "").strip()
+            hybrid_mode = result.get("hybrid_mode", "SIDE_BY_SIDE").strip()
             layout = result.get("layout", "SIDE_BY_SIDE")
             background_classic_of_C = result.get("background_classic_of_C", "")
             c_is_dominant = result.get("c_is_dominant", True)
@@ -359,8 +366,15 @@ Do not include any explanation or other text."""
             if overlap_assessment not in ["NEAR_GEOMETRIC_OVERLAP", "ONLY_SIMILAR", "NO_SIMILARITY"]:
                 overlap_assessment = "ONLY_SIMILAR"  # Default to conservative
             
-            # Enforce layout based on overlap_assessment
-            if overlap_assessment == "NEAR_GEOMETRIC_OVERLAP":
+            # Validate hybrid_mode
+            if hybrid_mode not in ["PROJECTION_REPLACEMENT", "SIDE_BY_SIDE"]:
+                hybrid_mode = "SIDE_BY_SIDE"  # Default to conservative
+            
+            # Enforce layout based on overlap_assessment AND hybrid_mode
+            # HYBRID is ONLY allowed if BOTH conditions are met:
+            # 1. overlap_assessment == "NEAR_GEOMETRIC_OVERLAP"
+            # 2. hybrid_mode == "PROJECTION_REPLACEMENT"
+            if overlap_assessment == "NEAR_GEOMETRIC_OVERLAP" and hybrid_mode == "PROJECTION_REPLACEMENT":
                 layout = "HYBRID"
             elif overlap_assessment == "ONLY_SIMILAR":
                 layout = "SIDE_BY_SIDE"
@@ -372,6 +386,7 @@ Do not include any explanation or other text."""
                         "C_projection_description": C_projection_description,
                         "D_projection_description": D_projection_description,
                         "overlap_assessment": overlap_assessment,
+                        "hybrid_mode": hybrid_mode,
                         "layout": layout,
                         "background_classic_of_C": background_classic_of_C,
                         "c_is_dominant": c_is_dominant
@@ -391,8 +406,8 @@ Do not include any explanation or other text."""
                         layout = "SIDE_BY_SIDE"
                         overlap_assessment = "ONLY_SIMILAR"
             
-            # Validate layout matches overlap_assessment
-            if layout == "HYBRID" and overlap_assessment != "NEAR_GEOMETRIC_OVERLAP":
+            # Validate layout matches overlap_assessment AND hybrid_mode
+            if layout == "HYBRID" and (overlap_assessment != "NEAR_GEOMETRIC_OVERLAP" or hybrid_mode != "PROJECTION_REPLACEMENT"):
                 layout = "SIDE_BY_SIDE"
             
             # Fallback if missing critical fields
@@ -411,6 +426,7 @@ Do not include any explanation or other text."""
                 "C_projection_description": C_projection_description,
                 "D_projection_description": D_projection_description,
                 "overlap_assessment": overlap_assessment,
+                "hybrid_mode": hybrid_mode,
                 "layout": layout,
                 "background_classic_of_C": background_classic_of_C,
                 "c_is_dominant": c_is_dominant
@@ -430,6 +446,7 @@ Do not include any explanation or other text."""
                     "C_projection_description": "front view maximizing silhouette area",
                     "D_projection_description": "front view maximizing silhouette area",
                     "overlap_assessment": "ONLY_SIMILAR",
+                    "hybrid_mode": "SIDE_BY_SIDE",
                     "layout": "SIDE_BY_SIDE",
                     "background_classic_of_C": "natural background",
                     "c_is_dominant": True
@@ -444,6 +461,7 @@ Do not include any explanation or other text."""
         "C_projection_description": "front view maximizing silhouette area",
         "D_projection_description": "front view maximizing silhouette area",
         "overlap_assessment": "ONLY_SIMILAR",
+        "hybrid_mode": "SIDE_BY_SIDE",
         "layout": "SIDE_BY_SIDE",
         "background_classic_of_C": "natural background",
         "c_is_dominant": True
@@ -463,19 +481,20 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
     }
     openai_size = size_map.get(ad_size, "1024x1024")
     
-    # Step 1: Pick two objects, projections, overlap assessment, layout, and background (with ad_goal and used_A_list)
+    # Step 1: Pick two objects, projections, overlap assessment, hybrid_mode, layout, and background (with ad_goal and used_A_list)
     objects = pick_two_objects(product_name, product_description, headline, ad_goal, used_A_list)
     A = objects["A"]
     B = objects["B"]
     C_projection_description = objects["C_projection_description"]
     D_projection_description = objects["D_projection_description"]
     overlap_assessment = objects["overlap_assessment"]
+    hybrid_mode = objects.get("hybrid_mode", "SIDE_BY_SIDE")
     layout = objects["layout"]
     background_classic_of_C = objects["background_classic_of_C"]
     c_is_dominant = objects.get("c_is_dominant", True)
     
-    # Debug log: print selected A, B, layout, overlap_assessment, and openai_size (NOT full prompt, NOT secrets)
-    print(f"SELECTED A/B attempt={attempt}: A={A}, B={B}, layout={layout}, overlap_assessment={overlap_assessment}, ad_size={ad_size} (OpenAI size: {openai_size})")
+    # Debug log: print selected A, B, layout, overlap_assessment, hybrid_mode, and openai_size (NOT full prompt, NOT secrets)
+    print(f"SELECTED A/B attempt={attempt}: A={A}, B={B}, layout={layout}, overlap_assessment={overlap_assessment}, hybrid_mode={hybrid_mode}, ad_size={ad_size} (OpenAI size: {openai_size})")
     
     # Step 2: Build strict image prompt with explicit A/B/projections/layout/background
     # Camera angle instructions based on projection descriptions
@@ -486,19 +505,28 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
 - Both objects must be viewed from the angles that maximize their silhouette areas."""
     
     if layout == "HYBRID":
-        # HYBRID is ONLY allowed if overlap_assessment is NEAR_GEOMETRIC_OVERLAP
-        if overlap_assessment != "NEAR_GEOMETRIC_OVERLAP":
-            # Force SIDE_BY_SIDE if overlap is not near-geometric
+        # HYBRID is ONLY allowed if BOTH overlap_assessment is NEAR_GEOMETRIC_OVERLAP AND hybrid_mode is PROJECTION_REPLACEMENT
+        if overlap_assessment != "NEAR_GEOMETRIC_OVERLAP" or hybrid_mode != "PROJECTION_REPLACEMENT":
+            # Force SIDE_BY_SIDE if conditions not met
             layout = "SIDE_BY_SIDE"
-            print(f"HYBRID_REJECTED: overlap_assessment={overlap_assessment}, forcing SIDE_BY_SIDE")
+            print(f"HYBRID_REJECTED: overlap_assessment={overlap_assessment}, hybrid_mode={hybrid_mode}, forcing SIDE_BY_SIDE")
         
-        layout_instruction = f"""Create a TRUE HYBRID with NEAR-GEOMETRIC OVERLAP:
-- Object B's projection (D, simplified as F) must be perfectly embedded into Object A's projection (C, simplified as E).
+        layout_instruction = f"""Create a TRUE ACE HYBRID with PROJECTION REPLACEMENT (MANDATORY):
+- Object B's projection (D, simplified as F) must GEOMETRICALLY REPLACE an equivalent structural element of Object A's projection (C, simplified as E).
+- D must REPLACE PART OF C within C's classic structure - D becomes an integral part of C's form.
 - The silhouette F must be nearly geometrically overlapped with silhouette E after permitted adjustments (scale/angle/proportion without distortion).
 - This overlap must be clear and immediate to an average human eye - the shapes must be nearly identical.
 - Present the HYBRID at an angle that maximizes both projections' visibility while keeping full photographic realism.
-- The objects must be physically fused or overlapped in a near-geometric way, NOT side-by-side.
-- If the overlap is not clear and immediate, REJECT this layout and output SIDE_BY_SIDE instead."""
+
+CRITICAL ANTI-STACKING RULES (MANDATORY):
+- D must REPLACE a structural element of C, NOT be placed on top of C.
+- FORBIDDEN: "on top of", "resting on", "placed on", "sitting on", "lying on", or any stacking arrangement.
+- FORBIDDEN: D as a separate object positioned above or beside C.
+- REQUIRED: D must be geometrically embedded INTO C's structure, replacing an equivalent part.
+- Examples of VALID hybrid: shelf of books where ONE BOOK IS A LAPTOP (laptop replaces book), tree where branches are USB cables (cables replace branches).
+- Examples of INVALID hybrid: laptop lying on an open book (this is stacking, not replacement).
+
+If true projection replacement is not possible, REJECT this layout and output SIDE_BY_SIDE instead."""
     else:  # SIDE_BY_SIDE
         layout_instruction = f"""Place Object A (C projection) and Object B (D projection) SIDE BY SIDE at the same angle.
 - Highlight maximal similar area between the projections.
