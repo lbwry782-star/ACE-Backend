@@ -3,9 +3,12 @@ import json
 import base64
 import io
 import zipfile
+import time
+import random
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
+from openai import RateLimitError, APIError, APIConnectionError, APITimeoutError
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all origins (Phase 1)
@@ -32,6 +35,65 @@ else:
     print("INFO: OPENAI_API_KEY is present (client initialized)")
 
 
+class RetryableError(Exception):
+    """Exception raised when OpenAI call fails after max retries."""
+    def __init__(self, message, code=429):
+        self.message = message
+        self.code = code
+        super().__init__(self.message)
+
+
+def retry_openai_call(call_func, max_retries=4, operation_name="OpenAI call"):
+    """
+    Retry wrapper for OpenAI calls with exponential backoff + jitter.
+    Handles transient errors: 429, 500-599, timeouts.
+    Returns the result on success, raises RetryableError on failure after max retries.
+    """
+    last_exception = None
+    
+    for attempt in range(max_retries):
+        try:
+            return call_func()
+        except (RateLimitError, APIConnectionError, APITimeoutError) as e:
+            last_exception = e
+            error_code = getattr(e, 'status_code', None) or getattr(e, 'code', None) or 429
+            
+            # Calculate wait time: exponential backoff + jitter
+            base_wait = 2 ** attempt  # 1, 2, 4, 8 seconds
+            jitter = random.uniform(0, 1)  # 0-1 second random jitter
+            wait_time = base_wait + jitter
+            
+            if attempt < max_retries - 1:
+                print(f"OPENAI_RETRY attempt={attempt + 1} wait={wait_time:.2f}s reason={type(e).__name__} code={error_code} operation={operation_name}")
+                time.sleep(wait_time)
+            else:
+                print(f"OPENAI_RETRY attempt={attempt + 1} wait={wait_time:.2f}s reason={type(e).__name__} code={error_code} operation={operation_name} - MAX RETRIES REACHED")
+        except APIError as e:
+            # Check if it's a 5xx server error
+            status_code = getattr(e, 'status_code', None)
+            if status_code and 500 <= status_code < 600:
+                last_exception = e
+                base_wait = 2 ** attempt
+                jitter = random.uniform(0, 1)
+                wait_time = base_wait + jitter
+                
+                if attempt < max_retries - 1:
+                    print(f"OPENAI_RETRY attempt={attempt + 1} wait={wait_time:.2f}s reason=APIError code={status_code} operation={operation_name}")
+                    time.sleep(wait_time)
+                else:
+                    print(f"OPENAI_RETRY attempt={attempt + 1} wait={wait_time:.2f}s reason=APIError code={status_code} operation={operation_name} - MAX RETRIES REACHED")
+            else:
+                # Non-retryable API error (4xx except 429)
+                raise
+        except Exception as e:
+            # Non-retryable error, re-raise immediately
+            raise
+    
+    # If we get here, all retries failed
+    error_code = getattr(last_exception, 'status_code', None) or getattr(last_exception, 'code', None) or 429
+    raise RetryableError(f"OpenAI call failed after {max_retries} retries", error_code)
+
+
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint."""
@@ -53,14 +115,17 @@ def generate_headline_and_text(product_name, product_description, attempt):
 
 Return ONLY the headline, nothing else."""
 
-    headline_response = client.chat.completions.create(
-        model=TEXT_MODEL,
-        messages=[
-            {"role": "system", "content": "You are a creative advertising copywriter."},
-            {"role": "user", "content": headline_prompt}
-        ],
-        temperature=0.9,
-        max_tokens=50
+    headline_response = retry_openai_call(
+        lambda: client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a creative advertising copywriter."},
+                {"role": "user", "content": headline_prompt}
+            ],
+            temperature=0.9,
+            max_tokens=50
+        ),
+        operation_name="headline_generation"
     )
     
     headline = headline_response.choices[0].message.content.strip()
@@ -83,14 +148,17 @@ Return ONLY the headline, nothing else."""
 
 Return ONLY the marketing text, exactly 50 words."""
 
-    marketing_response = client.chat.completions.create(
-        model=TEXT_MODEL,
-        messages=[
-            {"role": "system", "content": "You are a professional marketing copywriter. Always return exactly the requested word count."},
-            {"role": "user", "content": marketing_prompt}
-        ],
-        temperature=0.8,
-        max_tokens=200
+    marketing_response = retry_openai_call(
+        lambda: client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a professional marketing copywriter. Always return exactly the requested word count."},
+                {"role": "user", "content": marketing_prompt}
+            ],
+            temperature=0.8,
+            max_tokens=200
+        ),
+        operation_name="marketing_text_generation"
     )
     
     marketing_text = marketing_response.choices[0].message.content.strip()
@@ -102,14 +170,17 @@ Return ONLY the marketing text, exactly 50 words."""
     elif len(words) < 50:
         # Try to get more words from a follow-up request
         additional_prompt = f"""The previous marketing text was {len(words)} words. Add exactly {50 - len(words)} more words to complete it. The text so far: {marketing_text}"""
-        additional_response = client.chat.completions.create(
-            model=TEXT_MODEL,
-            messages=[
-                {"role": "system", "content": "You are a professional marketing copywriter. Always return exactly the requested word count."},
-                {"role": "user", "content": additional_prompt}
-            ],
-            temperature=0.8,
-            max_tokens=100
+        additional_response = retry_openai_call(
+            lambda: client.chat.completions.create(
+                model=TEXT_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are a professional marketing copywriter. Always return exactly the requested word count."},
+                    {"role": "user", "content": additional_prompt}
+                ],
+                temperature=0.8,
+                max_tokens=100
+            ),
+            operation_name="marketing_text_additional"
         )
         additional_words = additional_response.choices[0].message.content.strip().split()
         all_words = words + additional_words
@@ -152,14 +223,17 @@ Return ONLY valid JSON with these exact keys:
 Do not include any explanation or other text."""
     
     try:
-        response = client.chat.completions.create(
-            model=TEXT_MODEL,
-            messages=[
-                {"role": "system", "content": "You are an ACE engine object selector. Always return valid JSON only."},
-                {"role": "user", "content": selection_prompt}
-            ],
-            temperature=0.8,
-            response_format={"type": "json_object"}
+        response = retry_openai_call(
+            lambda: client.chat.completions.create(
+                model=TEXT_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are an ACE engine object selector. Always return valid JSON only."},
+                    {"role": "user", "content": selection_prompt}
+                ],
+                temperature=0.8,
+                response_format={"type": "json_object"}
+            ),
+            operation_name="object_selection"
         )
         
         result = json.loads(response.choices[0].message.content.strip())
@@ -280,12 +354,15 @@ The image MUST show BOTH Object A and Object B. Do not explain. Do not describe.
     print("=== END IMAGE PROMPT ===")
 
     try:
-        response = client.images.generate(
-            model=IMAGE_MODEL,
-            prompt=image_prompt,
-            size=openai_size,
-            quality="auto",
-            n=1
+        response = retry_openai_call(
+            lambda: client.images.generate(
+                model=IMAGE_MODEL,
+                prompt=image_prompt,
+                size=openai_size,
+                quality="auto",
+                n=1
+            ),
+            operation_name="image_generation"
         )
         
         # Debug: log which keys exist in the response
@@ -396,6 +473,9 @@ def generate():
         
         return jsonify(ad), 200
     
+    except RetryableError as e:
+        # Transient OpenAI error after max retries - return 503
+        return jsonify({"error": "RETRYABLE_ERROR", "code": e.code}), 503
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
