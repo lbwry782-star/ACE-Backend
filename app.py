@@ -134,17 +134,54 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
     
     # Generate image prompt based on the spec requirements
     # For Phase 2, we'll create a simple prompt that includes the headline visually
-    image_prompt = f"""Create a professional product advertisement image. 
-Product: {product_name}
-Description: {product_description}
-Headline to display in the image: {headline}
+    image_prompt = f"""
+YOU ARE A PROFESSIONAL ADVERTISING PHOTOGRAPHER.
+YOU MUST FOLLOW ALL RULES BELOW. NO EXCEPTIONS.
 
-Requirements:
-- Black background
-- Display the headline text prominently (3-7 words)
-- Professional, clean design
-- No other text beyond the headline
-- High quality, realistic photography style"""
+CORE ACE ENGINE RULES (MANDATORY):
+1. The image MUST depict TWO DISTINCT PHYSICAL OBJECTS (A and B).
+2. Objects A and B MUST be REAL, TANGIBLE, PHYSICAL OBJECTS — not concepts or symbols.
+3. Objects A and B MUST have REAL SHAPE SIMILARITY (projection-based similarity).
+4. If shape similarity is strong, YOU MUST create a TRUE HYBRID OBJECT
+   (physical fusion or overlap, not side-by-side).
+5. If shape similarity is insufficient, place the objects SIDE BY SIDE.
+6. NEVER show only one object.
+7. NEVER use abstract, metaphorical, symbolic, or conceptual visuals.
+
+BACKGROUND RULE:
+- The background MUST be the CLASSIC NATURAL BACKGROUND of the dominant object (C).
+- NEVER use studio backgrounds, black backgrounds, gradients, or abstract scenes.
+
+STYLE RULES:
+- Ultra-realistic photography ONLY.
+- Looks like a real camera photograph.
+- Natural lighting, correct perspective, real materials.
+- NO illustration, NO 3D render, NO CGI, NO AI-art look.
+
+HEADLINE RULES (INSIDE IMAGE):
+- A short headline of 3–7 words MUST appear INSIDE the image.
+- The headline MUST include the PRODUCT NAME.
+- The headline is NOT a quote and NOT the product description.
+- The headline must be clearly readable and visually dominant.
+
+COMPOSITION:
+- Professional commercial advertising composition.
+- Clear subject focus.
+- Correct depth, lighting, and proportions.
+
+PRODUCT NAME:
+{product_name}
+
+PRODUCT DESCRIPTION:
+{product_description}
+
+HEADLINE TO DISPLAY:
+{headline}
+
+TASK:
+Generate ONE final advertising image that fully follows ALL the rules above.
+Do not explain. Do not describe. Do not add text outside the image.
+"""
 
     # Debug log: print image prompt, ad_size, and attempt
     print("=== IMAGE PROMPT SENT TO OPENAI ===")
