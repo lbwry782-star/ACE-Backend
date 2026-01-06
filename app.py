@@ -681,21 +681,31 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
             print(f"HYBRID_REJECTED: overlap_assessment={overlap_assessment}, hybrid_mode={hybrid_mode}, forcing SIDE_BY_SIDE")
         
         layout_instruction = f"""Create a TRUE ACE HYBRID with PROJECTION REPLACEMENT (MANDATORY):
+- The final image MUST show ONE single physical object in the scene.
 - Object B's projection (D, simplified as F) must GEOMETRICALLY REPLACE an equivalent structural element of Object A's projection (C, simplified as E).
 - D must REPLACE PART OF C within C's classic structure - D becomes an integral part of C's form.
 - The silhouette F must be nearly geometrically overlapped with silhouette E after permitted adjustments (scale/angle/proportion without distortion).
 - This overlap must be clear and immediate to an average human eye - the shapes must be nearly identical.
 - Present the HYBRID at an angle that maximizes both projections' visibility while keeping full photographic realism.
 
+CRITICAL SINGLE-OBJECT REQUIREMENTS (MANDATORY):
+- The final silhouette MUST read as one contiguous object - no visible seams of two separate items.
+- Object B must NOT appear as a separate object - it must be fully integrated into Object A's structure.
+- The image must look like ONE unified physical object, not two objects placed together.
+- No visible boundaries, edges, or seams that suggest two separate items.
+- The composition must read as a single, cohesive physical entity.
+
 CRITICAL ANTI-STACKING RULES (MANDATORY):
 - D must REPLACE a structural element of C, NOT be placed on top of C.
-- FORBIDDEN: "on top of", "resting on", "placed on", "sitting on", "lying on", or any stacking arrangement.
-- FORBIDDEN: D as a separate object positioned above or beside C.
+- FORBIDDEN: "on top of", "resting on", "placed on", "sitting on", "lying on", "inside of", "next to", or any stacking/positioning arrangement.
+- FORBIDDEN: D as a separate object positioned above, beside, or within C.
 - REQUIRED: D must be geometrically embedded INTO C's structure, replacing an equivalent part.
 - Examples of VALID hybrid: shelf of books where ONE BOOK IS A LAPTOP (laptop replaces book), tree where branches are USB cables (cables replace branches).
-- Examples of INVALID hybrid: laptop lying on an open book (this is stacking, not replacement).
+- Examples of INVALID hybrid: laptop lying on an open book (this is stacking, not replacement), laptop next to a book (this is side-by-side, not replacement).
 
-If true projection replacement is not possible, REJECT this layout and output SIDE_BY_SIDE instead."""
+NEGATIVE CONSTRAINT:
+- If you cannot make it look like ONE single physical object with no visible seams, REJECT this layout and output SIDE_BY_SIDE instead.
+- If the final image shows any residual side-by-side appearance or two distinct objects, it is INVALID and must be SIDE_BY_SIDE."""
     else:  # SIDE_BY_SIDE
         layout_instruction = f"""Place Object A (C projection) and Object B (D projection) SIDE BY SIDE at the same angle.
 - Highlight maximal similar area between the projections.
