@@ -317,7 +317,7 @@ Return ONLY the marketing text, exactly 50 words."""
     return headline, marketing_text
 
 
-def pick_two_objects(product_name, product_description, headline, ad_goal, used_A_list=None, used_pairs_list=None, attempt=None):
+def pick_two_objects(product_name, product_description, headline, ad_goal, used_A_list=None, used_pairs_list=None, attempt=None, request_id=None):
     """Select two physical objects (A and B), projections, overlap assessment, layout, and background using text model.
     
     Args:
@@ -328,6 +328,7 @@ def pick_two_objects(product_name, product_description, headline, ad_goal, used_
         used_A_list: List of Object A values that have been used in previous attempts (forbidden)
         used_pairs_list: List of canonical pair keys (A|B) that have been used in previous attempts (forbidden)
         attempt: Attempt number (1, 2, or 3) - used to trigger hybrid search for attempt 2
+        request_id: Request ID for logging
     
     Returns:
         dict with keys: A, B, C_projection_description, D_projection_description, overlap_assessment, 
@@ -465,7 +466,8 @@ Do not include any explanation or other text."""
                 # Check if pair (A,B) is in forbidden pairs list
                 pair_key = create_pair_key(A, B)
                 if used_pairs_list and pair_key in used_pairs_list:
-                    print(f"HYBRID_SEARCH attempt=2 try={search_try + 1} REJECTED PAIR: A={A}, B={B} (forbidden pair)")
+                    req_id_str = f" request_id={request_id}" if request_id else ""
+                    print(f"REJECTED_PAIR{req_id_str} key={pair_key} (HYBRID_SEARCH attempt=2 try={search_try + 1} A={A}, B={B})")
                     continue  # Skip this result and try again
                 
                 # Validate overlap_assessment
@@ -549,8 +551,8 @@ Do not include any explanation or other text."""
     # For attempts 1 and 3, use the original retry logic
     selection_prompt = make_selection_prompt()
     
-    # Retry up to 5 times if A is in forbidden list OR pair is forbidden OR if overlap_assessment is NO_SIMILARITY
-    max_internal_retries = 5
+    # Retry up to 6 times if A is in forbidden list OR pair is forbidden OR if overlap_assessment is NO_SIMILARITY
+    max_internal_retries = 6
     best_result = None  # Store best "ONLY_SIMILAR" result as fallback
     
     for retry_attempt in range(max_internal_retries):
@@ -593,7 +595,8 @@ Do not include any explanation or other text."""
             # Check if pair (A,B) is in forbidden pairs list
             pair_key = create_pair_key(A, B)
             if used_pairs_list and pair_key in used_pairs_list:
-                print(f"REJECTED PAIR: A={A}, B={B} (forbidden pair)")
+                req_id_str = f" request_id={request_id}" if request_id else ""
+                print(f"REJECTED_PAIR{req_id_str} key={pair_key} (A={A}, B={B})")
                 if retry_attempt < max_internal_retries - 1:
                     print(f"FORBIDDEN_PAIR_HIT retrying selector... attempt={retry_attempt + 1} forbidden_pair={pair_key}")
                     continue  # Retry
@@ -709,7 +712,7 @@ Do not include any explanation or other text."""
     }
 
 
-def generate_image(product_name, product_description, headline, ad_size, attempt, ad_goal, used_A_list=None, used_pairs_list=None):
+def generate_image(product_name, product_description, headline, ad_size, attempt, ad_goal, used_A_list=None, used_pairs_list=None, request_id=None):
     """Generate image using OpenAI DALL-E with strict two-object enforcement."""
     if not client:
         raise ValueError("OpenAI API key not configured")
@@ -729,13 +732,14 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
         print(f"USED_A so far: [] (first attempt)")
     
     # Log used_pairs list before selection
+    req_id_str = f" request_id={request_id}" if request_id else ""
     if used_pairs_list:
-        print(f"USED_PAIRS: {used_pairs_list}")
+        print(f"USED_PAIRS{req_id_str}: {used_pairs_list}")
     else:
-        print(f"USED_PAIRS: [] (first attempt)")
+        print(f"USED_PAIRS{req_id_str}: [] (first attempt)")
     
-    # Step 1: Pick two objects, projections, overlap assessment, hybrid_mode, layout, and background (with ad_goal, used_A_list, used_pairs_list, and attempt)
-    objects = pick_two_objects(product_name, product_description, headline, ad_goal, used_A_list, used_pairs_list, attempt)
+    # Step 1: Pick two objects, projections, overlap assessment, hybrid_mode, layout, and background (with ad_goal, used_A_list, used_pairs_list, attempt, and request_id)
+    objects = pick_two_objects(product_name, product_description, headline, ad_goal, used_A_list, used_pairs_list, attempt, request_id)
     A = objects["A"]
     B = objects["B"]
     C_projection_description = objects["C_projection_description"]
@@ -751,7 +755,8 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
     
     # Log successful selection of pair for this attempt
     pair_key = create_pair_key(A, B)
-    print(f"SELECTED PAIR attempt={attempt}: A={A}, B={B} (pair_key: {pair_key})")
+    req_id_str = f" request_id={request_id}" if request_id else ""
+    print(f"SELECTED_PAIR{req_id_str} attempt={attempt} key={pair_key} (A={A}, B={B})")
     
     # Debug log: print selected A, B, layout, overlap_assessment, hybrid_mode, and openai_size (NOT full prompt, NOT secrets)
     print(f"SELECTED A/B attempt={attempt}: A={A}, B={B}, layout={layout}, overlap_assessment={overlap_assessment}, hybrid_mode={hybrid_mode}, ad_size={ad_size} (OpenAI size: {openai_size})")
@@ -1023,9 +1028,9 @@ def generate():
             logger.exception(f"GEN_FAIL request_id={request_id} stage=headline_and_text error={type(e).__name__}: {str(e)}")
             raise
         
-        # Generate image (with ad_goal, used_A_list, and used_pairs_list) - returns (image_data_url, selected_A, selected_B)
+        # Generate image (with ad_goal, used_A_list, used_pairs_list, and request_id) - returns (image_data_url, selected_A, selected_B)
         try:
-            image_data_url, selected_A, selected_B = generate_image(product_name, product_description, headline, ad_size, attempt, ad_goal, used_A_list, used_pairs_list)
+            image_data_url, selected_A, selected_B = generate_image(product_name, product_description, headline, ad_size, attempt, ad_goal, used_A_list, used_pairs_list, request_id)
             logger.info(f"OPENAI_IMAGE_OK request_id={request_id} stage=image_generation")
         except Exception as e:
             logger.exception(f"GEN_FAIL request_id={request_id} stage=image_generation error={type(e).__name__}: {str(e)}")
