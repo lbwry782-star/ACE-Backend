@@ -924,22 +924,108 @@ The image MUST show BOTH Object A and Object B. Do not explain. Do not describe.
         raise ValueError(f"Image generation failed: {str(e)}")
 
 
-def create_zip_in_memory(image_base64, marketing_text, attempt):
-    """Create a ZIP file in memory containing the image and text file."""
-    zip_buffer = io.BytesIO()
+def create_zip_in_memory(image_base64, marketing_text, attempt, timeout_seconds=5):
+    """Create a ZIP file in memory containing the image and text file.
     
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-        # Decode image from base64 and add to ZIP
-        image_data = base64.b64decode(image_base64.split(',')[1] if ',' in image_base64 else image_base64)
-        zip_file.writestr(f"ad_{attempt}.jpg", image_data)
+    Memory-safe implementation:
+    - Builds ZIP incrementally using BytesIO
+    - Explicitly releases image data after writing
+    - Closes all buffers after use
+    - Does not keep multiple base64 copies in memory
+    
+    Args:
+        image_base64: Base64-encoded image (with or without data URL prefix)
+        marketing_text: Marketing text content
+        attempt: Attempt number (1, 2, or 3)
+        timeout_seconds: Maximum time allowed for ZIP creation (default 5)
+    
+    Returns:
+        tuple: (zip_base64, size_bytes)
+    
+    Raises:
+        TimeoutError: If ZIP creation takes longer than timeout_seconds
+        Exception: If ZIP creation fails
+    """
+    start_time = time.time()
+    zip_buffer = None
+    image_data = None
+    
+    try:
+        # Extract base64 part if it's a data URL
+        if ',' in image_base64:
+            image_base64_only = image_base64.split(',')[1]
+        else:
+            image_base64_only = image_base64
         
-        # Add marketing text file
-        zip_file.writestr(f"ad_{attempt}.txt", marketing_text)
-    
-    zip_buffer.seek(0)
-    zip_base64 = base64.b64encode(zip_buffer.getvalue()).decode('utf-8')
-    
-    return zip_base64
+        # Check timeout before starting
+        elapsed = time.time() - start_time
+        if elapsed >= timeout_seconds:
+            raise TimeoutError(f"ZIP creation timeout: {elapsed:.2f}s >= {timeout_seconds}s")
+        
+        # Decode image from base64 (do this once, release immediately after use)
+        image_data = base64.b64decode(image_base64_only)
+        
+        # Check timeout after decode
+        elapsed = time.time() - start_time
+        if elapsed >= timeout_seconds:
+            del image_data  # Release before raising
+            raise TimeoutError(f"ZIP creation timeout: {elapsed:.2f}s >= {timeout_seconds}s")
+        
+        # Create ZIP buffer
+        zip_buffer = io.BytesIO()
+        
+        # Build ZIP incrementally
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            # Write image to ZIP
+            zip_file.writestr(f"ad_{attempt}.jpg", image_data)
+            
+            # Check timeout after writing image
+            elapsed = time.time() - start_time
+            if elapsed >= timeout_seconds:
+                raise TimeoutError(f"ZIP creation timeout: {elapsed:.2f}s >= {timeout_seconds}s")
+            
+            # Immediately release image_data after writing (don't keep it in memory)
+            del image_data
+            image_data = None
+            
+            # Add marketing text file
+            zip_file.writestr(f"ad_{attempt}.txt", marketing_text)
+            
+            # Check timeout after writing text
+            elapsed = time.time() - start_time
+            if elapsed >= timeout_seconds:
+                raise TimeoutError(f"ZIP creation timeout: {elapsed:.2f}s >= {timeout_seconds}s")
+        
+        # Get ZIP bytes
+        zip_buffer.seek(0)
+        zip_bytes = zip_buffer.getvalue()
+        size_bytes = len(zip_bytes)
+        
+        # Encode to base64
+        zip_base64 = base64.b64encode(zip_bytes).decode('utf-8')
+        
+        # Explicitly close and release buffer
+        zip_buffer.close()
+        zip_buffer = None
+        
+        # Release zip_bytes reference (base64 encoding already done)
+        del zip_bytes
+        
+        return zip_base64, size_bytes
+        
+    except TimeoutError:
+        # Re-raise timeout errors
+        raise
+    except Exception as e:
+        # Clean up on any error
+        if image_data is not None:
+            del image_data
+        if zip_buffer is not None:
+            try:
+                zip_buffer.close()
+            except:
+                pass
+        raise
 
 
 @app.route('/generate', methods=['POST'], strict_slashes=False)
@@ -1085,14 +1171,39 @@ def generate():
         # Stage: ZIP - Extract base64 from data URL for ZIP creation
         logger.info(f"GEN_STAGE request_id={request_id} stage=ZIP")
         try:
+            # Extract base64 from data URL (keep reference minimal)
             image_base64 = image_data_url.split(',')[1] if ',' in image_data_url else image_data_url
             
-            # Create ZIP in memory
-            zip_base64 = create_zip_in_memory(image_base64, marketing_text, attempt)
+            # Create ZIP in memory with timeout guard (5 seconds max)
+            # This prevents worker crash from memory pressure or slow ZIP creation
+            zip_base64, zip_size_bytes = create_zip_in_memory(image_base64, marketing_text, attempt, timeout_seconds=5)
+            
+            # Immediately release image_base64 reference after ZIP creation
+            del image_base64
+            
+            # Log ZIP ready with size
+            logger.info(f"ZIP_READY request_id={request_id} size_bytes={zip_size_bytes}")
             logger.info(f"ZIP_OK request_id={request_id} stage=ZIP")
+        except TimeoutError as e:
+            # ZIP creation took too long - return 503 (retryable) without consuming attempt
+            logger.warning(f"GEN_FAIL request_id={request_id} stage=ZIP timeout: {str(e)} - RETRYABLE_ERROR (no attempt consumed)")
+            logger.info(f"RETURNING RETRYABLE_ERROR (no attempt consumed) request_id={request_id}")
+            return jsonify({
+                "error": "RETRYABLE_ERROR",
+                "code": 503,
+                "message": "Server under load. Please try again.",
+                "request_id": request_id
+            }), 503
         except Exception as e:
-            logger.exception(f"GEN_FAIL request_id={request_id} stage=ZIP error={type(e).__name__}: {str(e)}")
-            raise
+            # Other ZIP errors - return 503 (retryable) without consuming attempt
+            logger.exception(f"GEN_FAIL request_id={request_id} stage=ZIP error={type(e).__name__}: {str(e)} - RETRYABLE_ERROR (no attempt consumed)")
+            logger.info(f"RETURNING RETRYABLE_ERROR (no attempt consumed) request_id={request_id}")
+            return jsonify({
+                "error": "RETRYABLE_ERROR",
+                "code": 503,
+                "message": "Server under load. Please try again.",
+                "request_id": request_id
+            }), 503
         
         # Return single ad object
         ad = {
