@@ -24,13 +24,18 @@ logger = logging.getLogger(__name__)
 # Valid ad sizes
 VALID_AD_SIZES = {"1024x1024", "1024x1536", "1536x1024"}
 
-# In-memory storage for tracking used Object A per product
-# Key: (product_name, product_description) -> value: list of used A objects
-used_A_tracker = {}
+# Session state storage
+# Key: session_id (string) -> value: dict with:
+#   - product_name: str (locked on attempt 1)
+#   - product_description: str (locked on attempt 1)
+#   - selected_size: str (locked on attempt 1)
+#   - attempt: int (1, 2, or 3)
+#   - used_pairs: list of canonical pair keys (order-insensitive)
+#   - created_at: float (timestamp for TTL cleanup)
+session_storage = {}
 
-# In-memory storage for tracking used object pairs (A,B) per product
-# Key: (product_name, product_description) -> value: list of canonical pair keys (order-insensitive)
-used_pairs_tracker = {}
+# TTL for abandoned sessions (20 minutes in seconds)
+SESSION_TTL_SECONDS = 20 * 60
 
 # OpenAI configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -64,6 +69,18 @@ def create_pair_key(A, B):
     # Sort to ensure same pair regardless of order
     pair = sorted([normalized_A, normalized_B])
     return "|".join(pair)
+
+
+def cleanup_expired_sessions():
+    """Remove sessions that have exceeded TTL."""
+    current_time = time.time()
+    expired_sessions = []
+    for session_id, session_data in session_storage.items():
+        if current_time - session_data.get("created_at", 0) > SESSION_TTL_SECONDS:
+            expired_sessions.append(session_id)
+    for session_id in expired_sessions:
+        del session_storage[session_id]
+        logger.info(f"SESSION_EXPIRED session_id={session_id} (TTL cleanup)")
 
 
 class RetryableError(Exception):
@@ -214,7 +231,7 @@ Return ONLY a concise description of the advertising goal (1-2 sentences), nothi
         )
         
         ad_goal = response.choices[0].message.content.strip()
-        print(f"AD_GOAL attempt={attempt}: {ad_goal}")
+        logger.info(f"AD_GOAL attempt={attempt}: {ad_goal}")
         return ad_goal
     except RetryableError:
         # Propagate transient errors - do NOT consume attempt
@@ -222,7 +239,7 @@ Return ONLY a concise description of the advertising goal (1-2 sentences), nothi
     except Exception as e:
         # Fallback for non-transient errors only
         ad_goal = f"Advertising goal for attempt {attempt}: highlight different aspect of {product_name}"
-        print(f"AD_GOAL attempt={attempt}: {ad_goal} (fallback)")
+        logger.info(f"AD_GOAL attempt={attempt}: {ad_goal} (fallback)")
         return ad_goal
 
 
@@ -325,7 +342,7 @@ def pick_two_objects(product_name, product_description, headline, ad_goal, used_
         product_description: Product description
         headline: Generated headline
         ad_goal: Distinct advertising goal for this attempt
-        used_A_list: List of Object A values that have been used in previous attempts (forbidden)
+        used_A_list: DEPRECATED - kept for backward compatibility, not used
         used_pairs_list: List of canonical pair keys (A|B) that have been used in previous attempts (forbidden)
         attempt: Attempt number (1, 2, or 3) - used to trigger hybrid search for attempt 2
         request_id: Request ID for logging
@@ -337,18 +354,10 @@ def pick_two_objects(product_name, product_description, headline, ad_goal, used_
     if not client:
         raise ValueError("OpenAI API key not configured")
     
-    if used_A_list is None:
-        used_A_list = []
-    
     if used_pairs_list is None:
         used_pairs_list = []
     
-    # Build forbidden A list text
-    forbidden_A_text = ""
-    if used_A_list:
-        forbidden_A_text = f"\n\nCRITICAL: The following objects have already been used as Object A in previous attempts and MUST NOT be selected: {', '.join(used_A_list)}\nYou MUST select a DIFFERENT object for A that is NOT in this list."
-    
-    # Build forbidden pairs list text
+    # Build forbidden pairs list text (only pairs are tracked now, not individual A objects)
     forbidden_pairs_text = ""
     if used_pairs_list:
         # Convert canonical keys back to readable format for the prompt
@@ -358,9 +367,9 @@ def pick_two_objects(product_name, product_description, headline, ad_goal, used_
             if len(parts) == 2:
                 readable_pairs.append(f"({parts[0]}, {parts[1]})")
         if readable_pairs:
-            forbidden_pairs_text = f"\n\nCRITICAL: The following object pairs have already been used in previous attempts and MUST NOT be selected (in any order): {', '.join(readable_pairs)}\nYou MUST select a DIFFERENT pair (A,B) that is NOT in this list. The pair is forbidden regardless of which object is A and which is B."
+            forbidden_pairs_text = f"\n\nCRITICAL: The following object pairs have already been used in previous attempts in this session and MUST NOT be selected (in any order): {', '.join(readable_pairs)}\nYou MUST select a DIFFERENT pair (A,B) that is NOT in this list. The pair is forbidden regardless of which object is A and which is B."
     
-    forbidden_text = forbidden_A_text + forbidden_pairs_text
+    forbidden_text = forbidden_pairs_text
     
     def make_selection_prompt():
         return f"""You are an ACE engine object selector. Select two physical objects for an advertisement with strict geometric overlap assessment.
@@ -427,7 +436,7 @@ Do not include any explanation or other text."""
         max_hybrid_search_tries = 8
         best_side_by_side_result = None  # Store best SIDE_BY_SIDE result as fallback
         
-        print(f"HYBRID_SEARCH attempt=2 starting search for NEAR_GEOMETRIC_OVERLAP (max {max_hybrid_search_tries} tries)")
+        logger.info(f"HYBRID_SEARCH attempt=2 starting search for NEAR_GEOMETRIC_OVERLAP (max {max_hybrid_search_tries} tries)")
         
         for search_try in range(max_hybrid_search_tries):
             try:
@@ -458,16 +467,11 @@ Do not include any explanation or other text."""
                 background_classic_of_C = result.get("background_classic_of_C", "")
                 c_is_dominant = result.get("c_is_dominant", True)
                 
-                # Check if A is in forbidden list
-                if used_A_list and A.lower() in [used.lower() for used in used_A_list]:
-                    print(f"HYBRID_SEARCH attempt=2 try={search_try + 1} REJECTED A (forbidden): {A}")
-                    continue  # Skip this result and try again
-                
                 # Check if pair (A,B) is in forbidden pairs list
                 pair_key = create_pair_key(A, B)
                 if used_pairs_list and pair_key in used_pairs_list:
                     req_id_str = f" request_id={request_id}" if request_id else ""
-                    print(f"REJECTED_PAIR{req_id_str} key={pair_key} (HYBRID_SEARCH attempt=2 try={search_try + 1} A={A}, B={B})")
+                    logger.info(f"REJECTED_PAIR{req_id_str} key={pair_key} (HYBRID_SEARCH attempt=2 try={search_try + 1} A={A}, B={B})")
                     continue  # Skip this result and try again
                 
                 # Validate overlap_assessment
@@ -482,7 +486,7 @@ Do not include any explanation or other text."""
                 if overlap_assessment == "NEAR_GEOMETRIC_OVERLAP" and hybrid_mode == "PROJECTION_REPLACEMENT":
                     # Found a valid HYBRID candidate!
                     layout = "HYBRID"
-                    print(f"HYBRID_FOUND attempt=2 try={search_try + 1} A={A} B={B} overlap={overlap_assessment} hybrid_mode={hybrid_mode}")
+                    logger.info(f"HYBRID_FOUND attempt=2 try={search_try + 1} A={A} B={B} overlap={overlap_assessment} hybrid_mode={hybrid_mode}")
                     
                     # Validate and return
                     if not A or not B:
@@ -522,19 +526,19 @@ Do not include any explanation or other text."""
                                 "c_is_dominant": c_is_dominant
                             }
                     
-                    print(f"HYBRID_SEARCH attempt=2 try={search_try + 1} overlap={overlap_assessment} hybrid_mode={hybrid_mode} layout={layout} (not HYBRID, continuing search)")
+                    logger.info(f"HYBRID_SEARCH attempt=2 try={search_try + 1} overlap={overlap_assessment} hybrid_mode={hybrid_mode} layout={layout} (not HYBRID, continuing search)")
                     continue  # Continue searching
                     
             except Exception as e:
-                print(f"HYBRID_SEARCH attempt=2 try={search_try + 1} error: {str(e)}, continuing search")
+                logger.warning(f"HYBRID_SEARCH attempt=2 try={search_try + 1} error: {str(e)}, continuing search")
                 continue  # Continue searching on error
         
         # If we get here, we didn't find a NEAR_GEOMETRIC_OVERLAP after max_hybrid_search_tries
         if best_side_by_side_result:
-            print(f"HYBRID_NOT_FOUND attempt=2 fallback SIDE_BY_SIDE A={best_side_by_side_result['A']} B={best_side_by_side_result['B']}")
+            logger.info(f"HYBRID_NOT_FOUND attempt=2 fallback SIDE_BY_SIDE A={best_side_by_side_result['A']} B={best_side_by_side_result['B']}")
             return best_side_by_side_result
         else:
-            print(f"HYBRID_NOT_FOUND attempt=2 no valid result found, using fallback")
+            logger.warning(f"HYBRID_NOT_FOUND attempt=2 no valid result found, using fallback")
             # Fallback to default
             return {
                 "A": "product object",
@@ -583,25 +587,16 @@ Do not include any explanation or other text."""
             background_classic_of_C = result.get("background_classic_of_C", "")
             c_is_dominant = result.get("c_is_dominant", True)
             
-            # Check if A is in forbidden list
-            if used_A_list and A.lower() in [used.lower() for used in used_A_list]:
-                print(f"REJECTED A (forbidden): {A}")
-                if retry_attempt < max_internal_retries - 1:
-                    print(f"FORBIDDEN_HIT retrying selector... attempt={retry_attempt + 1} forbidden_A={A}")
-                    continue  # Retry
-                else:
-                    print(f"FORBIDDEN_HIT max retries reached, using A anyway: {A}")
-            
             # Check if pair (A,B) is in forbidden pairs list
             pair_key = create_pair_key(A, B)
             if used_pairs_list and pair_key in used_pairs_list:
                 req_id_str = f" request_id={request_id}" if request_id else ""
-                print(f"REJECTED_PAIR{req_id_str} key={pair_key} (A={A}, B={B})")
+                logger.info(f"REJECTED_PAIR{req_id_str} key={pair_key} (A={A}, B={B})")
                 if retry_attempt < max_internal_retries - 1:
-                    print(f"FORBIDDEN_PAIR_HIT retrying selector... attempt={retry_attempt + 1} forbidden_pair={pair_key}")
+                    logger.info(f"FORBIDDEN_PAIR_HIT retrying selector... attempt={retry_attempt + 1} forbidden_pair={pair_key}")
                     continue  # Retry
                 else:
-                    print(f"FORBIDDEN_PAIR_HIT max retries reached, using pair anyway: A={A}, B={B}")
+                    logger.warning(f"FORBIDDEN_PAIR_HIT max retries reached, using pair anyway: A={A}, B={B}")
             
             # Validate overlap_assessment
             if overlap_assessment not in ["NEAR_GEOMETRIC_OVERLAP", "ONLY_SIMILAR", "NO_SIMILARITY"]:
@@ -635,12 +630,12 @@ Do not include any explanation or other text."""
             elif overlap_assessment == "NO_SIMILARITY":
                 # Re-pick a new pair (retry)
                 if retry_attempt < max_internal_retries - 1:
-                    print(f"NO_SIMILARITY retrying selector... attempt={retry_attempt + 1} A={A} B={B}")
+                    logger.info(f"NO_SIMILARITY retrying selector... attempt={retry_attempt + 1} A={A} B={B}")
                     continue  # Retry to get a better pair
                 else:
                     # Max retries reached - use best "ONLY_SIMILAR" result or fallback to SIDE_BY_SIDE
                     if best_result:
-                        print(f"NO_SIMILARITY max retries reached, using best ONLY_SIMILAR result")
+                        logger.info(f"NO_SIMILARITY max retries reached, using best ONLY_SIMILAR result")
                         return best_result
                     else:
                         # No good result found, force SIDE_BY_SIDE
@@ -677,11 +672,11 @@ Do not include any explanation or other text."""
             }
         except Exception as e:
             if retry_attempt < max_internal_retries - 1:
-                print(f"Warning: Object selection failed (retry {retry_attempt + 1}): {str(e)}")
+                logger.warning(f"Warning: Object selection failed (retry {retry_attempt + 1}): {str(e)}")
                 continue
             else:
                 # Fallback on error after all retries
-                print(f"Warning: Object selection failed after {max_internal_retries} retries: {str(e)}, using fallback")
+                logger.warning(f"Warning: Object selection failed after {max_internal_retries} retries: {str(e)}, using fallback")
                 if best_result:
                     return best_result
                 return {
@@ -725,21 +720,16 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
     }
     openai_size = size_map.get(ad_size, "1024x1024")
     
-    # Log used_A list before selection
-    if used_A_list:
-        print(f"USED_A so far: {used_A_list}")
-    else:
-        print(f"USED_A so far: [] (first attempt)")
-    
     # Log used_pairs list before selection
     req_id_str = f" request_id={request_id}" if request_id else ""
     if used_pairs_list:
-        print(f"USED_PAIRS{req_id_str}: {used_pairs_list}")
+        logger.info(f"USED_PAIRS{req_id_str}: {used_pairs_list}")
     else:
-        print(f"USED_PAIRS{req_id_str}: [] (first attempt)")
+        logger.info(f"USED_PAIRS{req_id_str}: [] (first attempt)")
     
-    # Step 1: Pick two objects, projections, overlap assessment, hybrid_mode, layout, and background (with ad_goal, used_A_list, used_pairs_list, attempt, and request_id)
-    objects = pick_two_objects(product_name, product_description, headline, ad_goal, used_A_list, used_pairs_list, attempt, request_id)
+    # Step 1: Pick two objects, projections, overlap assessment, hybrid_mode, layout, and background (with ad_goal, used_pairs_list, attempt, and request_id)
+    # Note: used_A_list is deprecated and not used
+    objects = pick_two_objects(product_name, product_description, headline, ad_goal, None, used_pairs_list, attempt, request_id)
     A = objects["A"]
     B = objects["B"]
     C_projection_description = objects["C_projection_description"]
@@ -750,20 +740,17 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
     background_classic_of_C = objects["background_classic_of_C"]
     c_is_dominant = objects.get("c_is_dominant", True)
     
-    # Log successful selection of A for this attempt
-    print(f"SELECTED A for attempt {attempt}: {A}")
-    
     # Log successful selection of pair for this attempt
     pair_key = create_pair_key(A, B)
     req_id_str = f" request_id={request_id}" if request_id else ""
-    print(f"SELECTED_PAIR{req_id_str} attempt={attempt} key={pair_key} (A={A}, B={B})")
+    logger.info(f"SELECTED_PAIR{req_id_str} attempt={attempt} key={pair_key} (A={A}, B={B})")
     
     # Debug log: print selected A, B, layout, overlap_assessment, hybrid_mode, and openai_size (NOT full prompt, NOT secrets)
-    print(f"SELECTED A/B attempt={attempt}: A={A}, B={B}, layout={layout}, overlap_assessment={overlap_assessment}, hybrid_mode={hybrid_mode}, ad_size={ad_size} (OpenAI size: {openai_size})")
+    logger.info(f"SELECTED A/B attempt={attempt}: A={A}, B={B}, layout={layout}, overlap_assessment={overlap_assessment}, hybrid_mode={hybrid_mode}, ad_size={ad_size} (OpenAI size: {openai_size})")
     
     # Log layout decision
     req_id_str = f" request_id={request_id}" if request_id else ""
-    print(f"LAYOUT_DECISION{req_id_str} layout={layout}")
+    logger.info(f"LAYOUT_DECISION{req_id_str} layout={layout}")
     
     # Step 2: Build strict image prompt with explicit A/B/projections/layout/background
     # Camera angle instructions based on projection descriptions
@@ -778,7 +765,7 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
         if overlap_assessment != "NEAR_GEOMETRIC_OVERLAP" or hybrid_mode != "PROJECTION_REPLACEMENT":
             # Force SIDE_BY_SIDE if conditions not met
             layout = "SIDE_BY_SIDE"
-            print(f"HYBRID_REJECTED: overlap_assessment={overlap_assessment}, hybrid_mode={hybrid_mode}, forcing SIDE_BY_SIDE")
+            logger.info(f"HYBRID_REJECTED: overlap_assessment={overlap_assessment}, hybrid_mode={hybrid_mode}, forcing SIDE_BY_SIDE")
         
         layout_instruction = f"""Create a TRUE ACE HYBRID with PROJECTION REPLACEMENT (MANDATORY):
 - The final image MUST show ONE single physical object in the scene.
@@ -890,9 +877,9 @@ Generate ONE final advertising image that fully follows ALL the rules above.
 The image MUST show BOTH Object A and Object B. Do not explain. Do not describe."""
 
     # Debug log: print image prompt, ad_size, and attempt
-    print("=== IMAGE PROMPT SENT TO OPENAI ===")
-    print(image_prompt)
-    print("=== END IMAGE PROMPT ===")
+    logger.debug("=== IMAGE PROMPT SENT TO OPENAI ===")
+    logger.debug(image_prompt)
+    logger.debug("=== END IMAGE PROMPT ===")
 
     try:
         response = retry_openai_call(
@@ -908,7 +895,7 @@ The image MUST show BOTH Object A and Object B. Do not explain. Do not describe.
         
         # Debug: log which keys exist in the response
         response_keys = list(response.data[0].__dict__.keys()) if hasattr(response.data[0], '__dict__') else []
-        print(f"OpenAI image response keys: {response_keys}")
+        logger.debug(f"OpenAI image response keys: {response_keys}")
         
         # Use b64_json from OpenAI response (no URL fetch needed)
         image_base64 = response.data[0].b64_json
@@ -1044,6 +1031,11 @@ def generate():
     - /api/generate/
     - /api/generate-one
     - /api/generate-one/
+    
+    Session management:
+    - Attempt 1: Creates new session_id, locks inputs, returns session_id
+    - Attempts 2-3: Requires session_id, uses locked inputs from server state
+    - After attempt 3: Session is deleted (full reset)
     """
     # Generate request ID for this request
     request_id = generate_request_id()
@@ -1051,6 +1043,9 @@ def generate():
     # Log route hit
     route_path = request.path
     logger.info(f"ROUTE_HIT {route_path} request_id={request_id}")
+    
+    # Clean up expired sessions before processing
+    cleanup_expired_sessions()
     
     # Top-level try/except to catch ALL exceptions and prevent 502s
     try:
@@ -1060,65 +1055,108 @@ def generate():
         if not data:
             return jsonify({"error": "Request body must be JSON", "request_id": request_id}), 400
         
-        # Validate required fields
-        product_name = data.get("product_name")
-        product_description = data.get("product_description")
-        ad_size = data.get("ad_size")
+        # Get session_id (optional for attempt 1, required for attempts 2-3)
+        session_id = data.get("session_id")
         attempt = data.get("attempt")
         
-        # Check all fields are present
-        if not product_name:
-            return jsonify({"error": "product_name is required and must be a non-empty string", "request_id": request_id}), 400
-        
-        if not product_description:
-            return jsonify({"error": "product_description is required and must be a non-empty string", "request_id": request_id}), 400
-        
-        if not ad_size:
-            return jsonify({"error": "ad_size is required and must be a non-empty string", "request_id": request_id}), 400
-        
+        # Validate attempt
         if attempt is None:
             return jsonify({"error": "attempt is required and must be 1, 2, or 3", "request_id": request_id}), 400
         
-        # Check all fields are strings (except attempt)
-        if not isinstance(product_name, str) or not product_name.strip():
-            return jsonify({"error": "product_name must be a non-empty string", "request_id": request_id}), 400
-        
-        if not isinstance(product_description, str) or not product_description.strip():
-            return jsonify({"error": "product_description must be a non-empty string", "request_id": request_id}), 400
-        
-        if not isinstance(ad_size, str) or not ad_size.strip():
-            return jsonify({"error": "ad_size must be a non-empty string", "request_id": request_id}), 400
-        
-        # Validate attempt
         if not isinstance(attempt, int) or attempt not in [1, 2, 3]:
             return jsonify({"error": "attempt must be exactly 1, 2, or 3", "request_id": request_id}), 400
         
-        # Validate ad_size is one of the allowed values
-        if ad_size not in VALID_AD_SIZES:
-            return jsonify({
-                "error": f"ad_size must be exactly one of: {', '.join(sorted(VALID_AD_SIZES))}",
-                "request_id": request_id
-            }), 400
+        # Session handling
+        if attempt == 1:
+            # Attempt 1: Create new session
+            if session_id and session_id in session_storage:
+                # Session already exists - this is an error (attempt 1 should create new session)
+                return jsonify({"error": "session_id provided for attempt 1, but session already exists. Use attempt 2 or 3 to continue existing session.", "request_id": request_id}), 400
+            
+            # Get inputs from request
+            product_name = data.get("product_name")
+            product_description = data.get("product_description")
+            ad_size = data.get("ad_size")
+            
+            # Validate required fields for attempt 1
+            if not product_name:
+                return jsonify({"error": "product_name is required and must be a non-empty string", "request_id": request_id}), 400
+            
+            if not product_description:
+                return jsonify({"error": "product_description is required and must be a non-empty string", "request_id": request_id}), 400
+            
+            if not ad_size:
+                return jsonify({"error": "ad_size is required and must be a non-empty string", "request_id": request_id}), 400
+            
+            if not isinstance(product_name, str) or not product_name.strip():
+                return jsonify({"error": "product_name must be a non-empty string", "request_id": request_id}), 400
+            
+            if not isinstance(product_description, str) or not product_description.strip():
+                return jsonify({"error": "product_description must be a non-empty string", "request_id": request_id}), 400
+            
+            if not isinstance(ad_size, str) or not ad_size.strip():
+                return jsonify({"error": "ad_size must be a non-empty string", "request_id": request_id}), 400
+            
+            if ad_size not in VALID_AD_SIZES:
+                return jsonify({
+                    "error": f"ad_size must be exactly one of: {', '.join(sorted(VALID_AD_SIZES))}",
+                    "request_id": request_id
+                }), 400
+            
+            # Create new session
+            new_session_id = str(uuid.uuid4())
+            session_storage[new_session_id] = {
+                "product_name": product_name.strip(),
+                "product_description": product_description.strip(),
+                "selected_size": ad_size.strip(),
+                "attempt": 1,
+                "used_pairs": [],
+                "created_at": time.time()
+            }
+            session_id = new_session_id
+            logger.info(f"SESSION_CREATED session_id={session_id} request_id={request_id}")
+        
+        else:
+            # Attempts 2-3: Require session_id and use locked inputs
+            if not session_id:
+                return jsonify({"error": "session_id is required for attempts 2 and 3", "request_id": request_id}), 400
+            
+            if session_id not in session_storage:
+                return jsonify({"error": "session_id not found. Session may have expired or been reset.", "request_id": request_id}), 400
+            
+            # Get locked inputs from session state (ignore any client-provided values)
+            session_data = session_storage[session_id]
+            product_name = session_data["product_name"]
+            product_description = session_data["product_description"]
+            ad_size = session_data["selected_size"]
+            
+            # Validate attempt matches session state
+            if session_data["attempt"] != attempt - 1:
+                return jsonify({
+                    "error": f"Session state mismatch. Expected attempt {session_data['attempt'] + 1}, got {attempt}",
+                    "request_id": request_id
+                }), 400
+            
+            # Update session attempt counter
+            session_data["attempt"] = attempt
+            logger.info(f"SESSION_CONTINUE session_id={session_id} attempt={attempt} request_id={request_id}")
+        
+        # Get used_pairs from session state
+        session_data = session_storage[session_id]
+        used_pairs_list = session_data["used_pairs"]
         
         # Check OpenAI API key - fail fast with clear error
         if not OPENAI_API_KEY or not OPENAI_API_KEY.strip() or not client:
             return jsonify({"error": "Server misconfigured: OPENAI_API_KEY is not set", "request_id": request_id}), 500
         
         # Log generation start
-        logger.info(f"GEN_START request_id={request_id} attempt={attempt} size={ad_size} product_name={product_name[:50]}")
+        logger.info(f"GEN_START request_id={request_id} session_id={session_id} attempt={attempt} size={ad_size} product_name={product_name[:50]}")
         
-        # Create product key for tracking used_A
-        product_key = (product_name.strip().lower(), product_description.strip().lower())
-        
-        # Get or initialize used_A list for this product
-        if product_key not in used_A_tracker:
-            used_A_tracker[product_key] = []
-        used_A_list = used_A_tracker[product_key]
-        
-        # Get or initialize used_pairs list for this product
-        if product_key not in used_pairs_tracker:
-            used_pairs_tracker[product_key] = []
-        used_pairs_list = used_pairs_tracker[product_key]
+        # Log used_pairs for this session
+        if used_pairs_list:
+            logger.info(f"USED_PAIRS session_id={session_id} request_id={request_id}: {used_pairs_list}")
+        else:
+            logger.info(f"USED_PAIRS session_id={session_id} request_id={request_id}: [] (first attempt)")
         
         # Stage: TEXT_GOAL - Generate distinct ad_goal for this attempt
         logger.info(f"GEN_STAGE request_id={request_id} stage=TEXT_GOAL")
@@ -1138,35 +1176,25 @@ def generate():
             logger.exception(f"GEN_FAIL request_id={request_id} stage=TEXT_OBJECTS error={type(e).__name__}: {str(e)}")
             raise
         
-        # Stage: IMAGE - Generate image (with ad_goal, used_A_list, used_pairs_list, and request_id) - returns (image_data_url, selected_A, selected_B)
+        # Stage: IMAGE - Generate image (with ad_goal, used_pairs_list, and request_id) - returns (image_data_url, selected_A, selected_B)
+        # Note: used_A_list is no longer needed - we only track pairs now
         logger.info(f"GEN_STAGE request_id={request_id} stage=IMAGE")
         try:
-            image_data_url, selected_A, selected_B = generate_image(product_name, product_description, headline, ad_size, attempt, ad_goal, used_A_list, used_pairs_list, request_id)
+            image_data_url, selected_A, selected_B = generate_image(product_name, product_description, headline, ad_size, attempt, ad_goal, None, used_pairs_list, request_id)
             logger.info(f"OPENAI_IMAGE_OK request_id={request_id} stage=IMAGE")
         except Exception as e:
             logger.exception(f"GEN_FAIL request_id={request_id} stage=IMAGE error={type(e).__name__}: {str(e)}")
             raise
         
-        # Track the selected A (add to used_A_list if not already present)
-        # NOTE: This only happens on successful generation - transient errors do NOT update used_A
-        if selected_A:
-            # Check if already tracked (case-insensitive)
-            already_tracked = selected_A.lower() in [used.lower() for used in used_A_list]
-            if not already_tracked:
-                used_A_tracker[product_key].append(selected_A)
-                print(f"TRACKED used_A for product: {selected_A} (total: {len(used_A_tracker[product_key])})")
-            else:
-                print(f"WARNING: Selected A '{selected_A}' was already in used_A_list, but was selected anyway")
-        
-        # Track the selected pair (A,B) (add to used_pairs_list if not already present)
+        # Track the selected pair (A,B) in session state (add to used_pairs_list if not already present)
         # NOTE: This only happens on successful generation - transient errors do NOT update used_pairs
         if selected_A and selected_B:
             pair_key = create_pair_key(selected_A, selected_B)
             if pair_key not in used_pairs_list:
-                used_pairs_tracker[product_key].append(pair_key)
-                print(f"TRACKED used_pair for product: {pair_key} (A={selected_A}, B={selected_B}) (total: {len(used_pairs_tracker[product_key])})")
+                session_data["used_pairs"].append(pair_key)
+                logger.info(f"TRACKED used_pair session_id={session_id} request_id={request_id}: {pair_key} (A={selected_A}, B={selected_B}) (total: {len(session_data['used_pairs'])})")
             else:
-                print(f"WARNING: Selected pair '{pair_key}' (A={selected_A}, B={selected_B}) was already in used_pairs_list, but was selected anyway")
+                logger.warning(f"WARNING: Selected pair '{pair_key}' (A={selected_A}, B={selected_B}) was already in used_pairs_list, but was selected anyway session_id={session_id} request_id={request_id}")
         
         # Stage: ZIP - Extract base64 from data URL for ZIP creation
         logger.info(f"GEN_STAGE request_id={request_id} stage=ZIP")
@@ -1205,7 +1233,7 @@ def generate():
                 "request_id": request_id
             }), 503
         
-        # Return single ad object
+        # Return single ad object with session_id
         ad = {
             "ad_id": attempt,
             "headline": headline,
@@ -1213,10 +1241,16 @@ def generate():
             "image_data_url": image_data_url,
             "zip_base64": zip_base64,
             "zip_filename": f"ad_{attempt}.zip",
+            "session_id": session_id,
             "request_id": request_id
         }
         
-        logger.info(f"Successfully generated ad (request_id={request_id}, attempt={attempt})")
+        # After attempt 3 succeeds, delete the session (full reset)
+        if attempt == 3:
+            del session_storage[session_id]
+            logger.info(f"SESSION_RESET session_id={session_id} request_id={request_id} (attempt 3 completed, session deleted)")
+        
+        logger.info(f"Successfully generated ad (request_id={request_id}, attempt={attempt}, session_id={session_id})")
         return jsonify(ad), 200
     
     except RetryableError as e:
