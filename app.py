@@ -10,6 +10,7 @@ import uuid
 import traceback
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from werkzeug.exceptions import HTTPException
 from openai import OpenAI
 from openai import RateLimitError, APIError, APIConnectionError, APITimeoutError
 
@@ -125,9 +126,29 @@ def retry_openai_call(call_func, max_retries=4, operation_name="OpenAI call"):
     raise RetryableError(f"OpenAI call failed after {max_retries} retries", error_code)
 
 
+@app.errorhandler(HTTPException)
+def handle_http_exception(e):
+    """Handle HTTP exceptions (404, etc.) without logging as errors."""
+    request_id = generate_request_id()
+    
+    # For 404, log as INFO only (not error)
+    if e.code == 404:
+        logger.info(f"HTTP_404 path={request.path} request_id={request_id}")
+    else:
+        logger.warning(f"HTTP_{e.code} path={request.path} request_id={request_id} message={str(e)}")
+    
+    # Return JSON with the actual status code
+    return jsonify({
+        "error": e.name,
+        "message": e.description,
+        "code": e.code,
+        "request_id": request_id
+    }), e.code
+
+
 @app.errorhandler(Exception)
 def handle_exception(e):
-    """Global exception handler to prevent 502 errors and ensure JSON responses."""
+    """Global exception handler for non-HTTP exceptions to prevent 502 errors and ensure JSON responses."""
     request_id = generate_request_id()
     
     # Log full traceback
@@ -139,6 +160,18 @@ def handle_exception(e):
         "message": "Server error",
         "request_id": request_id
     }), 500
+
+
+@app.route('/', methods=['GET'])
+def root():
+    """Root endpoint."""
+    return jsonify({"status": "ok"}), 200
+
+
+@app.route('/favicon.ico', methods=['GET'])
+def favicon():
+    """Favicon endpoint - return 204 (no content)."""
+    return '', 204
 
 
 @app.route('/health', methods=['GET'])
