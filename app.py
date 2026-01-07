@@ -991,6 +991,9 @@ def generate():
         if not OPENAI_API_KEY or not OPENAI_API_KEY.strip() or not client:
             return jsonify({"error": "Server misconfigured: OPENAI_API_KEY is not set", "request_id": request_id}), 500
         
+        # Log generation start
+        logger.info(f"GEN_START request_id={request_id} attempt={attempt} size={ad_size} product_name={product_name[:50]}")
+        
         # Create product key for tracking used_A
         product_key = (product_name.strip().lower(), product_description.strip().lower())
         
@@ -1005,13 +1008,28 @@ def generate():
         used_pairs_list = used_pairs_tracker[product_key]
         
         # Generate distinct ad_goal for this attempt
-        ad_goal = generate_ad_goal(product_name, product_description, attempt)
+        try:
+            ad_goal = generate_ad_goal(product_name, product_description, attempt)
+            logger.info(f"OPENAI_TEXT_OK request_id={request_id} stage=ad_goal")
+        except Exception as e:
+            logger.exception(f"GEN_FAIL request_id={request_id} stage=ad_goal error={type(e).__name__}: {str(e)}")
+            raise
         
         # Generate headline and marketing text (with ad_goal)
-        headline, marketing_text = generate_headline_and_text(product_name, product_description, attempt, ad_goal)
+        try:
+            headline, marketing_text = generate_headline_and_text(product_name, product_description, attempt, ad_goal)
+            logger.info(f"OPENAI_TEXT_OK request_id={request_id} stage=headline_and_text")
+        except Exception as e:
+            logger.exception(f"GEN_FAIL request_id={request_id} stage=headline_and_text error={type(e).__name__}: {str(e)}")
+            raise
         
         # Generate image (with ad_goal, used_A_list, and used_pairs_list) - returns (image_data_url, selected_A, selected_B)
-        image_data_url, selected_A, selected_B = generate_image(product_name, product_description, headline, ad_size, attempt, ad_goal, used_A_list, used_pairs_list)
+        try:
+            image_data_url, selected_A, selected_B = generate_image(product_name, product_description, headline, ad_size, attempt, ad_goal, used_A_list, used_pairs_list)
+            logger.info(f"OPENAI_IMAGE_OK request_id={request_id} stage=image_generation")
+        except Exception as e:
+            logger.exception(f"GEN_FAIL request_id={request_id} stage=image_generation error={type(e).__name__}: {str(e)}")
+            raise
         
         # Track the selected A (add to used_A_list if not already present)
         # NOTE: This only happens on successful generation - transient errors do NOT update used_A
@@ -1035,10 +1053,15 @@ def generate():
                 print(f"WARNING: Selected pair '{pair_key}' (A={selected_A}, B={selected_B}) was already in used_pairs_list, but was selected anyway")
         
         # Extract base64 from data URL for ZIP creation
-        image_base64 = image_data_url.split(',')[1] if ',' in image_data_url else image_data_url
-        
-        # Create ZIP in memory
-        zip_base64 = create_zip_in_memory(image_base64, marketing_text, attempt)
+        try:
+            image_base64 = image_data_url.split(',')[1] if ',' in image_data_url else image_data_url
+            
+            # Create ZIP in memory
+            zip_base64 = create_zip_in_memory(image_base64, marketing_text, attempt)
+            logger.info(f"ZIP_OK request_id={request_id} stage=zip_creation")
+        except Exception as e:
+            logger.exception(f"GEN_FAIL request_id={request_id} stage=zip_creation error={type(e).__name__}: {str(e)}")
+            raise
         
         # Return single ad object
         ad = {
@@ -1057,7 +1080,7 @@ def generate():
     except RetryableError as e:
         # Transient OpenAI error after max retries - return 503
         # This does NOT consume an attempt - used_A is only updated after successful generation
-        logger.warning(f"RETURNING RETRYABLE_ERROR (no attempt consumed) request_id={request_id} code={e.code}")
+        logger.exception(f"GEN_FAIL request_id={request_id} stage=openai_retry code={e.code} - RETRYABLE_ERROR (no attempt consumed)")
         return jsonify({
             "error": "RETRYABLE_ERROR",
             "code": e.code,
@@ -1066,12 +1089,12 @@ def generate():
         }), 503
     except ValueError as e:
         # Non-transient validation errors - return 400
-        logger.warning(f"Validation error (request_id={request_id}): {str(e)}")
+        logger.exception(f"GEN_FAIL request_id={request_id} stage=validation error={type(e).__name__}: {str(e)}")
         return jsonify({"error": str(e), "request_id": request_id}), 400
     except (RateLimitError, APIConnectionError, APITimeoutError) as e:
         # Unhandled transient OpenAI errors (shouldn't happen if retry logic works, but catch anyway)
         error_code = getattr(e, 'status_code', None) or getattr(e, 'code', None) or 429
-        logger.warning(f"RETURNING RETRYABLE_ERROR (no attempt consumed) - unhandled transient error request_id={request_id} type={type(e).__name__} code={error_code}")
+        logger.exception(f"GEN_FAIL request_id={request_id} stage=openai_transient type={type(e).__name__} code={error_code} - RETRYABLE_ERROR (no attempt consumed)")
         return jsonify({
             "error": "RETRYABLE_ERROR",
             "code": error_code,
@@ -1082,7 +1105,7 @@ def generate():
         # Check if it's a 5xx server error (transient)
         status_code = getattr(e, 'status_code', None)
         if status_code and 500 <= status_code < 600:
-            logger.warning(f"RETURNING RETRYABLE_ERROR (no attempt consumed) - OpenAI 5xx error request_id={request_id} code={status_code}")
+            logger.exception(f"GEN_FAIL request_id={request_id} stage=openai_5xx code={status_code} - RETRYABLE_ERROR (no attempt consumed)")
             return jsonify({
                 "error": "RETRYABLE_ERROR",
                 "code": status_code,
@@ -1092,12 +1115,12 @@ def generate():
         else:
             # Non-transient API error (4xx except 429) - return 400
             error_msg = getattr(e, 'message', None) or str(e)
-            logger.warning(f"RETURNING 400 - non-transient OpenAI error request_id={request_id} code={status_code} message={error_msg}")
+            logger.exception(f"GEN_FAIL request_id={request_id} stage=openai_4xx code={status_code} message={error_msg}")
             return jsonify({"error": f"OpenAI API error: {error_msg}", "request_id": request_id}), 400
     except Exception as e:
         # Catch-all for any other unexpected exceptions - prevent 502
-        # Log full traceback
-        logger.exception(f"Unexpected error in /generate (request_id={request_id}): {type(e).__name__}: {str(e)}")
+        # Log full traceback with logger.exception
+        logger.exception(f"GEN_FAIL request_id={request_id} stage=unexpected error={type(e).__name__}: {str(e)}")
         # Do not expose internal error details to client
         return jsonify({
             "error": "INTERNAL_ERROR",
