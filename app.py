@@ -1034,28 +1034,31 @@ def generate():
             used_pairs_tracker[product_key] = []
         used_pairs_list = used_pairs_tracker[product_key]
         
-        # Generate distinct ad_goal for this attempt
+        # Stage: TEXT_GOAL - Generate distinct ad_goal for this attempt
+        logger.info(f"GEN_STAGE request_id={request_id} stage=TEXT_GOAL")
         try:
             ad_goal = generate_ad_goal(product_name, product_description, attempt)
-            logger.info(f"OPENAI_TEXT_OK request_id={request_id} stage=ad_goal")
+            logger.info(f"OPENAI_TEXT_OK request_id={request_id} stage=TEXT_GOAL")
         except Exception as e:
-            logger.exception(f"GEN_FAIL request_id={request_id} stage=ad_goal error={type(e).__name__}: {str(e)}")
+            logger.exception(f"GEN_FAIL request_id={request_id} stage=TEXT_GOAL error={type(e).__name__}: {str(e)}")
             raise
         
-        # Generate headline and marketing text (with ad_goal)
+        # Stage: TEXT_OBJECTS - Generate headline and marketing text (with ad_goal)
+        logger.info(f"GEN_STAGE request_id={request_id} stage=TEXT_OBJECTS")
         try:
             headline, marketing_text = generate_headline_and_text(product_name, product_description, attempt, ad_goal)
-            logger.info(f"OPENAI_TEXT_OK request_id={request_id} stage=headline_and_text")
+            logger.info(f"OPENAI_TEXT_OK request_id={request_id} stage=TEXT_OBJECTS")
         except Exception as e:
-            logger.exception(f"GEN_FAIL request_id={request_id} stage=headline_and_text error={type(e).__name__}: {str(e)}")
+            logger.exception(f"GEN_FAIL request_id={request_id} stage=TEXT_OBJECTS error={type(e).__name__}: {str(e)}")
             raise
         
-        # Generate image (with ad_goal, used_A_list, used_pairs_list, and request_id) - returns (image_data_url, selected_A, selected_B)
+        # Stage: IMAGE - Generate image (with ad_goal, used_A_list, used_pairs_list, and request_id) - returns (image_data_url, selected_A, selected_B)
+        logger.info(f"GEN_STAGE request_id={request_id} stage=IMAGE")
         try:
             image_data_url, selected_A, selected_B = generate_image(product_name, product_description, headline, ad_size, attempt, ad_goal, used_A_list, used_pairs_list, request_id)
-            logger.info(f"OPENAI_IMAGE_OK request_id={request_id} stage=image_generation")
+            logger.info(f"OPENAI_IMAGE_OK request_id={request_id} stage=IMAGE")
         except Exception as e:
-            logger.exception(f"GEN_FAIL request_id={request_id} stage=image_generation error={type(e).__name__}: {str(e)}")
+            logger.exception(f"GEN_FAIL request_id={request_id} stage=IMAGE error={type(e).__name__}: {str(e)}")
             raise
         
         # Track the selected A (add to used_A_list if not already present)
@@ -1079,15 +1082,16 @@ def generate():
             else:
                 print(f"WARNING: Selected pair '{pair_key}' (A={selected_A}, B={selected_B}) was already in used_pairs_list, but was selected anyway")
         
-        # Extract base64 from data URL for ZIP creation
+        # Stage: ZIP - Extract base64 from data URL for ZIP creation
+        logger.info(f"GEN_STAGE request_id={request_id} stage=ZIP")
         try:
             image_base64 = image_data_url.split(',')[1] if ',' in image_data_url else image_data_url
             
             # Create ZIP in memory
             zip_base64 = create_zip_in_memory(image_base64, marketing_text, attempt)
-            logger.info(f"ZIP_OK request_id={request_id} stage=zip_creation")
+            logger.info(f"ZIP_OK request_id={request_id} stage=ZIP")
         except Exception as e:
-            logger.exception(f"GEN_FAIL request_id={request_id} stage=zip_creation error={type(e).__name__}: {str(e)}")
+            logger.exception(f"GEN_FAIL request_id={request_id} stage=ZIP error={type(e).__name__}: {str(e)}")
             raise
         
         # Return single ad object
@@ -1108,6 +1112,7 @@ def generate():
         # Transient OpenAI error after max retries - return 503
         # This does NOT consume an attempt - used_A is only updated after successful generation
         logger.exception(f"GEN_FAIL request_id={request_id} stage=openai_retry code={e.code} - RETRYABLE_ERROR (no attempt consumed)")
+        logger.info(f"RETURNING RETRYABLE_ERROR (no attempt consumed) request_id={request_id}")
         return jsonify({
             "error": "RETRYABLE_ERROR",
             "code": e.code,
@@ -1122,6 +1127,7 @@ def generate():
         # Unhandled transient OpenAI errors (shouldn't happen if retry logic works, but catch anyway)
         error_code = getattr(e, 'status_code', None) or getattr(e, 'code', None) or 429
         logger.exception(f"GEN_FAIL request_id={request_id} stage=openai_transient type={type(e).__name__} code={error_code} - RETRYABLE_ERROR (no attempt consumed)")
+        logger.info(f"RETURNING RETRYABLE_ERROR (no attempt consumed) request_id={request_id}")
         return jsonify({
             "error": "RETRYABLE_ERROR",
             "code": error_code,
@@ -1133,6 +1139,7 @@ def generate():
         status_code = getattr(e, 'status_code', None)
         if status_code and 500 <= status_code < 600:
             logger.exception(f"GEN_FAIL request_id={request_id} stage=openai_5xx code={status_code} - RETRYABLE_ERROR (no attempt consumed)")
+            logger.info(f"RETURNING RETRYABLE_ERROR (no attempt consumed) request_id={request_id}")
             return jsonify({
                 "error": "RETRYABLE_ERROR",
                 "code": status_code,
