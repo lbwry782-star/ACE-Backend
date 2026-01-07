@@ -761,6 +761,10 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
     # Debug log: print selected A, B, layout, overlap_assessment, hybrid_mode, and openai_size (NOT full prompt, NOT secrets)
     print(f"SELECTED A/B attempt={attempt}: A={A}, B={B}, layout={layout}, overlap_assessment={overlap_assessment}, hybrid_mode={hybrid_mode}, ad_size={ad_size} (OpenAI size: {openai_size})")
     
+    # Log layout decision
+    req_id_str = f" request_id={request_id}" if request_id else ""
+    print(f"LAYOUT_DECISION{req_id_str} layout={layout}")
+    
     # Step 2: Build strict image prompt with explicit A/B/projections/layout/background
     # Camera angle instructions based on projection descriptions
     camera_instruction = f"""CAMERA ANGLE INSTRUCTIONS (CRITICAL):
@@ -799,14 +803,32 @@ CRITICAL ANTI-STACKING RULES (MANDATORY):
 - Examples of VALID hybrid: shelf of books where ONE BOOK IS A LAPTOP (laptop replaces book), tree where branches are USB cables (cables replace branches).
 - Examples of INVALID hybrid: laptop lying on an open book (this is stacking, not replacement), laptop next to a book (this is side-by-side, not replacement).
 
+MUTUALLY-EXCLUSIVE RULE FOR HYBRID (CRITICAL):
+- This layout is HYBRID - it MUST be ONE single fused object ONLY.
+- REQUIRED: complete fusion into one unified object - no visible separation.
+- FORBIDDEN: separate objects, "next to", "placed on", "resting on", "side by side", or any arrangement that shows two distinct items.
+- FORBIDDEN: any side-by-side appearance, two distinct objects, or visual separation.
+- The image MUST be purely HYBRID (one fused object) - NO side-by-side elements whatsoever.
+- If the image shows ANY side-by-side appearance or two separate objects, it is INVALID.
+
 NEGATIVE CONSTRAINT:
 - If you cannot make it look like ONE single physical object with no visible seams, REJECT this layout and output SIDE_BY_SIDE instead.
-- If the final image shows any residual side-by-side appearance or two distinct objects, it is INVALID and must be SIDE_BY_SIDE."""
+- If the final image shows any residual side-by-side appearance or two distinct objects, it is INVALID and must be SIDE_BY_SIDE.
+- IF YOU CANNOT COMPLY WITH THE HYBRID REQUIREMENTS (one single fused object), SWITCH TO SIDE_BY_SIDE INSTEAD."""
     else:  # SIDE_BY_SIDE
         layout_instruction = f"""Place Object A (C projection) and Object B (D projection) SIDE BY SIDE at the same angle.
 - Highlight maximal similar area between the projections.
 - Place them close together, emphasizing their shape similarity.
-- Both objects must be viewed from angles matching their projection descriptions."""
+- Both objects must be viewed from angles matching their projection descriptions.
+
+MUTUALLY-EXCLUSIVE RULE FOR SIDE_BY_SIDE (CRITICAL):
+- This layout is SIDE_BY_SIDE - it MUST show TWO separate objects clearly separated.
+- REQUIRED: Two distinct, separate objects placed side by side.
+- REQUIRED: Clear visual separation between Object A and Object B.
+- FORBIDDEN: fusion, overlap, merging, hybridization, or any arrangement that makes them look like one object.
+- FORBIDDEN: geometric embedding, projection replacement, or structural integration.
+- The image MUST be purely SIDE_BY_SIDE (two separate objects) - NO hybrid/fusion elements whatsoever.
+- If the image shows ANY fusion or hybrid appearance, it is INVALID."""
     
     image_prompt = f"""YOU ARE A PROFESSIONAL ADVERTISING PHOTOGRAPHER.
 YOU MUST FOLLOW ALL RULES BELOW. NO EXCEPTIONS.
