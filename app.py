@@ -774,26 +774,37 @@ def build_image_prompt_v2(product_name, product_description, headline, A, B, C_p
     
     if layout == "PERFECT_HYBRID":
         layout_instruction = f"""Create a PERFECT_HYBRID (Engine V2 - MANDATORY):
-- The final image MUST show ONE projection only (single object).
-- Object B's projection (D, simplified as F) must FULLY GEOMETRICALLY OVERLAP with Object A's projection (C, simplified as E) after permitted adjustments (scale/angle/proportion without distortion).
-- D REPLACES C (or vice versa) in the same footprint - they become ONE unified projection.
+- The final image MUST show exactly ONE object/projection only.
+- Object B's projection (D) must REPLACE Object A's projection (C) in the same footprint through full geometric overlap.
+- This is REPLACEMENT, NOT stacking, NOT blending, NOT "A with B on top", NOT "B placed on A".
+- D REPLACES a structural element of C - they become ONE unified projection where D replaces part of C within C's classic structure.
 - The other object (the one not shown as the main projection) contributes ONLY background/environment/context and must NOT appear as a separate object.
 - The final silhouette must read as ONE single physical object - no visible seams of two separate items.
 - No visible boundaries, edges, or seams that suggest two separate items.
 - The composition must read as a single, cohesive physical entity.
 
-CRITICAL ANTI-STACKING RULES (MANDATORY):
-- D must REPLACE C in the same footprint, NOT be placed on top of, resting on, or beside C.
-- FORBIDDEN: "on top of", "resting on", "placed on", "sitting on", "lying on", "inside of", "next to", or any stacking/positioning arrangement.
+CRITICAL REPLACEMENT RULE (MANDATORY - NOT STACKING):
+- D must REPLACE C in the same footprint through geometric embedding.
+- D replaces an equivalent structural element of C (e.g., if C is a shelf of books, D replaces ONE BOOK with a laptop).
+- This is REPLACEMENT, NOT positioning, NOT stacking, NOT blending.
+- FORBIDDEN: "on top of", "resting on", "placed on", "sitting on", "lying on", "inside of", "next to", "with B on top", "A with B", or any stacking/positioning arrangement.
 - FORBIDDEN: D as a separate object positioned above, beside, or within C.
+- FORBIDDEN: Any visual arrangement that shows B placed on A or A with B on top.
 - REQUIRED: D must be geometrically embedded INTO C's structure, replacing it in the same footprint.
+
+CRITICAL: NOT A SINGLE NORMAL OBJECT (MANDATORY):
+- This is NOT allowed to look like a single normal object.
+- It MUST clearly be a replacement hybrid of Object A ({A}) and Object B ({B}).
+- The viewer must be able to recognize that this is a hybrid where B replaces a structural element of A.
+- If it looks like a single normal object with no hybrid characteristics, it is INVALID.
 
 MUTUALLY-EXCLUSIVE RULE FOR PERFECT_HYBRID (CRITICAL):
 - This layout is PERFECT_HYBRID - it MUST be ONE single projection ONLY.
-- REQUIRED: complete fusion into one unified object - no visible separation.
+- REQUIRED: complete fusion into one unified object through replacement - no visible separation.
 - FORBIDDEN: separate objects, "next to", "placed on", "resting on", "side by side", or any arrangement that shows two distinct items.
 - FORBIDDEN: any side-by-side appearance, two distinct objects, or visual separation.
-- The image MUST be purely PERFECT_HYBRID (one fused object) - NO side-by-side elements whatsoever.
+- FORBIDDEN: showing A and B separately in any way.
+- The image MUST be purely PERFECT_HYBRID (one fused object through replacement) - NO side-by-side elements whatsoever.
 - If the image shows ANY side-by-side appearance or two separate objects, it is INVALID."""
     else:  # SIDE_BY_SIDE
         layout_instruction = f"""Place Object A (C projection) and Object B (D projection) SIDE_BY_SIDE at parallel angles.
@@ -1017,6 +1028,11 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
     
     # Step 2: Build image prompt using V2 engine rules
     image_prompt = build_image_prompt_v2(product_name, product_description, headline, A, B, C_projection_description, D_projection_description, layout, background_classic_of_C, ad_size)
+    
+    # Debug log: V2 render mode
+    render_mode = "PERFECT_HYBRID" if layout == "PERFECT_HYBRID" else "SIDE_BY_SIDE"
+    req_id_str = f" request_id={request_id}" if request_id else ""
+    logger.info(f"V2_RENDER{req_id_str} layout={layout} A={A} B={B} mode={render_mode}")
 
     # Debug log: print image prompt, ad_size, and attempt
     logger.debug("=== IMAGE PROMPT SENT TO OPENAI (V2) ===")
