@@ -798,21 +798,28 @@ CRITICAL REPLACEMENT RULE (MANDATORY - NOT STACKING):
 - FORBIDDEN: Any visual arrangement that shows {B} placed on {A} or {A} with {B} on top.
 - REQUIRED: D must be geometrically embedded INTO C's structure, replacing it in the same footprint.
 
-CRITICAL: NOT A SINGLE NORMAL OBJECT (MANDATORY):
-- This is NOT allowed to look like a single normal object.
+CRITICAL: NOT A SINGLE NORMAL OBJECT (MANDATORY - STRICT ENFORCEMENT):
+- This is INVALID if it looks like a single normal object without clear hybrid characteristics.
 - It MUST clearly be a replacement hybrid of Object A ({A}) and Object B ({B}).
 - The viewer must be able to recognize that this is a hybrid where {B} replaces a structural element of {A}.
+- The single visible object MUST include unmistakable signature features from BOTH Object A ({A}) AND Object B ({B}).
+- The hybrid must be visually recognizable as a fusion where {B}'s characteristics replace part of {A}'s structure.
 - If it looks like a single normal object with no hybrid characteristics, it is INVALID.
 - This is INVALID if it looks like just Object A ({A}) alone or just Object B ({B}) alone. It must clearly be a replacement hybrid of BOTH.
+- The final image must show clear evidence that {B} has replaced a structural element of {A} - the viewer should see both objects' characteristics in the single visible projection.
+- If you cannot make it clearly show both objects' characteristics in one unified replacement hybrid, do SIDE_BY_SIDE instead.
 
 MUTUALLY-EXCLUSIVE RULE FOR PERFECT_HYBRID (CRITICAL):
 - This layout is PERFECT_HYBRID - it MUST be ONE single projection ONLY.
 - REQUIRED: complete fusion into one unified object through replacement - no visible separation.
+- REQUIRED: The single visible object must show unmistakable signature features from BOTH {A} and {B}.
 - FORBIDDEN: separate objects, "next to", "placed on", "resting on", "side by side", or any arrangement that shows two distinct items.
 - FORBIDDEN: any side-by-side appearance, two distinct objects, or visual separation.
 - FORBIDDEN: showing Object A ({A}) and Object B ({B}) separately in any way.
+- FORBIDDEN: showing only one object without clear hybrid characteristics from both.
 - The image MUST be purely PERFECT_HYBRID (one fused object through replacement) - NO side-by-side elements whatsoever.
-- If the image shows ANY side-by-side appearance or two separate objects, it is INVALID."""
+- If the image shows ANY side-by-side appearance or two separate objects, it is INVALID.
+- If the image shows a single normal object without clear hybrid characteristics, it is INVALID."""
     else:  # SIDE_BY_SIDE
         layout_instruction = f"""Place Object A ({A}) (C projection) and Object B ({B}) (D projection) SIDE_BY_SIDE at parallel angles.
 - Highlight maximal similar area between the projections.
@@ -824,10 +831,13 @@ MUTUALLY-EXCLUSIVE RULE FOR SIDE_BY_SIDE (CRITICAL):
 - REQUIRED: Both Object A ({A}) and Object B ({B}) must be visible as separate physical objects in the same frame.
 - REQUIRED: Two distinct, separate objects placed side by side.
 - REQUIRED: Clear visual separation between Object A ({A}) and Object B ({B}).
+- REQUIRED: Both objects must be clearly identifiable as separate entities.
 - FORBIDDEN: showing only one object, fusion, overlap, merging, hybridization, or any arrangement that makes them look like one object.
 - FORBIDDEN: geometric embedding, projection replacement, or structural integration.
+- FORBIDDEN: any visual arrangement that suggests the objects are fused or merged.
 - The image MUST be purely SIDE_BY_SIDE (two separate objects) - NO hybrid/fusion elements whatsoever.
-- If the image shows ANY fusion or hybrid appearance, it is INVALID."""
+- If the image shows ANY fusion or hybrid appearance, it is INVALID.
+- INVALID if only one object is visible. Both A and B must be visible."""
     
     image_prompt = f"""YOU ARE A PROFESSIONAL ADVERTISING PHOTOGRAPHER (ACE Engine V2).
 YOU MUST FOLLOW ALL RULES BELOW. NO EXCEPTIONS.
