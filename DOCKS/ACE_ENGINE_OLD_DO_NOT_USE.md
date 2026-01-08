@@ -1,5 +1,18 @@
+⚠️ **DEPRECATED - DO NOT USE** ⚠️
+
+This document is DEPRECATED and should NOT be followed.
+
+**AUTHORITATIVE ENGINE SPEC:**
+- See: `DOCKS/ENGINE_AUTHORITY.md`
+- See: `DOCKS/מנוע V2.pdf`
+
+This file is kept for historical reference only. All new implementations must follow Engine V2 only.
+
+---
+
 0) Non-Negotiable Rules
 
+[DEPRECATED - See V2 spec instead]
 Follow H01–H08 exactly. No interpretation, no shortcuts. 
 
 

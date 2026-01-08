@@ -337,377 +337,9 @@ Return ONLY the marketing text, exactly 50 words."""
     return headline, marketing_text
 
 
-def pick_two_objects(product_name, product_description, headline, ad_goal, used_A_list=None, used_pairs_list=None, attempt=None, request_id=None):
-    """Select two physical objects (A and B), projections, overlap assessment, layout, and background using text model.
-    
-    Args:
-        product_name: Product name
-        product_description: Product description
-        headline: Generated headline
-        ad_goal: Distinct advertising goal for this attempt
-        used_A_list: DEPRECATED - kept for backward compatibility, not used
-        used_pairs_list: List of canonical pair keys (A|B) that have been used in previous attempts (forbidden)
-        attempt: Attempt number (1, 2, or 3) - used to trigger hybrid search for attempt 2
-        request_id: Request ID for logging
-    
-    Returns:
-        dict with keys: A, B, C_projection_description, D_projection_description, overlap_assessment, 
-                        layout, background_classic_of_C, c_is_dominant
-    """
-    if not client:
-        raise ValueError("OpenAI API key not configured")
-    
-    if used_pairs_list is None:
-        used_pairs_list = []
-    
-    # Build forbidden pairs list text (only pairs are tracked now, not individual A objects)
-    forbidden_pairs_text = ""
-    if used_pairs_list:
-        # Convert canonical keys back to readable format for the prompt
-        readable_pairs = []
-        for pair_key in used_pairs_list:
-            parts = pair_key.split("|")
-            if len(parts) == 2:
-                readable_pairs.append(f"({parts[0]}, {parts[1]})")
-        if readable_pairs:
-            forbidden_pairs_text = f"\n\nCRITICAL: The following object pairs have already been used in previous attempts in this session and MUST NOT be selected (in any order): {', '.join(readable_pairs)}\nYou MUST select a DIFFERENT pair (A,B) that is NOT in this list. The pair is forbidden regardless of which object is A and which is B."
-    
-    forbidden_text = forbidden_pairs_text
-    
-    def make_selection_prompt():
-        return f"""You are an ACE engine object selector. Select two physical objects for an advertisement with strict geometric overlap assessment.
-
-Product Name: {product_name}
-Product Description: {product_description}
-Headline: {headline}
-Advertising Goal: {ad_goal}
-
-Rules:
-1. Generate a list of 80 physical, real, associative objects based on the product, headline, and advertising goal.
-2. Objects must be simple, everyday, familiar physical objects — NOT ideas, symbols, abstract concepts, or illustrations.
-3. Objects should be non-functional / not functionally linked.
-4. Do NOT pick objects containing text/logos/letters/numbers/external graphics (unless inherent like playing cards, dice dots, engraved compass letters).
-{forbidden_text}
-
-Selection:
-- A = object with central meaning to the ad goal (MUST be different from previously used A objects)
-- B = object used for conceptual emphasis (but pairing is still only by shape similarity)
-
-Projection Selection:
-- C_projection_description = how to view Object A to maximize its silhouette area (camera angle, perspective, orientation)
-- D_projection_description = how to view Object B to maximize its silhouette area (camera angle, perspective, orientation)
-- Both projections must be clean silhouettes, no confusing details
-- Choose the projection with the largest visible dominant area for each object
-
-Geometric Overlap Assessment (CRITICAL):
-Compare the simplified shapes E (from C) and F (from D) after permitted adjustments (scale/angle/proportion without distortion).
-- "NEAR_GEOMETRIC_OVERLAP": E and F can reach almost geometric overlap - the projection silhouettes are nearly identical after permitted adjustments. This is clear and immediate to an average human eye.
-- "ONLY_SIMILAR": E and F are similar but NOT nearly geometric overlap - they share some shape similarity but cannot reach near-geometric overlap even with adjustments.
-- "NO_SIMILARITY": E and F have no clear shape similarity - an average human eye would not see them as similar.
-
-Layout Decision:
-- layout = "HYBRID" ONLY if overlap_assessment == "NEAR_GEOMETRIC_OVERLAP"
-- layout = "SIDE_BY_SIDE" if overlap_assessment is "ONLY_SIMILAR" or "NO_SIMILARITY"
-- Never force HYBRID if overlap is not clear and immediate to an average human eye
-
-Background:
-- background_classic_of_C = classic natural background for the dominant object (A's projection C)
-- c_is_dominant = true (C always controls lighting/texture/composition/background)
-
-Hybrid Mode Assessment (CRITICAL for HYBRID):
-- hybrid_mode = "PROJECTION_REPLACEMENT" ONLY if D can geometrically replace an equivalent structural element of C (e.g., one book in a shelf becomes a laptop, branches become USB cables).
-- hybrid_mode = "SIDE_BY_SIDE" if D would be placed on top of, resting on, or beside C as a separate object.
-- HYBRID layout is ONLY allowed if hybrid_mode == "PROJECTION_REPLACEMENT" AND overlap_assessment == "NEAR_GEOMETRIC_OVERLAP"
-
-Return ONLY valid JSON with these exact keys:
-{{
-  "A": "object name",
-  "B": "object name",
-  "C_projection_description": "how to view A to maximize silhouette area (camera angle/perspective)",
-  "D_projection_description": "how to view B to maximize silhouette area (camera angle/perspective)",
-  "overlap_assessment": "NEAR_GEOMETRIC_OVERLAP" or "ONLY_SIMILAR" or "NO_SIMILARITY",
-  "hybrid_mode": "PROJECTION_REPLACEMENT" (only if true geometric embedding is possible) or "SIDE_BY_SIDE",
-  "layout": "HYBRID" (only if overlap_assessment is NEAR_GEOMETRIC_OVERLAP AND hybrid_mode is PROJECTION_REPLACEMENT) or "SIDE_BY_SIDE",
-  "background_classic_of_C": "description of classic natural background",
-  "c_is_dominant": true
-}}
-
-Do not include any explanation or other text."""
-    
-    # HYBRID_SEARCH: For attempt 2 (or any chosen attempt), try up to 8 different A/B candidates to find NEAR_GEOMETRIC_OVERLAP
-    if attempt == 2:
-        max_hybrid_search_tries = 8
-        best_side_by_side_result = None  # Store best SIDE_BY_SIDE result as fallback
-        
-        logger.info(f"HYBRID_SEARCH attempt=2 starting search for NEAR_GEOMETRIC_OVERLAP (max {max_hybrid_search_tries} tries)")
-        
-        for search_try in range(max_hybrid_search_tries):
-            try:
-                selection_prompt = make_selection_prompt()
-                response = retry_openai_call(
-                    lambda: client.chat.completions.create(
-                        model=TEXT_MODEL,
-                        messages=[
-                            {"role": "system", "content": "You are an ACE engine object selector. Always return valid JSON only."},
-                            {"role": "user", "content": selection_prompt}
-                        ],
-                        temperature=0.8,
-                        response_format={"type": "json_object"}
-                    ),
-                    operation_name="hybrid_search_object_selection"
-                )
-                
-                result = json.loads(response.choices[0].message.content.strip())
-                
-                # Validate fields exist
-                A = result.get("A", "").strip()
-                B = result.get("B", "").strip()
-                C_projection_description = result.get("C_projection_description", "").strip()
-                D_projection_description = result.get("D_projection_description", "").strip()
-                overlap_assessment = result.get("overlap_assessment", "").strip()
-                hybrid_mode = result.get("hybrid_mode", "SIDE_BY_SIDE").strip()
-                layout = result.get("layout", "SIDE_BY_SIDE")
-                background_classic_of_C = result.get("background_classic_of_C", "")
-                c_is_dominant = result.get("c_is_dominant", True)
-                
-                # Check if pair (A,B) is in forbidden pairs list
-                pair_key = create_pair_key(A, B)
-                if used_pairs_list and pair_key in used_pairs_list:
-                    req_id_str = f" request_id={request_id}" if request_id else ""
-                    logger.info(f"REJECTED_PAIR{req_id_str} key={pair_key} (HYBRID_SEARCH attempt=2 try={search_try + 1} A={A}, B={B})")
-                    continue  # Skip this result and try again
-                
-                # Validate overlap_assessment
-                if overlap_assessment not in ["NEAR_GEOMETRIC_OVERLAP", "ONLY_SIMILAR", "NO_SIMILARITY"]:
-                    overlap_assessment = "ONLY_SIMILAR"
-                
-                # Validate hybrid_mode
-                if hybrid_mode not in ["PROJECTION_REPLACEMENT", "SIDE_BY_SIDE"]:
-                    hybrid_mode = "SIDE_BY_SIDE"
-                
-                # Check if we found NEAR_GEOMETRIC_OVERLAP
-                if overlap_assessment == "NEAR_GEOMETRIC_OVERLAP" and hybrid_mode == "PROJECTION_REPLACEMENT":
-                    # Found a valid HYBRID candidate!
-                    layout = "HYBRID"
-                    logger.info(f"HYBRID_FOUND attempt=2 try={search_try + 1} A={A} B={B} overlap={overlap_assessment} hybrid_mode={hybrid_mode}")
-                    
-                    # Validate and return
-                    if not A or not B:
-                        A = "product object"
-                        B = "complementary object"
-                    if not C_projection_description:
-                        C_projection_description = "front view maximizing silhouette area"
-                    if not D_projection_description:
-                        D_projection_description = "front view maximizing silhouette area"
-                    
-                    return {
-                        "A": A,
-                        "B": B,
-                        "C_projection_description": C_projection_description,
-                        "D_projection_description": D_projection_description,
-                        "overlap_assessment": overlap_assessment,
-                        "hybrid_mode": hybrid_mode,
-                        "layout": layout,
-                        "background_classic_of_C": background_classic_of_C,
-                        "c_is_dominant": c_is_dominant
-                    }
-                else:
-                    # Not a HYBRID candidate, but might be a good SIDE_BY_SIDE fallback
-                    if overlap_assessment == "ONLY_SIMILAR":
-                        layout = "SIDE_BY_SIDE"
-                        # Store as best SIDE_BY_SIDE result if we don't have one yet
-                        if best_side_by_side_result is None:
-                            best_side_by_side_result = {
-                                "A": A,
-                                "B": B,
-                                "C_projection_description": C_projection_description,
-                                "D_projection_description": D_projection_description,
-                                "overlap_assessment": overlap_assessment,
-                                "hybrid_mode": hybrid_mode,
-                                "layout": layout,
-                                "background_classic_of_C": background_classic_of_C,
-                                "c_is_dominant": c_is_dominant
-                            }
-                    
-                    logger.info(f"HYBRID_SEARCH attempt=2 try={search_try + 1} overlap={overlap_assessment} hybrid_mode={hybrid_mode} layout={layout} (not HYBRID, continuing search)")
-                    continue  # Continue searching
-                    
-            except Exception as e:
-                logger.warning(f"HYBRID_SEARCH attempt=2 try={search_try + 1} error: {str(e)}, continuing search")
-                continue  # Continue searching on error
-        
-        # If we get here, we didn't find a NEAR_GEOMETRIC_OVERLAP after max_hybrid_search_tries
-        if best_side_by_side_result:
-            logger.info(f"HYBRID_NOT_FOUND attempt=2 fallback SIDE_BY_SIDE A={best_side_by_side_result['A']} B={best_side_by_side_result['B']}")
-            return best_side_by_side_result
-        else:
-            logger.warning(f"HYBRID_NOT_FOUND attempt=2 no valid result found, using fallback")
-            # Fallback to default
-            return {
-                "A": "product object",
-                "B": "complementary object",
-                "C_projection_description": "front view maximizing silhouette area",
-                "D_projection_description": "front view maximizing silhouette area",
-                "overlap_assessment": "ONLY_SIMILAR",
-                "hybrid_mode": "SIDE_BY_SIDE",
-                "layout": "SIDE_BY_SIDE",
-                "background_classic_of_C": "natural background",
-                "c_is_dominant": True
-            }
-    
-    # For attempts 1 and 3, use the original retry logic
-    selection_prompt = make_selection_prompt()
-    
-    # Retry up to 6 times if A is in forbidden list OR pair is forbidden OR if overlap_assessment is NO_SIMILARITY
-    max_internal_retries = 6
-    best_result = None  # Store best "ONLY_SIMILAR" result as fallback
-    
-    for retry_attempt in range(max_internal_retries):
-        try:
-            response = retry_openai_call(
-                lambda: client.chat.completions.create(
-                    model=TEXT_MODEL,
-                    messages=[
-                        {"role": "system", "content": "You are an ACE engine object selector. Always return valid JSON only."},
-                        {"role": "user", "content": selection_prompt}
-                    ],
-                    temperature=0.8,
-                    response_format={"type": "json_object"}
-                ),
-                operation_name="object_selection"
-            )
-            
-            result = json.loads(response.choices[0].message.content.strip())
-            
-            # Validate fields exist
-            A = result.get("A", "").strip()
-            B = result.get("B", "").strip()
-            C_projection_description = result.get("C_projection_description", "").strip()
-            D_projection_description = result.get("D_projection_description", "").strip()
-            overlap_assessment = result.get("overlap_assessment", "").strip()
-            hybrid_mode = result.get("hybrid_mode", "SIDE_BY_SIDE").strip()
-            layout = result.get("layout", "SIDE_BY_SIDE")
-            background_classic_of_C = result.get("background_classic_of_C", "")
-            c_is_dominant = result.get("c_is_dominant", True)
-            
-            # Check if pair (A,B) is in forbidden pairs list
-            pair_key = create_pair_key(A, B)
-            if used_pairs_list and pair_key in used_pairs_list:
-                req_id_str = f" request_id={request_id}" if request_id else ""
-                logger.info(f"REJECTED_PAIR{req_id_str} key={pair_key} (A={A}, B={B})")
-                if retry_attempt < max_internal_retries - 1:
-                    logger.info(f"FORBIDDEN_PAIR_HIT retrying selector... attempt={retry_attempt + 1} forbidden_pair={pair_key}")
-                    continue  # Retry
-                else:
-                    logger.warning(f"FORBIDDEN_PAIR_HIT max retries reached, using pair anyway: A={A}, B={B}")
-            
-            # Validate overlap_assessment
-            if overlap_assessment not in ["NEAR_GEOMETRIC_OVERLAP", "ONLY_SIMILAR", "NO_SIMILARITY"]:
-                overlap_assessment = "ONLY_SIMILAR"  # Default to conservative
-            
-            # Validate hybrid_mode
-            if hybrid_mode not in ["PROJECTION_REPLACEMENT", "SIDE_BY_SIDE"]:
-                hybrid_mode = "SIDE_BY_SIDE"  # Default to conservative
-            
-            # Enforce layout based on overlap_assessment AND hybrid_mode
-            # HYBRID is ONLY allowed if BOTH conditions are met:
-            # 1. overlap_assessment == "NEAR_GEOMETRIC_OVERLAP"
-            # 2. hybrid_mode == "PROJECTION_REPLACEMENT"
-            if overlap_assessment == "NEAR_GEOMETRIC_OVERLAP" and hybrid_mode == "PROJECTION_REPLACEMENT":
-                layout = "HYBRID"
-            elif overlap_assessment == "ONLY_SIMILAR":
-                layout = "SIDE_BY_SIDE"
-                # Store as best result for fallback
-                if best_result is None:
-                    best_result = {
-                        "A": A,
-                        "B": B,
-                        "C_projection_description": C_projection_description,
-                        "D_projection_description": D_projection_description,
-                        "overlap_assessment": overlap_assessment,
-                        "hybrid_mode": hybrid_mode,
-                        "layout": layout,
-                        "background_classic_of_C": background_classic_of_C,
-                        "c_is_dominant": c_is_dominant
-                    }
-            elif overlap_assessment == "NO_SIMILARITY":
-                # Re-pick a new pair (retry)
-                if retry_attempt < max_internal_retries - 1:
-                    logger.info(f"NO_SIMILARITY retrying selector... attempt={retry_attempt + 1} A={A} B={B}")
-                    continue  # Retry to get a better pair
-                else:
-                    # Max retries reached - use best "ONLY_SIMILAR" result or fallback to SIDE_BY_SIDE
-                    if best_result:
-                        logger.info(f"NO_SIMILARITY max retries reached, using best ONLY_SIMILAR result")
-                        return best_result
-                    else:
-                        # No good result found, force SIDE_BY_SIDE
-                        layout = "SIDE_BY_SIDE"
-                        overlap_assessment = "ONLY_SIMILAR"
-            
-            # Validate layout matches overlap_assessment AND hybrid_mode
-            if layout == "HYBRID" and (overlap_assessment != "NEAR_GEOMETRIC_OVERLAP" or hybrid_mode != "PROJECTION_REPLACEMENT"):
-                layout = "SIDE_BY_SIDE"
-            
-            # Fallback if missing critical fields
-            if not A or not B:
-                A = "product object"
-                B = "complementary object"
-            
-            if not C_projection_description:
-                C_projection_description = "front view maximizing silhouette area"
-            if not D_projection_description:
-                D_projection_description = "front view maximizing silhouette area"
-            
-            # Log successful selection (A passed forbidden check or was not forbidden)
-            # Note: attempt number is not available here, will be logged in generate_image
-            
-            return {
-                "A": A,
-                "B": B,
-                "C_projection_description": C_projection_description,
-                "D_projection_description": D_projection_description,
-                "overlap_assessment": overlap_assessment,
-                "hybrid_mode": hybrid_mode,
-                "layout": layout,
-                "background_classic_of_C": background_classic_of_C,
-                "c_is_dominant": c_is_dominant
-            }
-        except Exception as e:
-            if retry_attempt < max_internal_retries - 1:
-                logger.warning(f"Warning: Object selection failed (retry {retry_attempt + 1}): {str(e)}")
-                continue
-            else:
-                # Fallback on error after all retries
-                logger.warning(f"Warning: Object selection failed after {max_internal_retries} retries: {str(e)}, using fallback")
-                if best_result:
-                    return best_result
-                return {
-                    "A": "product object",
-                    "B": "complementary object",
-                    "C_projection_description": "front view maximizing silhouette area",
-                    "D_projection_description": "front view maximizing silhouette area",
-                    "overlap_assessment": "ONLY_SIMILAR",
-                    "hybrid_mode": "SIDE_BY_SIDE",
-                    "layout": "SIDE_BY_SIDE",
-                    "background_classic_of_C": "natural background",
-                    "c_is_dominant": True
-                }
-    
-    # Should not reach here, but fallback
-    if best_result:
-        return best_result
-    return {
-        "A": "product object",
-        "B": "complementary object",
-        "C_projection_description": "front view maximizing silhouette area",
-        "D_projection_description": "front view maximizing silhouette area",
-        "overlap_assessment": "ONLY_SIMILAR",
-        "hybrid_mode": "SIDE_BY_SIDE",
-        "layout": "SIDE_BY_SIDE",
-        "background_classic_of_C": "natural background",
-        "c_is_dominant": True
-    }
+# NOTE: Old pick_two_objects function removed - Engine V2 only uses pick_two_objects_v2
+# The old function used V1 terminology ("HYBRID", "overlap_assessment") which is not compliant with V2.
+# V2 uses "PERFECT_HYBRID" and "overlap_class" (FULL_OVERLAP/SIMILAR_ONLY/NO_SIMILARITY).
 
 
 def derive_audience_v2(product_name, product_description):
@@ -749,12 +381,23 @@ Return ONLY the audience description, nothing else."""
         return f"Target audience for {product_name}"
 
 
-def generate_100_associations_v2(product_name, product_description, ad_goal, audience):
-    """Generate exactly 100 associations for the ad goal (Engine V2)."""
+def generate_associations_v2(product_name, product_description, ad_goal, audience, n=100):
+    """Generate exactly n associations for the ad goal (Engine V2).
+    
+    Args:
+        product_name: Product name
+        product_description: Product description
+        ad_goal: Advertising goal
+        audience: Target audience
+        n: Number of associations to generate (default 100, can be increased on retry)
+    
+    Returns:
+        List of exactly n associations
+    """
     if not client:
         raise ValueError("OpenAI API key not configured")
     
-    associations_prompt = f"""You are an ACE engine association generator. Generate EXACTLY 100 associations for an advertising goal.
+    associations_prompt = f"""You are an ACE engine association generator. Generate EXACTLY {n} associations for an advertising goal.
 
 Product Name: {product_name}
 Product Description: {product_description}
@@ -762,19 +405,19 @@ Advertising Goal: {ad_goal}
 Target Audience: {audience}
 
 Requirements:
-- Generate EXACTLY 100 associations (no more, no less)
+- Generate EXACTLY {n} associations (no more, no less)
 - Associations should be related to the product, ad goal, and audience
 - Return as a numbered list (1. association, 2. association, ...)
 - Each association should be a short phrase (1-5 words)
 
-Return ONLY the numbered list of 100 associations, nothing else."""
+Return ONLY the numbered list of {n} associations, nothing else."""
     
     try:
         response = retry_openai_call(
             lambda: client.chat.completions.create(
                 model=TEXT_MODEL,
                 messages=[
-                    {"role": "system", "content": "You are an ACE engine association generator. Always return exactly 100 associations."},
+                    {"role": "system", "content": f"You are an ACE engine association generator. Always return exactly {n} associations."},
                     {"role": "user", "content": associations_prompt}
                 ],
                 temperature=0.9,
@@ -795,29 +438,41 @@ Return ONLY the numbered list of 100 associations, nothing else."""
                 if clean_line:
                     associations.append(clean_line)
         
-        # Ensure we have exactly 100 (pad or truncate if needed)
-        if len(associations) < 100:
-            logger.warning(f"ASSOCIATIONS_V2: Only got {len(associations)} associations, padding to 100")
-            while len(associations) < 100:
+        # Ensure we have exactly n (pad or truncate if needed)
+        if len(associations) < n:
+            logger.warning(f"ASSOCIATIONS_V2: Only got {len(associations)} associations, padding to {n}")
+            while len(associations) < n:
                 associations.append(f"association_{len(associations) + 1}")
-        elif len(associations) > 100:
-            associations = associations[:100]
+        elif len(associations) > n:
+            associations = associations[:n]
         
-        logger.info(f"ASSOCIATIONS_V2: Generated {len(associations)} associations")
+        logger.info(f"ASSOCIATIONS_V2: Generated {len(associations)} associations (requested {n})")
         return associations
     except Exception as e:
         logger.warning(f"ASSOCIATIONS_V2 failed: {str(e)}, using fallback")
-        return [f"association_{i+1}" for i in range(100)]
+        return [f"association_{i+1}" for i in range(n)]
 
 
-def filter_to_physical_objects_v2(associations):
-    """Filter associations to physical objects that are photographable with classic backgrounds (Engine V2)."""
+def filter_to_physical_objects_v2(associations, strict_mode=False):
+    """Filter associations to physical objects that are photographable with classic backgrounds (Engine V2).
+    
+    Args:
+        associations: List of associations to filter
+        strict_mode: If True, use stricter filtering instructions to get at least 60 physical objects
+    
+    Returns:
+        List of physical objects
+    """
     if not client:
         raise ValueError("OpenAI API key not configured")
     
+    strict_instruction = ""
+    if strict_mode:
+        strict_instruction = "\n\nCRITICAL: You MUST return at least 60 physical objects. Be more lenient in filtering - include borderline cases that are still physical objects."
+    
     filter_prompt = f"""You are an ACE engine object filter. Filter associations to physical objects only.
 
-Associations (100 total):
+Associations ({len(associations)} total):
 {chr(10).join(f"{i+1}. {assoc}" for i, assoc in enumerate(associations))}
 
 Requirements:
@@ -827,6 +482,7 @@ Requirements:
 - Objects must have a classic natural background (e.g., book on desk, tree in forest, cup on table)
 - Do NOT include objects with text/logos/letters/numbers/external graphics (unless inherent like playing cards, dice dots, engraved compass letters)
 - Return only the physical objects that pass the filter
+{strict_instruction}
 
 Return as a numbered list of physical objects only (no explanations)."""
     
@@ -854,7 +510,7 @@ Return as a numbered list of physical objects only (no explanations)."""
                 if clean_line:
                     physical_objects.append(clean_line)
         
-        logger.info(f"PHYSICAL_OBJECTS_V2: Filtered to {len(physical_objects)} objects")
+        logger.info(f"PHYSICAL_OBJECTS_V2: Filtered to {len(physical_objects)} objects (strict_mode={strict_mode})")
         return physical_objects
     except Exception as e:
         logger.warning(f"PHYSICAL_OBJECTS_V2 failed: {str(e)}, using first 20 associations as fallback")
@@ -888,10 +544,28 @@ def pick_two_objects_v2(product_name, product_description, headline, ad_goal, us
     audience = derive_audience_v2(product_name, product_description)
     
     # Step 2: Generate exactly num_associations associations
-    associations = generate_100_associations_v2(product_name, product_description, ad_goal, audience)
+    associations = generate_associations_v2(product_name, product_description, ad_goal, audience, num_associations)
     
-    # Step 3: Filter to physical objects
-    physical_objects = filter_to_physical_objects_v2(associations)
+    # Step 3: Filter to physical objects (with robustness: retry if < 40)
+    physical_objects = filter_to_physical_objects_v2(associations, strict_mode=False)
+    
+    # Robustness: If filtered < 40, re-run with stricter instruction
+    if len(physical_objects) < 40:
+        logger.warning(f"PHYSICAL_OBJECTS_V2: Only {len(physical_objects)} objects (< 40), retrying with strict mode")
+        physical_objects = filter_to_physical_objects_v2(associations, strict_mode=True)
+        
+        # If still < 40 after strict mode, regenerate associations and filter again (up to 2 cycles)
+        if len(physical_objects) < 40:
+            logger.warning(f"PHYSICAL_OBJECTS_V2: Still only {len(physical_objects)} objects after strict mode, regenerating associations")
+            # Regenerate associations and filter again (one cycle)
+            associations = generate_associations_v2(product_name, product_description, ad_goal, audience, num_associations)
+            physical_objects = filter_to_physical_objects_v2(associations, strict_mode=True)
+            
+            # If still < 40, one more cycle
+            if len(physical_objects) < 40:
+                logger.warning(f"PHYSICAL_OBJECTS_V2: Still only {len(physical_objects)} objects after regeneration, one more cycle")
+                associations = generate_associations_v2(product_name, product_description, ad_goal, audience, num_associations)
+                physical_objects = filter_to_physical_objects_v2(associations, strict_mode=True)
     
     if len(physical_objects) < 2:
         logger.warning(f"PHYSICAL_OBJECTS_V2: Only {len(physical_objects)} objects, using fallback")
@@ -937,11 +611,12 @@ Geometric Overlap Assessment (CRITICAL - V2):
 Compare the simplified shapes E (from C) and F (from D) after permitted adjustments (scale/angle/proportion without distortion).
 - "FULL_OVERLAP": E and F can achieve FULL geometric overlap - the projection silhouettes are nearly identical after permitted adjustments. This is clear and immediate to an average human eye. The final image would show ONE projection only (single object).
 - "SIMILAR_ONLY": E and F are similar but NOT full overlap - they share shape similarity but cannot achieve full geometric overlap even with adjustments. The final image would show TWO separate projections.
-- "NO_SIMILARITY": E and F have no clear shape similarity - an average human eye would not see them as similar.
+- "NO_SIMILARITY": E and F have no clear shape similarity - an average human eye would not see them as similar. CRITICAL: NO_SIMILARITY pairs are INVALID and must NOT be returned as final. If you assess NO_SIMILARITY, you must select a different pair (A,B) from the list.
 
 Layout Decision (V2):
 - layout = "PERFECT_HYBRID" ONLY if overlap_class == "FULL_OVERLAP"
-- layout = "SIDE_BY_SIDE" if overlap_class == "SIMILAR_ONLY" or "NO_SIMILARITY"
+- layout = "SIDE_BY_SIDE" ONLY if overlap_class == "SIMILAR_ONLY"
+- NEVER return overlap_class == "NO_SIMILARITY" as a final result - it is INVALID. If you assess NO_SIMILARITY, you must select a different pair.
 - PERFECT_HYBRID means: the final image shows ONE projection only (single object). The other contributes only background/environment/context and must not appear as a separate object.
 - SIDE_BY_SIDE means: the final image shows TWO separate objects/projections, no fusion/overlap/hybridization.
 
@@ -1026,19 +701,19 @@ Do not include any explanation or other text."""
                         "c_is_dominant": c_is_dominant
                     }
             elif overlap_class == "NO_SIMILARITY":
-                # Re-pick a new pair (retry)
+                # NO_SIMILARITY is INVALID - must reject and repick (never return as SIDE_BY_SIDE)
                 if retry_attempt < max_internal_retries - 1:
-                    logger.info(f"NO_SIMILARITY_V2 retrying selector... attempt={retry_attempt + 1} A={A} B={B}")
+                    logger.info(f"NO_SIMILARITY_V2 INVALID - retrying selector... attempt={retry_attempt + 1} A={A} B={B}")
                     continue  # Retry to get a better pair
                 else:
-                    # Max retries reached - use best "SIMILAR_ONLY" result or fallback
+                    # Max retries reached - use best "SIMILAR_ONLY" result if available
                     if best_similar_result:
                         logger.info(f"NO_SIMILARITY_V2 max retries reached, using best SIMILAR_ONLY result")
                         return best_similar_result
                     else:
-                        # No good result found, force SIDE_BY_SIDE
-                        layout = "SIDE_BY_SIDE"
-                        overlap_class = "SIMILAR_ONLY"
+                        # No good result found - raise error to trigger association regeneration
+                        logger.warning(f"NO_SIMILARITY_V2 max retries reached with no valid SIMILAR_ONLY result - will trigger association regeneration")
+                        raise ValueError("NO_SIMILARITY pair selected after max retries - need to regenerate associations")
             
             # Validate layout matches overlap_class
             if layout == "PERFECT_HYBRID" and overlap_class != "FULL_OVERLAP":
@@ -1223,12 +898,52 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
     
     # Step 1: Pick two objects using V2 engine logic (100 associations -> filter -> select A/B with overlap_class)
     # Handle retry with +10 associations for NO_SIMILARITY (V2 policy)
+    # For attempt==2, add FULL_OVERLAP search loop (up to 12 tries)
     num_associations = 100
     max_association_retries = 3  # Max 3 retries with +10 associations each
+    objects = None
     
-    for assoc_retry in range(max_association_retries):
-        try:
-            objects = pick_two_objects_v2(product_name, product_description, headline, ad_goal, used_pairs_list, attempt, request_id, num_associations)
+    # For attempt==2, do a FULL_OVERLAP search loop (up to 12 tries)
+    if attempt == 2:
+        max_hybrid_search_tries = 12
+        best_similar_result = None  # Store best SIMILAR_ONLY result as fallback
+        
+        logger.info(f"HYBRID_SEARCH_V2 attempt=2 starting search for FULL_OVERLAP (max {max_hybrid_search_tries} tries) request_id={request_id}")
+        
+        for search_try in range(max_hybrid_search_tries):
+            try:
+                # Call pick_two_objects_v2 - it will handle association generation and filtering internally
+                temp_objects = pick_two_objects_v2(product_name, product_description, headline, ad_goal, used_pairs_list, attempt, request_id, num_associations)
+                overlap_class = temp_objects.get("overlap_class", "")
+                
+                logger.info(f"HYBRID_SEARCH_V2 attempt=2 try={search_try + 1} overlap_class={overlap_class} A={temp_objects.get('A', '')} B={temp_objects.get('B', '')}")
+                
+                # Check if we found FULL_OVERLAP
+                if overlap_class == "FULL_OVERLAP":
+                    # Found a valid PERFECT_HYBRID candidate!
+                    objects = temp_objects
+                    objects["layout"] = "PERFECT_HYBRID"
+                    logger.info(f"HYBRID_FOUND_V2 attempt=2 try={search_try + 1} A={objects['A']} B={objects['B']} overlap_class={overlap_class}")
+                    break
+                else:
+                    # Not a PERFECT_HYBRID candidate, but might be a good SIDE_BY_SIDE fallback
+                    if overlap_class == "SIMILAR_ONLY" and best_similar_result is None:
+                        best_similar_result = temp_objects
+                        best_similar_result["layout"] = "SIDE_BY_SIDE"
+                    
+                    # Continue searching
+                    continue
+                    
+            except ValueError as e:
+                # NO_SIMILARITY error - continue searching
+                logger.info(f"HYBRID_SEARCH_V2 attempt=2 try={search_try + 1} NO_SIMILARITY, continuing search")
+                continue
+            except Exception as e:
+                logger.warning(f"HYBRID_SEARCH_V2 attempt=2 try={search_try + 1} error: {str(e)}, continuing search")
+                continue  # Continue searching on error
+        
+        # If we found FULL_OVERLAP, use it
+        if objects is not None:
             A = objects["A"]
             B = objects["B"]
             C_projection_description = objects["C_projection_description"]
@@ -1237,33 +952,28 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
             layout = objects["layout"]
             background_classic_of_C = objects["background_classic_of_C"]
             c_is_dominant = objects.get("c_is_dominant", True)
-            
-            # If we got NO_SIMILARITY and haven't exhausted retries, increase associations and retry
-            if overlap_class == "NO_SIMILARITY" and assoc_retry < max_association_retries - 1:
-                num_associations += 10
-                logger.info(f"NO_SIMILARITY_V2 retrying with +10 associations (now {num_associations}) attempt={assoc_retry + 1}")
-                continue
-            
-            # Success - break out of retry loop
-            break
-        except Exception as e:
-            if assoc_retry < max_association_retries - 1:
-                num_associations += 10
-                logger.warning(f"Object selection V2 failed (retry {assoc_retry + 1}): {str(e)}, increasing associations to {num_associations}")
-                continue
-            else:
-                # Final fallback
-                logger.warning(f"Object selection V2 failed after {max_association_retries} retries: {str(e)}, using fallback")
-                objects = {
-                    "A": "product object",
-                    "B": "complementary object",
-                    "C_projection_description": "front view maximizing silhouette area (largest silhouette, clean)",
-                    "D_projection_description": "front view maximizing silhouette area (largest silhouette, clean)",
-                    "overlap_class": "SIMILAR_ONLY",
-                    "layout": "SIDE_BY_SIDE",
-                    "background_classic_of_C": "natural background",
-                    "c_is_dominant": True
-                }
+        elif best_similar_result is not None:
+            # Fallback to best SIMILAR_ONLY result
+            logger.info(f"HYBRID_NOT_FOUND_V2 attempt=2 fallback SIDE_BY_SIDE A={best_similar_result['A']} B={best_similar_result['B']}")
+            objects = best_similar_result
+            A = objects["A"]
+            B = objects["B"]
+            C_projection_description = objects["C_projection_description"]
+            D_projection_description = objects["D_projection_description"]
+            overlap_class = objects["overlap_class"]
+            layout = objects["layout"]
+            background_classic_of_C = objects["background_classic_of_C"]
+            c_is_dominant = objects.get("c_is_dominant", True)
+        else:
+            # No valid result found, fall through to normal retry logic
+            logger.warning(f"HYBRID_NOT_FOUND_V2 attempt=2 no valid result found, using normal retry logic")
+            objects = None
+    
+    # Normal retry logic (for attempts 1, 3, or if attempt 2 search failed)
+    if objects is None:
+        for assoc_retry in range(max_association_retries):
+            try:
+                objects = pick_two_objects_v2(product_name, product_description, headline, ad_goal, used_pairs_list, attempt, request_id, num_associations)
                 A = objects["A"]
                 B = objects["B"]
                 C_projection_description = objects["C_projection_description"]
@@ -1272,6 +982,68 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
                 layout = objects["layout"]
                 background_classic_of_C = objects["background_classic_of_C"]
                 c_is_dominant = objects.get("c_is_dominant", True)
+                
+                # If we got NO_SIMILARITY and haven't exhausted retries, increase associations and retry
+                if overlap_class == "NO_SIMILARITY" and assoc_retry < max_association_retries - 1:
+                    num_associations += 10
+                    logger.info(f"NO_SIMILARITY_V2 retrying with +10 associations (now {num_associations}) attempt={assoc_retry + 1}")
+                    continue
+                
+                # Success - break out of retry loop
+                break
+            except ValueError as e:
+                # This is the NO_SIMILARITY error from pick_two_objects_v2 - trigger association regeneration
+                if assoc_retry < max_association_retries - 1:
+                    num_associations += 10
+                    logger.info(f"NO_SIMILARITY_V2 triggering association regeneration (now {num_associations}) attempt={assoc_retry + 1}")
+                    continue
+                else:
+                    # Final fallback
+                    logger.warning(f"Object selection V2 failed after {max_association_retries} retries: {str(e)}, using fallback")
+                    objects = {
+                        "A": "product object",
+                        "B": "complementary object",
+                        "C_projection_description": "front view maximizing silhouette area (largest silhouette, clean)",
+                        "D_projection_description": "front view maximizing silhouette area (largest silhouette, clean)",
+                        "overlap_class": "SIMILAR_ONLY",
+                        "layout": "SIDE_BY_SIDE",
+                        "background_classic_of_C": "natural background",
+                        "c_is_dominant": True
+                    }
+                    A = objects["A"]
+                    B = objects["B"]
+                    C_projection_description = objects["C_projection_description"]
+                    D_projection_description = objects["D_projection_description"]
+                    overlap_class = objects["overlap_class"]
+                    layout = objects["layout"]
+                    background_classic_of_C = objects["background_classic_of_C"]
+                    c_is_dominant = objects.get("c_is_dominant", True)
+            except Exception as e:
+                if assoc_retry < max_association_retries - 1:
+                    num_associations += 10
+                    logger.warning(f"Object selection V2 failed (retry {assoc_retry + 1}): {str(e)}, increasing associations to {num_associations}")
+                    continue
+                else:
+                    # Final fallback
+                    logger.warning(f"Object selection V2 failed after {max_association_retries} retries: {str(e)}, using fallback")
+                    objects = {
+                        "A": "product object",
+                        "B": "complementary object",
+                        "C_projection_description": "front view maximizing silhouette area (largest silhouette, clean)",
+                        "D_projection_description": "front view maximizing silhouette area (largest silhouette, clean)",
+                        "overlap_class": "SIMILAR_ONLY",
+                        "layout": "SIDE_BY_SIDE",
+                        "background_classic_of_C": "natural background",
+                        "c_is_dominant": True
+                    }
+                    A = objects["A"]
+                    B = objects["B"]
+                    C_projection_description = objects["C_projection_description"]
+                    D_projection_description = objects["D_projection_description"]
+                    overlap_class = objects["overlap_class"]
+                    layout = objects["layout"]
+                    background_classic_of_C = objects["background_classic_of_C"]
+                    c_is_dominant = objects.get("c_is_dominant", True)
     
     # Log successful selection of pair for this attempt
     pair_key = create_pair_key(A, B)
