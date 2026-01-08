@@ -639,7 +639,6 @@ Return ONLY valid JSON with these exact keys:
 Do not include any explanation or other text."""
     
     max_internal_retries = 6
-    best_similar_result = None  # Store best "SIMILAR_ONLY" result as fallback
     
     for retry_attempt in range(max_internal_retries):
         try:
@@ -668,6 +667,21 @@ Do not include any explanation or other text."""
             background_classic_of_C = result.get("background_classic_of_C", "")
             c_is_dominant = result.get("c_is_dominant", True)
             
+            # Validate required fields
+            if not A or not B:
+                if retry_attempt < max_internal_retries - 1:
+                    logger.warning(f"Object selection V2: Missing A or B, retrying... attempt={retry_attempt + 1}")
+                    continue
+                else:
+                    raise ValueError("Object selection V2: Missing required fields A or B after max retries")
+            
+            if not C_projection_description or not D_projection_description:
+                if retry_attempt < max_internal_retries - 1:
+                    logger.warning(f"Object selection V2: Missing projection descriptions, retrying... attempt={retry_attempt + 1}")
+                    continue
+                else:
+                    raise ValueError("Object selection V2: Missing projection descriptions after max retries")
+            
             # Check if pair (A,B) is in forbidden pairs list
             pair_key = create_pair_key(A, B)
             if used_pairs_list and pair_key in used_pairs_list:
@@ -677,59 +691,47 @@ Do not include any explanation or other text."""
                     logger.info(f"FORBIDDEN_PAIR_HIT_V2 retrying selector... attempt={retry_attempt + 1} forbidden_pair={pair_key}")
                     continue  # Retry
                 else:
-                    logger.warning(f"FORBIDDEN_PAIR_HIT_V2 max retries reached, using pair anyway: A={A}, B={B}")
+                    raise ValueError(f"Object selection V2: Forbidden pair selected after max retries: {pair_key}")
             
-            # Validate overlap_class
+            # Validate overlap_class - must be one of the allowed values
             if overlap_class not in ["FULL_OVERLAP", "SIMILAR_ONLY", "NO_SIMILARITY"]:
-                overlap_class = "SIMILAR_ONLY"  # Default to conservative
+                if retry_attempt < max_internal_retries - 1:
+                    logger.warning(f"Object selection V2: Invalid overlap_class '{overlap_class}', retrying... attempt={retry_attempt + 1}")
+                    continue
+                else:
+                    raise ValueError(f"Object selection V2: Invalid overlap_class '{overlap_class}' after max retries")
             
-            # Enforce layout based on overlap_class (V2)
+            # Enforce layout based on overlap_class (V2 - HARD CONSTRAINT)
             if overlap_class == "FULL_OVERLAP":
                 layout = "PERFECT_HYBRID"
             elif overlap_class == "SIMILAR_ONLY":
                 layout = "SIDE_BY_SIDE"
-                # Store as best result for fallback
-                if best_similar_result is None:
-                    best_similar_result = {
-                        "A": A,
-                        "B": B,
-                        "C_projection_description": C_projection_description,
-                        "D_projection_description": D_projection_description,
-                        "overlap_class": overlap_class,
-                        "layout": layout,
-                        "background_classic_of_C": background_classic_of_C,
-                        "c_is_dominant": c_is_dominant
-                    }
             elif overlap_class == "NO_SIMILARITY":
-                # NO_SIMILARITY is INVALID - must reject and repick (never return as SIDE_BY_SIDE)
+                # NO_SIMILARITY is FORBIDDEN - must reject and repick (never return)
                 if retry_attempt < max_internal_retries - 1:
                     logger.info(f"NO_SIMILARITY_V2 INVALID - retrying selector... attempt={retry_attempt + 1} A={A} B={B}")
-                    continue  # Retry to get a better pair
+                    continue  # Retry to get a valid pair
                 else:
-                    # Max retries reached - use best "SIMILAR_ONLY" result if available
-                    if best_similar_result:
-                        logger.info(f"NO_SIMILARITY_V2 max retries reached, using best SIMILAR_ONLY result")
-                        return best_similar_result
-                    else:
-                        # No good result found - raise error to trigger association regeneration
-                        logger.warning(f"NO_SIMILARITY_V2 max retries reached with no valid SIMILAR_ONLY result - will trigger association regeneration")
-                        raise ValueError("NO_SIMILARITY pair selected after max retries - need to regenerate associations")
+                    # Max retries reached - raise error to trigger association regeneration
+                    logger.warning(f"NO_SIMILARITY_V2 max retries reached - will trigger association regeneration")
+                    raise ValueError("NO_SIMILARITY pair selected after max retries - need to regenerate associations")
             
-            # Validate layout matches overlap_class
+            # Validate layout matches overlap_class (HARD CONSTRAINT)
             if layout == "PERFECT_HYBRID" and overlap_class != "FULL_OVERLAP":
-                layout = "SIDE_BY_SIDE"
+                if retry_attempt < max_internal_retries - 1:
+                    logger.warning(f"Object selection V2: Layout mismatch (PERFECT_HYBRID without FULL_OVERLAP), retrying... attempt={retry_attempt + 1}")
+                    continue
+                else:
+                    raise ValueError("Object selection V2: Layout mismatch (PERFECT_HYBRID without FULL_OVERLAP) after max retries")
             
-            # Fallback if missing critical fields
-            if not A or not B:
-                A = "product object"
-                B = "complementary object"
+            if layout == "SIDE_BY_SIDE" and overlap_class != "SIMILAR_ONLY":
+                if retry_attempt < max_internal_retries - 1:
+                    logger.warning(f"Object selection V2: Layout mismatch (SIDE_BY_SIDE without SIMILAR_ONLY), retrying... attempt={retry_attempt + 1}")
+                    continue
+                else:
+                    raise ValueError("Object selection V2: Layout mismatch (SIDE_BY_SIDE without SIMILAR_ONLY) after max retries")
             
-            if not C_projection_description:
-                C_projection_description = "front view maximizing silhouette area (largest silhouette, clean)"
-            if not D_projection_description:
-                D_projection_description = "front view maximizing silhouette area (largest silhouette, clean)"
-            
-            # Return successful selection
+            # Return successful selection (only FULL_OVERLAP or SIMILAR_ONLY)
             return {
                 "A": A,
                 "B": B,
@@ -740,39 +742,24 @@ Do not include any explanation or other text."""
                 "background_classic_of_C": background_classic_of_C,
                 "c_is_dominant": c_is_dominant
             }
-        except Exception as e:
+        except ValueError as e:
+            # Re-raise ValueError (NO_SIMILARITY, validation errors) to trigger regeneration
             if retry_attempt < max_internal_retries - 1:
-                logger.warning(f"Warning: Object selection V2 failed (retry {retry_attempt + 1}): {str(e)}")
+                logger.warning(f"Object selection V2 failed (retry {retry_attempt + 1}): {str(e)}")
                 continue
             else:
-                # Fallback on error after all retries
-                logger.warning(f"Warning: Object selection V2 failed after {max_internal_retries} retries: {str(e)}, using fallback")
-                if best_similar_result:
-                    return best_similar_result
-                return {
-                    "A": "product object",
-                    "B": "complementary object",
-                    "C_projection_description": "front view maximizing silhouette area (largest silhouette, clean)",
-                    "D_projection_description": "front view maximizing silhouette area (largest silhouette, clean)",
-                    "overlap_class": "SIMILAR_ONLY",
-                    "layout": "SIDE_BY_SIDE",
-                    "background_classic_of_C": "natural background",
-                    "c_is_dominant": True
-                }
+                # Max retries reached - propagate error to trigger association regeneration
+                raise
+        except Exception as e:
+            if retry_attempt < max_internal_retries - 1:
+                logger.warning(f"Object selection V2 failed (retry {retry_attempt + 1}): {str(e)}")
+                continue
+            else:
+                # Max retries reached - raise error to trigger association regeneration
+                raise ValueError(f"Object selection V2 failed after {max_internal_retries} retries: {str(e)}")
     
-    # Should not reach here, but fallback
-    if best_similar_result:
-        return best_similar_result
-    return {
-        "A": "product object",
-        "B": "complementary object",
-        "C_projection_description": "front view maximizing silhouette area (largest silhouette, clean)",
-        "D_projection_description": "front view maximizing silhouette area (largest silhouette, clean)",
-        "overlap_class": "SIMILAR_ONLY",
-        "layout": "SIDE_BY_SIDE",
-        "background_classic_of_C": "natural background",
-        "c_is_dominant": True
-    }
+    # Should not reach here, but if we do, raise error
+    raise ValueError("Object selection V2: Max retries reached without valid result")
 
 
 def build_image_prompt_v2(product_name, product_description, headline, A, B, C_projection_description, D_projection_description, layout, background_classic_of_C, ad_size):
@@ -906,7 +893,6 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
     # For attempt==2, do a FULL_OVERLAP search loop (up to 12 tries)
     if attempt == 2:
         max_hybrid_search_tries = 12
-        best_similar_result = None  # Store best SIMILAR_ONLY result as fallback
         
         logger.info(f"HYBRID_SEARCH_V2 attempt=2 starting search for FULL_OVERLAP (max {max_hybrid_search_tries} tries) request_id={request_id}")
         
@@ -925,25 +911,28 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
                     objects["layout"] = "PERFECT_HYBRID"
                     logger.info(f"HYBRID_FOUND_V2 attempt=2 try={search_try + 1} A={objects['A']} B={objects['B']} overlap_class={overlap_class}")
                     break
+                elif overlap_class == "SIMILAR_ONLY":
+                    # Valid SIDE_BY_SIDE candidate, but continue searching for FULL_OVERLAP
+                    # Store it temporarily but keep searching
+                    if objects is None:
+                        objects = temp_objects
+                        objects["layout"] = "SIDE_BY_SIDE"
+                    continue
                 else:
-                    # Not a PERFECT_HYBRID candidate, but might be a good SIDE_BY_SIDE fallback
-                    if overlap_class == "SIMILAR_ONLY" and best_similar_result is None:
-                        best_similar_result = temp_objects
-                        best_similar_result["layout"] = "SIDE_BY_SIDE"
-                    
-                    # Continue searching
+                    # NO_SIMILARITY or invalid - continue searching
+                    logger.info(f"HYBRID_SEARCH_V2 attempt=2 try={search_try + 1} overlap_class={overlap_class} (invalid), continuing search")
                     continue
                     
             except ValueError as e:
-                # NO_SIMILARITY error - continue searching
-                logger.info(f"HYBRID_SEARCH_V2 attempt=2 try={search_try + 1} NO_SIMILARITY, continuing search")
+                # NO_SIMILARITY error or validation error - continue searching
+                logger.info(f"HYBRID_SEARCH_V2 attempt=2 try={search_try + 1} error: {str(e)}, continuing search")
                 continue
             except Exception as e:
                 logger.warning(f"HYBRID_SEARCH_V2 attempt=2 try={search_try + 1} error: {str(e)}, continuing search")
                 continue  # Continue searching on error
         
         # If we found FULL_OVERLAP, use it
-        if objects is not None:
+        if objects is not None and objects.get("overlap_class") == "FULL_OVERLAP":
             A = objects["A"]
             B = objects["B"]
             C_projection_description = objects["C_projection_description"]
@@ -952,10 +941,9 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
             layout = objects["layout"]
             background_classic_of_C = objects["background_classic_of_C"]
             c_is_dominant = objects.get("c_is_dominant", True)
-        elif best_similar_result is not None:
-            # Fallback to best SIMILAR_ONLY result
-            logger.info(f"HYBRID_NOT_FOUND_V2 attempt=2 fallback SIDE_BY_SIDE A={best_similar_result['A']} B={best_similar_result['B']}")
-            objects = best_similar_result
+        elif objects is not None and objects.get("overlap_class") == "SIMILAR_ONLY":
+            # Found valid SIDE_BY_SIDE (but not PERFECT_HYBRID)
+            logger.info(f"HYBRID_NOT_FOUND_V2 attempt=2 found valid SIDE_BY_SIDE A={objects['A']} B={objects['B']}")
             A = objects["A"]
             B = objects["B"]
             C_projection_description = objects["C_projection_description"]
@@ -983,67 +971,37 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
                 background_classic_of_C = objects["background_classic_of_C"]
                 c_is_dominant = objects.get("c_is_dominant", True)
                 
-                # If we got NO_SIMILARITY and haven't exhausted retries, increase associations and retry
-                if overlap_class == "NO_SIMILARITY" and assoc_retry < max_association_retries - 1:
-                    num_associations += 10
-                    logger.info(f"NO_SIMILARITY_V2 retrying with +10 associations (now {num_associations}) attempt={assoc_retry + 1}")
-                    continue
+                # Validate overlap_class is valid (FULL_OVERLAP or SIMILAR_ONLY only)
+                if overlap_class not in ["FULL_OVERLAP", "SIMILAR_ONLY"]:
+                    # NO_SIMILARITY or invalid - increase associations and retry
+                    if assoc_retry < max_association_retries - 1:
+                        num_associations += 10
+                        logger.info(f"NO_SIMILARITY_V2 retrying with +10 associations (now {num_associations}) attempt={assoc_retry + 1}")
+                        continue
+                    else:
+                        raise ValueError(f"Object selection V2: Invalid overlap_class '{overlap_class}' after max retries")
                 
                 # Success - break out of retry loop
                 break
             except ValueError as e:
-                # This is the NO_SIMILARITY error from pick_two_objects_v2 - trigger association regeneration
+                # This is the NO_SIMILARITY error or validation error from pick_two_objects_v2 - trigger association regeneration
                 if assoc_retry < max_association_retries - 1:
                     num_associations += 10
                     logger.info(f"NO_SIMILARITY_V2 triggering association regeneration (now {num_associations}) attempt={assoc_retry + 1}")
                     continue
                 else:
-                    # Final fallback
-                    logger.warning(f"Object selection V2 failed after {max_association_retries} retries: {str(e)}, using fallback")
-                    objects = {
-                        "A": "product object",
-                        "B": "complementary object",
-                        "C_projection_description": "front view maximizing silhouette area (largest silhouette, clean)",
-                        "D_projection_description": "front view maximizing silhouette area (largest silhouette, clean)",
-                        "overlap_class": "SIMILAR_ONLY",
-                        "layout": "SIDE_BY_SIDE",
-                        "background_classic_of_C": "natural background",
-                        "c_is_dominant": True
-                    }
-                    A = objects["A"]
-                    B = objects["B"]
-                    C_projection_description = objects["C_projection_description"]
-                    D_projection_description = objects["D_projection_description"]
-                    overlap_class = objects["overlap_class"]
-                    layout = objects["layout"]
-                    background_classic_of_C = objects["background_classic_of_C"]
-                    c_is_dominant = objects.get("c_is_dominant", True)
+                    # Max retries reached - raise error (will be caught as retryable)
+                    logger.warning(f"Object selection V2 failed after {max_association_retries} retries: {str(e)}")
+                    raise RetryableError(f"Object selection failed after {max_association_retries} retries: {str(e)}", 503)
             except Exception as e:
                 if assoc_retry < max_association_retries - 1:
                     num_associations += 10
                     logger.warning(f"Object selection V2 failed (retry {assoc_retry + 1}): {str(e)}, increasing associations to {num_associations}")
                     continue
                 else:
-                    # Final fallback
-                    logger.warning(f"Object selection V2 failed after {max_association_retries} retries: {str(e)}, using fallback")
-                    objects = {
-                        "A": "product object",
-                        "B": "complementary object",
-                        "C_projection_description": "front view maximizing silhouette area (largest silhouette, clean)",
-                        "D_projection_description": "front view maximizing silhouette area (largest silhouette, clean)",
-                        "overlap_class": "SIMILAR_ONLY",
-                        "layout": "SIDE_BY_SIDE",
-                        "background_classic_of_C": "natural background",
-                        "c_is_dominant": True
-                    }
-                    A = objects["A"]
-                    B = objects["B"]
-                    C_projection_description = objects["C_projection_description"]
-                    D_projection_description = objects["D_projection_description"]
-                    overlap_class = objects["overlap_class"]
-                    layout = objects["layout"]
-                    background_classic_of_C = objects["background_classic_of_C"]
-                    c_is_dominant = objects.get("c_is_dominant", True)
+                    # Max retries reached - raise error (will be caught as retryable)
+                    logger.warning(f"Object selection V2 failed after {max_association_retries} retries: {str(e)}")
+                    raise RetryableError(f"Object selection failed after {max_association_retries} retries: {str(e)}", 503)
     
     # Log successful selection of pair for this attempt
     pair_key = create_pair_key(A, B)
