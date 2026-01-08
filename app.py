@@ -839,6 +839,25 @@ MUTUALLY-EXCLUSIVE RULE FOR SIDE_BY_SIDE (CRITICAL):
 - If the image shows ANY fusion or hybrid appearance, it is INVALID.
 - INVALID if only one object is visible. Both A and B must be visible."""
     
+    # Build background motifs section based on layout
+    if layout == "PERFECT_HYBRID":
+        background_motifs_section = f"""BACKGROUND MOTIFS RULE (PERFECT_HYBRID ONLY - STRENGTHEN HIDDEN OBJECT PRESENCE):
+- Object A ({A}) contributes background/environment/context (it is the hidden object in this PERFECT_HYBRID).
+- The background MUST include 2-4 subtle contextual motifs from Object A ({A})'s classic environment.
+- These motifs should be: same category items, props, or textures that naturally belong to {A}'s environment.
+- Motifs must be realistic, non-distracting, and often slightly out of focus (part of the environment, not the main focus).
+- Motifs should blend naturally into the background and enhance the sense that this is {A}'s classic environment.
+- CRITICAL: These motifs are part of the background/environment ONLY - they must NOT be Object A ({A}) itself as a separate, clearly visible object.
+- CRITICAL: Object A ({A}) itself must NOT appear as a separate object - only its environmental motifs in the background.
+- The motifs should be subtle enough that they do not distract from the single visible hybrid object.
+- Examples: if {A} is a book, motifs might be other books, a reading lamp, a bookmark (subtle, in background); if {A} is a tree, motifs might be other trees, leaves, branches (subtle, in background).
+- Keep motifs realistic and integrated into the natural background composition."""
+    else:  # SIDE_BY_SIDE
+        background_motifs_section = f"""BACKGROUND SIMPLICITY RULE (SIDE_BY_SIDE ONLY):
+- For SIDE_BY_SIDE layout, keep the background simple and clean.
+- Do NOT add extra motifs or props beyond the classic background of Object A ({A}).
+- Focus on the two separate objects - background should not distract."""
+    
     image_prompt = f"""YOU ARE A PROFESSIONAL ADVERTISING PHOTOGRAPHER (ACE Engine V2).
 YOU MUST FOLLOW ALL RULES BELOW. NO EXCEPTIONS.
 
@@ -858,6 +877,8 @@ BACKGROUND AND LIGHTING RULE (CRITICAL - ENGINE V2):
 - NEVER use studio backgrounds, black backgrounds, gradients, or abstract scenes.
 - The entire scene's lighting, texture, and composition must be determined by C only.
 
+{background_motifs_section}
+
 STYLE RULES (Engine V2 - 07H):
 - Ultra-realistic photography ONLY.
 - Looks like a real camera photograph.
@@ -871,6 +892,7 @@ HEADLINE RULES (INSIDE IMAGE - Engine V2 - 06H):
 - Headline must be 3-7 words, includes product name "{product_name}", original promise (not quote/description).
 - Place headline near/above/below silhouettes, NEVER on them.
 - The headline must be placed on the background area (on A's background), NEVER on top of the projections.
+- CRITICAL: No text anywhere in the image except the headline. No labels, no logos, no packaging text, no other text elements.
 
 SAFE MARGIN RULE (CRITICAL - PREVENTS CLIPPING):
 - ALL text (the headline) MUST be positioned at least 8-12% away from EVERY edge of the canvas.
