@@ -582,8 +582,12 @@ def pick_two_objects_v2(product_name, product_description, headline, ad_goal, us
         if readable_pairs:
             forbidden_pairs_text = f"\n\nCRITICAL: The following object pairs have already been used in previous attempts in this session and MUST NOT be selected (in any order): {', '.join(readable_pairs)}\nYou MUST select a DIFFERENT pair (A,B) that is NOT in this list."
     
-    # Step 4: Select A and B from physical objects with overlap assessment
-    selection_prompt = f"""You are an ACE engine V2 object selector. Select two physical objects from the provided list with strict geometric overlap assessment.
+    # Step 4: Select A and B from physical objects with strict silhouette dominance assessment
+    # CRITICAL: Pairing decisions MUST be based on abstract geometric silhouette comparison only
+    # Ignore texture, color, meaning, symbolism, theme, aesthetics, visual harmony, conceptual similarity
+    logger.info(f"SILHOUETTE_DOMINANCE_ENFORCED request_id={request_id if request_id else 'N/A'} attempt={attempt if attempt else 'N/A'}")
+    
+    selection_prompt = f"""You are an ACE engine V2 object selector. Select two physical objects from the provided list with STRICT SILHOUETTE DOMINANCE assessment.
 
 Product Name: {product_name}
 Product Description: {product_description}
@@ -595,11 +599,16 @@ Physical Objects List ({len(physical_objects)} objects):
 {chr(10).join(f"{i+1}. {obj}" for i, obj in enumerate(physical_objects))}
 {forbidden_pairs_text}
 
-Selection Rules:
+Selection Rules (STRICT SILHOUETTE DOMINANCE):
 - A = object with central meaning to the ad goal
-- B = object used for conceptual emphasis (pairing by shape similarity)
+- B = object selected STRICTLY based on silhouette geometric similarity to A (NOT conceptual, symbolic, thematic, aesthetic, or meaning-based)
+- Pairing MUST be based on abstract silhouette comparison: can B's silhouette replace A's silhouette with ≥90% overlap?
+- If YES → FULL_OVERLAP → PERFECT_HYBRID
+- If NO but basic geometry is similar (circle-circle, rectangle-rectangle) → SIMILAR_ONLY → SIDE_BY_SIDE
+- If NO and basic geometry is NOT similar → REJECT pair and select different pair
 - Both A and B must be selected from the physical objects list above
 - Do NOT select objects with text/logos/letters/numbers/external graphics (unless inherent)
+- FORBIDDEN: pairing based on conceptual similarity, symbolic similarity, thematic similarity, aesthetic harmony, visual harmony, or meaning-based relationships
 
 Projection Selection (CRITICAL):
 - C_projection_description = how to view Object A to maximize its silhouette area (camera angle, perspective, orientation)
@@ -607,18 +616,43 @@ Projection Selection (CRITICAL):
 - Both projections must be clean silhouettes with the largest visible dominant area
 - Choose the view where the silhouette occupies the largest area, clean silhouette
 
-Geometric Overlap Assessment (CRITICAL - V2):
-Compare the simplified shapes E (from C) and F (from D) after permitted adjustments (scale/angle/proportion without distortion).
-- "FULL_OVERLAP": E and F can achieve FULL geometric overlap - the projection silhouettes are nearly identical after permitted adjustments. This is clear and immediate to an average human eye. The final image would show ONE projection only (single object).
-- "SIMILAR_ONLY": E and F are similar but NOT full overlap - they share shape similarity but cannot achieve full geometric overlap even with adjustments. The final image would show TWO separate projections.
-- "NO_SIMILARITY": E and F have no clear shape similarity - an average human eye would not see them as similar. CRITICAL: NO_SIMILARITY pairs are INVALID and must NOT be returned as final. If you assess NO_SIMILARITY, you must select a different pair (A,B) from the list.
+Geometric Overlap Assessment (CRITICAL - V2 - STRICT SILHOUETTE DOMINANCE):
+This assessment MUST be based STRICTLY on abstract silhouette comparison. Ignore texture, color, meaning, aesthetics, visual harmony, conceptual similarity, symbolic similarity, or thematic similarity.
 
-Layout Decision (V2):
-- layout = "PERFECT_HYBRID" ONLY if overlap_class == "FULL_OVERLAP"
-- layout = "SIDE_BY_SIDE" ONLY if overlap_class == "SIMILAR_ONLY"
+SILHOUETTE COMPARISON RULES (MANDATORY):
+1. Consider ONLY the dominant outer contour of each object's projection (E from C, F from D).
+2. Ignore completely: texture, color, material, meaning, symbolism, theme, aesthetics, visual harmony.
+3. Focus ONLY on the abstract geometric shape of the silhouette.
+
+ASSESSMENT QUESTION (CRITICAL):
+Ask yourself: "Can the silhouette of B (projection F) fully replace the silhouette of A (projection E) with ≥90% geometric overlap after permitted adjustments (scale/angle/proportion without distortion)?"
+
+OVERLAP CLASSIFICATION:
+- "FULL_OVERLAP": Answer is YES - the silhouette of B can fully replace the silhouette of A with ≥90% geometric overlap. The dominant outer contours are nearly identical after permitted adjustments. This is clear and immediate to an average human eye. The final image would show ONE projection only (single object). This is the ONLY case where PERFECT_HYBRID is allowed.
+- "SIMILAR_ONLY": Answer is NO, but the basic geometric shapes are similar (e.g., both are circles, both are rectangles, both are triangles). They share basic geometry but cannot achieve ≥90% overlap. The final image would show TWO separate projections. This is the ONLY case where SIDE_BY_SIDE is allowed.
+- "NO_SIMILARITY": Answer is NO and the basic geometric shapes are NOT similar (e.g., circle vs rectangle, triangle vs square). CRITICAL: NO_SIMILARITY pairs are INVALID and must NOT be returned as final. If you assess NO_SIMILARITY, you must select a different pair (A,B) from the list.
+
+FORBIDDEN ASSESSMENT CRITERIA (DO NOT USE):
+- Conceptual similarity (e.g., "both are related to reading")
+- Symbolic similarity (e.g., "both represent knowledge")
+- Thematic similarity (e.g., "both are nature objects")
+- Aesthetic harmony (e.g., "they look good together")
+- Visual harmony (e.g., "they complement each other")
+- Meaning-based pairing (e.g., "they have similar meanings")
+
+ONLY USE: Abstract geometric silhouette comparison of the dominant outer contour.
+
+Layout Decision (V2 - STRICT SILHOUETTE DOMINANCE):
+- layout = "PERFECT_HYBRID" ONLY if overlap_class == "FULL_OVERLAP" (silhouette of B can replace silhouette of A with ≥90% overlap)
+- layout = "SIDE_BY_SIDE" ONLY if overlap_class == "SIMILAR_ONLY" (basic geometry is similar, e.g., circle-circle, rectangle-rectangle, but <90% overlap)
 - NEVER return overlap_class == "NO_SIMILARITY" as a final result - it is INVALID. If you assess NO_SIMILARITY, you must select a different pair.
-- PERFECT_HYBRID means: the final image shows ONE projection only (single object). The other contributes only background/environment/context and must not appear as a separate object.
-- SIDE_BY_SIDE means: the final image shows TWO separate objects/projections, no fusion/overlap/hybridization.
+- PERFECT_HYBRID means: the final image shows ONE projection only (single object). Object B's silhouette fully replaces Object A's silhouette in the same footprint. The other contributes only background/environment/context and must not appear as a separate object.
+- SIDE_BY_SIDE means: the final image shows TWO separate objects/projections, no fusion/overlap/hybridization. Both objects must be clearly visible as separate entities with similar basic geometry.
+
+CRITICAL ENFORCEMENT:
+- If the silhouette comparison does not yield FULL_OVERLAP (≥90%) or SIMILAR_ONLY (similar basic geometry), the pair is INVALID and must be rejected.
+- Do NOT use conceptual, symbolic, thematic, aesthetic, or meaning-based criteria to justify a pair.
+- ONLY use abstract geometric silhouette comparison of the dominant outer contour.
 
 Background:
 - background_classic_of_C = classic natural background for the dominant object (A's projection C)
@@ -646,7 +680,7 @@ Do not include any explanation or other text."""
                 lambda: client.chat.completions.create(
                     model=TEXT_MODEL,
                     messages=[
-                        {"role": "system", "content": "You are an ACE engine V2 object selector. Always return valid JSON only."},
+                        {"role": "system", "content": "You are an ACE engine V2 object selector. You MUST base pairing decisions STRICTLY on abstract geometric silhouette comparison of the dominant outer contour. Ignore texture, color, meaning, symbolism, theme, aesthetics, visual harmony, conceptual similarity, symbolic similarity, or thematic similarity. ONLY use silhouette geometric comparison. Always return valid JSON only."},
                         {"role": "user", "content": selection_prompt}
                     ],
                     temperature=0.8,
