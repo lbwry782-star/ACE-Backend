@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 # Valid ad sizes
 VALID_AD_SIZES = {"1024x1024", "1024x1536", "1536x1024"}
 
+# Engine version
+ENGINE_VERSION = "V2"
+
 # Session state storage
 # Key: session_id (string) -> value: dict with:
 #   - product_name: str (locked on attempt 1)
@@ -707,8 +710,499 @@ Do not include any explanation or other text."""
     }
 
 
+def derive_audience_v2(product_name, product_description):
+    """Derive target audience from product name and description (Engine V2 - 01H)."""
+    if not client:
+        raise ValueError("OpenAI API key not configured")
+    
+    audience_prompt = f"""You are an advertising strategist. Derive the target audience from the product information.
+
+Product Name: {product_name}
+Product Description: {product_description}
+
+Requirements:
+- Infer the target audience characteristics from product name + description only
+- Consider: age, lifestyle, needs, knowledge level, pains, preferences
+- Return a concise description of the target audience (2-3 sentences)
+
+Return ONLY the audience description, nothing else."""
+    
+    try:
+        response = retry_openai_call(
+            lambda: client.chat.completions.create(
+                model=TEXT_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are an advertising strategist. Derive target audiences from products."},
+                    {"role": "user", "content": audience_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=150
+            ),
+            operation_name="audience_derivation_v2"
+        )
+        
+        audience = response.choices[0].message.content.strip()
+        logger.info(f"AUDIENCE_V2: {audience}")
+        return audience
+    except Exception as e:
+        logger.warning(f"AUDIENCE_V2 failed: {str(e)}, using fallback")
+        return f"Target audience for {product_name}"
+
+
+def generate_100_associations_v2(product_name, product_description, ad_goal, audience):
+    """Generate exactly 100 associations for the ad goal (Engine V2)."""
+    if not client:
+        raise ValueError("OpenAI API key not configured")
+    
+    associations_prompt = f"""You are an ACE engine association generator. Generate EXACTLY 100 associations for an advertising goal.
+
+Product Name: {product_name}
+Product Description: {product_description}
+Advertising Goal: {ad_goal}
+Target Audience: {audience}
+
+Requirements:
+- Generate EXACTLY 100 associations (no more, no less)
+- Associations should be related to the product, ad goal, and audience
+- Return as a numbered list (1. association, 2. association, ...)
+- Each association should be a short phrase (1-5 words)
+
+Return ONLY the numbered list of 100 associations, nothing else."""
+    
+    try:
+        response = retry_openai_call(
+            lambda: client.chat.completions.create(
+                model=TEXT_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are an ACE engine association generator. Always return exactly 100 associations."},
+                    {"role": "user", "content": associations_prompt}
+                ],
+                temperature=0.9,
+                max_tokens=2000
+            ),
+            operation_name="associations_generation_v2"
+        )
+        
+        associations_text = response.choices[0].message.content.strip()
+        # Parse numbered list
+        associations = []
+        for line in associations_text.split('\n'):
+            line = line.strip()
+            if line and (line[0].isdigit() or line.startswith('-')):
+                # Remove numbering/bullet
+                clean_line = line.split('.', 1)[-1].strip()
+                clean_line = clean_line.lstrip('- ').strip()
+                if clean_line:
+                    associations.append(clean_line)
+        
+        # Ensure we have exactly 100 (pad or truncate if needed)
+        if len(associations) < 100:
+            logger.warning(f"ASSOCIATIONS_V2: Only got {len(associations)} associations, padding to 100")
+            while len(associations) < 100:
+                associations.append(f"association_{len(associations) + 1}")
+        elif len(associations) > 100:
+            associations = associations[:100]
+        
+        logger.info(f"ASSOCIATIONS_V2: Generated {len(associations)} associations")
+        return associations
+    except Exception as e:
+        logger.warning(f"ASSOCIATIONS_V2 failed: {str(e)}, using fallback")
+        return [f"association_{i+1}" for i in range(100)]
+
+
+def filter_to_physical_objects_v2(associations):
+    """Filter associations to physical objects that are photographable with classic backgrounds (Engine V2)."""
+    if not client:
+        raise ValueError("OpenAI API key not configured")
+    
+    filter_prompt = f"""You are an ACE engine object filter. Filter associations to physical objects only.
+
+Associations (100 total):
+{chr(10).join(f"{i+1}. {assoc}" for i, assoc in enumerate(associations))}
+
+Requirements:
+- Filter to ONLY physical, real, photographable objects
+- Objects must be simple, everyday, familiar physical objects
+- NOT ideas, symbols, abstract concepts, or illustrations
+- Objects must have a classic natural background (e.g., book on desk, tree in forest, cup on table)
+- Do NOT include objects with text/logos/letters/numbers/external graphics (unless inherent like playing cards, dice dots, engraved compass letters)
+- Return only the physical objects that pass the filter
+
+Return as a numbered list of physical objects only (no explanations)."""
+    
+    try:
+        response = retry_openai_call(
+            lambda: client.chat.completions.create(
+                model=TEXT_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are an ACE engine object filter. Return only physical objects."},
+                    {"role": "user", "content": filter_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=1500
+            ),
+            operation_name="object_filtering_v2"
+        )
+        
+        filtered_text = response.choices[0].message.content.strip()
+        physical_objects = []
+        for line in filtered_text.split('\n'):
+            line = line.strip()
+            if line and (line[0].isdigit() or line.startswith('-')):
+                clean_line = line.split('.', 1)[-1].strip()
+                clean_line = clean_line.lstrip('- ').strip()
+                if clean_line:
+                    physical_objects.append(clean_line)
+        
+        logger.info(f"PHYSICAL_OBJECTS_V2: Filtered to {len(physical_objects)} objects")
+        return physical_objects
+    except Exception as e:
+        logger.warning(f"PHYSICAL_OBJECTS_V2 failed: {str(e)}, using first 20 associations as fallback")
+        return associations[:20] if len(associations) >= 20 else associations
+
+
+def pick_two_objects_v2(product_name, product_description, headline, ad_goal, used_pairs_list=None, attempt=None, request_id=None, num_associations=100):
+    """Select two physical objects using V2 engine logic: 100 associations -> filter to physical -> select A/B with FULL_OVERLAP/SIMILAR_ONLY/NO_SIMILARITY.
+    
+    Args:
+        product_name: Product name
+        product_description: Product description
+        headline: Generated headline
+        ad_goal: Distinct advertising goal for this attempt
+        used_pairs_list: List of canonical pair keys (A|B) that have been used (forbidden)
+        attempt: Attempt number (1, 2, or 3)
+        request_id: Request ID for logging
+        num_associations: Number of associations to generate (default 100, can be increased by +10 on retry)
+    
+    Returns:
+        dict with keys: A, B, C_projection_description, D_projection_description, overlap_class, 
+                        layout, background_classic_of_C, c_is_dominant
+    """
+    if not client:
+        raise ValueError("OpenAI API key not configured")
+    
+    if used_pairs_list is None:
+        used_pairs_list = []
+    
+    # Step 1: Derive audience (01H)
+    audience = derive_audience_v2(product_name, product_description)
+    
+    # Step 2: Generate exactly num_associations associations
+    associations = generate_100_associations_v2(product_name, product_description, ad_goal, audience)
+    
+    # Step 3: Filter to physical objects
+    physical_objects = filter_to_physical_objects_v2(associations)
+    
+    if len(physical_objects) < 2:
+        logger.warning(f"PHYSICAL_OBJECTS_V2: Only {len(physical_objects)} objects, using fallback")
+        physical_objects = ["product object", "complementary object"]
+    
+    # Build forbidden pairs list text
+    forbidden_pairs_text = ""
+    if used_pairs_list:
+        readable_pairs = []
+        for pair_key in used_pairs_list:
+            parts = pair_key.split("|")
+            if len(parts) == 2:
+                readable_pairs.append(f"({parts[0]}, {parts[1]})")
+        if readable_pairs:
+            forbidden_pairs_text = f"\n\nCRITICAL: The following object pairs have already been used in previous attempts in this session and MUST NOT be selected (in any order): {', '.join(readable_pairs)}\nYou MUST select a DIFFERENT pair (A,B) that is NOT in this list."
+    
+    # Step 4: Select A and B from physical objects with overlap assessment
+    selection_prompt = f"""You are an ACE engine V2 object selector. Select two physical objects from the provided list with strict geometric overlap assessment.
+
+Product Name: {product_name}
+Product Description: {product_description}
+Headline: {headline}
+Advertising Goal: {ad_goal}
+Target Audience: {audience}
+
+Physical Objects List ({len(physical_objects)} objects):
+{chr(10).join(f"{i+1}. {obj}" for i, obj in enumerate(physical_objects))}
+{forbidden_pairs_text}
+
+Selection Rules:
+- A = object with central meaning to the ad goal
+- B = object used for conceptual emphasis (pairing by shape similarity)
+- Both A and B must be selected from the physical objects list above
+- Do NOT select objects with text/logos/letters/numbers/external graphics (unless inherent)
+
+Projection Selection (CRITICAL):
+- C_projection_description = how to view Object A to maximize its silhouette area (camera angle, perspective, orientation)
+- D_projection_description = how to view Object B to maximize its silhouette area (camera angle, perspective, orientation)
+- Both projections must be clean silhouettes with the largest visible dominant area
+- Choose the view where the silhouette occupies the largest area, clean silhouette
+
+Geometric Overlap Assessment (CRITICAL - V2):
+Compare the simplified shapes E (from C) and F (from D) after permitted adjustments (scale/angle/proportion without distortion).
+- "FULL_OVERLAP": E and F can achieve FULL geometric overlap - the projection silhouettes are nearly identical after permitted adjustments. This is clear and immediate to an average human eye. The final image would show ONE projection only (single object).
+- "SIMILAR_ONLY": E and F are similar but NOT full overlap - they share shape similarity but cannot achieve full geometric overlap even with adjustments. The final image would show TWO separate projections.
+- "NO_SIMILARITY": E and F have no clear shape similarity - an average human eye would not see them as similar.
+
+Layout Decision (V2):
+- layout = "PERFECT_HYBRID" ONLY if overlap_class == "FULL_OVERLAP"
+- layout = "SIDE_BY_SIDE" if overlap_class == "SIMILAR_ONLY" or "NO_SIMILARITY"
+- PERFECT_HYBRID means: the final image shows ONE projection only (single object). The other contributes only background/environment/context and must not appear as a separate object.
+- SIDE_BY_SIDE means: the final image shows TWO separate objects/projections, no fusion/overlap/hybridization.
+
+Background:
+- background_classic_of_C = classic natural background for the dominant object (A's projection C)
+- c_is_dominant = true (C always controls lighting/texture/composition/background)
+
+Return ONLY valid JSON with these exact keys:
+{{
+  "A": "object name from the list",
+  "B": "object name from the list",
+  "C_projection_description": "how to view A to maximize silhouette area (largest silhouette, clean)",
+  "D_projection_description": "how to view B to maximize silhouette area (largest silhouette, clean)",
+  "overlap_class": "FULL_OVERLAP" or "SIMILAR_ONLY" or "NO_SIMILARITY",
+  "layout": "PERFECT_HYBRID" (only if overlap_class is FULL_OVERLAP) or "SIDE_BY_SIDE",
+  "background_classic_of_C": "description of classic natural background",
+  "c_is_dominant": true
+}}
+
+Do not include any explanation or other text."""
+    
+    max_internal_retries = 6
+    best_similar_result = None  # Store best "SIMILAR_ONLY" result as fallback
+    
+    for retry_attempt in range(max_internal_retries):
+        try:
+            response = retry_openai_call(
+                lambda: client.chat.completions.create(
+                    model=TEXT_MODEL,
+                    messages=[
+                        {"role": "system", "content": "You are an ACE engine V2 object selector. Always return valid JSON only."},
+                        {"role": "user", "content": selection_prompt}
+                    ],
+                    temperature=0.8,
+                    response_format={"type": "json_object"}
+                ),
+                operation_name="object_selection_v2"
+            )
+            
+            result = json.loads(response.choices[0].message.content.strip())
+            
+            # Validate fields exist
+            A = result.get("A", "").strip()
+            B = result.get("B", "").strip()
+            C_projection_description = result.get("C_projection_description", "").strip()
+            D_projection_description = result.get("D_projection_description", "").strip()
+            overlap_class = result.get("overlap_class", "").strip()
+            layout = result.get("layout", "SIDE_BY_SIDE")
+            background_classic_of_C = result.get("background_classic_of_C", "")
+            c_is_dominant = result.get("c_is_dominant", True)
+            
+            # Check if pair (A,B) is in forbidden pairs list
+            pair_key = create_pair_key(A, B)
+            if used_pairs_list and pair_key in used_pairs_list:
+                req_id_str = f" request_id={request_id}" if request_id else ""
+                logger.info(f"REJECTED_PAIR_V2{req_id_str} key={pair_key} (A={A}, B={B})")
+                if retry_attempt < max_internal_retries - 1:
+                    logger.info(f"FORBIDDEN_PAIR_HIT_V2 retrying selector... attempt={retry_attempt + 1} forbidden_pair={pair_key}")
+                    continue  # Retry
+                else:
+                    logger.warning(f"FORBIDDEN_PAIR_HIT_V2 max retries reached, using pair anyway: A={A}, B={B}")
+            
+            # Validate overlap_class
+            if overlap_class not in ["FULL_OVERLAP", "SIMILAR_ONLY", "NO_SIMILARITY"]:
+                overlap_class = "SIMILAR_ONLY"  # Default to conservative
+            
+            # Enforce layout based on overlap_class (V2)
+            if overlap_class == "FULL_OVERLAP":
+                layout = "PERFECT_HYBRID"
+            elif overlap_class == "SIMILAR_ONLY":
+                layout = "SIDE_BY_SIDE"
+                # Store as best result for fallback
+                if best_similar_result is None:
+                    best_similar_result = {
+                        "A": A,
+                        "B": B,
+                        "C_projection_description": C_projection_description,
+                        "D_projection_description": D_projection_description,
+                        "overlap_class": overlap_class,
+                        "layout": layout,
+                        "background_classic_of_C": background_classic_of_C,
+                        "c_is_dominant": c_is_dominant
+                    }
+            elif overlap_class == "NO_SIMILARITY":
+                # Re-pick a new pair (retry)
+                if retry_attempt < max_internal_retries - 1:
+                    logger.info(f"NO_SIMILARITY_V2 retrying selector... attempt={retry_attempt + 1} A={A} B={B}")
+                    continue  # Retry to get a better pair
+                else:
+                    # Max retries reached - use best "SIMILAR_ONLY" result or fallback
+                    if best_similar_result:
+                        logger.info(f"NO_SIMILARITY_V2 max retries reached, using best SIMILAR_ONLY result")
+                        return best_similar_result
+                    else:
+                        # No good result found, force SIDE_BY_SIDE
+                        layout = "SIDE_BY_SIDE"
+                        overlap_class = "SIMILAR_ONLY"
+            
+            # Validate layout matches overlap_class
+            if layout == "PERFECT_HYBRID" and overlap_class != "FULL_OVERLAP":
+                layout = "SIDE_BY_SIDE"
+            
+            # Fallback if missing critical fields
+            if not A or not B:
+                A = "product object"
+                B = "complementary object"
+            
+            if not C_projection_description:
+                C_projection_description = "front view maximizing silhouette area (largest silhouette, clean)"
+            if not D_projection_description:
+                D_projection_description = "front view maximizing silhouette area (largest silhouette, clean)"
+            
+            # Return successful selection
+            return {
+                "A": A,
+                "B": B,
+                "C_projection_description": C_projection_description,
+                "D_projection_description": D_projection_description,
+                "overlap_class": overlap_class,
+                "layout": layout,
+                "background_classic_of_C": background_classic_of_C,
+                "c_is_dominant": c_is_dominant
+            }
+        except Exception as e:
+            if retry_attempt < max_internal_retries - 1:
+                logger.warning(f"Warning: Object selection V2 failed (retry {retry_attempt + 1}): {str(e)}")
+                continue
+            else:
+                # Fallback on error after all retries
+                logger.warning(f"Warning: Object selection V2 failed after {max_internal_retries} retries: {str(e)}, using fallback")
+                if best_similar_result:
+                    return best_similar_result
+                return {
+                    "A": "product object",
+                    "B": "complementary object",
+                    "C_projection_description": "front view maximizing silhouette area (largest silhouette, clean)",
+                    "D_projection_description": "front view maximizing silhouette area (largest silhouette, clean)",
+                    "overlap_class": "SIMILAR_ONLY",
+                    "layout": "SIDE_BY_SIDE",
+                    "background_classic_of_C": "natural background",
+                    "c_is_dominant": True
+                }
+    
+    # Should not reach here, but fallback
+    if best_similar_result:
+        return best_similar_result
+    return {
+        "A": "product object",
+        "B": "complementary object",
+        "C_projection_description": "front view maximizing silhouette area (largest silhouette, clean)",
+        "D_projection_description": "front view maximizing silhouette area (largest silhouette, clean)",
+        "overlap_class": "SIMILAR_ONLY",
+        "layout": "SIDE_BY_SIDE",
+        "background_classic_of_C": "natural background",
+        "c_is_dominant": True
+    }
+
+
+def build_image_prompt_v2(product_name, product_description, headline, A, B, C_projection_description, D_projection_description, layout, background_classic_of_C, ad_size):
+    """Build image prompt using V2 engine rules (Engine V2)."""
+    
+    # Camera angle instructions based on projection descriptions
+    camera_instruction = f"""CAMERA ANGLE INSTRUCTIONS (CRITICAL):
+- Object A (C projection): {C_projection_description}
+- Object B (D projection): {D_projection_description}
+- The camera angle and perspective MUST match these projection descriptions exactly.
+- Both objects must be viewed from the angles that maximize their silhouette areas (largest silhouette, clean)."""
+    
+    if layout == "PERFECT_HYBRID":
+        layout_instruction = f"""Create a PERFECT_HYBRID (Engine V2 - MANDATORY):
+- The final image MUST show ONE projection only (single object).
+- Object B's projection (D, simplified as F) must FULLY GEOMETRICALLY OVERLAP with Object A's projection (C, simplified as E) after permitted adjustments (scale/angle/proportion without distortion).
+- D REPLACES C (or vice versa) in the same footprint - they become ONE unified projection.
+- The other object (the one not shown as the main projection) contributes ONLY background/environment/context and must NOT appear as a separate object.
+- The final silhouette must read as ONE single physical object - no visible seams of two separate items.
+- No visible boundaries, edges, or seams that suggest two separate items.
+- The composition must read as a single, cohesive physical entity.
+
+CRITICAL ANTI-STACKING RULES (MANDATORY):
+- D must REPLACE C in the same footprint, NOT be placed on top of, resting on, or beside C.
+- FORBIDDEN: "on top of", "resting on", "placed on", "sitting on", "lying on", "inside of", "next to", or any stacking/positioning arrangement.
+- FORBIDDEN: D as a separate object positioned above, beside, or within C.
+- REQUIRED: D must be geometrically embedded INTO C's structure, replacing it in the same footprint.
+
+MUTUALLY-EXCLUSIVE RULE FOR PERFECT_HYBRID (CRITICAL):
+- This layout is PERFECT_HYBRID - it MUST be ONE single projection ONLY.
+- REQUIRED: complete fusion into one unified object - no visible separation.
+- FORBIDDEN: separate objects, "next to", "placed on", "resting on", "side by side", or any arrangement that shows two distinct items.
+- FORBIDDEN: any side-by-side appearance, two distinct objects, or visual separation.
+- The image MUST be purely PERFECT_HYBRID (one fused object) - NO side-by-side elements whatsoever.
+- If the image shows ANY side-by-side appearance or two separate objects, it is INVALID."""
+    else:  # SIDE_BY_SIDE
+        layout_instruction = f"""Place Object A (C projection) and Object B (D projection) SIDE_BY_SIDE at parallel angles.
+- Highlight maximal similar area between the projections.
+- Place them close together, emphasizing their shape similarity.
+- Both objects must be viewed from angles matching their projection descriptions (parallel angles for side-by-side).
+
+MUTUALLY-EXCLUSIVE RULE FOR SIDE_BY_SIDE (CRITICAL):
+- This layout is SIDE_BY_SIDE - it MUST show TWO separate objects/projections clearly separated.
+- REQUIRED: Two distinct, separate objects placed side by side.
+- REQUIRED: Clear visual separation between Object A and Object B.
+- FORBIDDEN: fusion, overlap, merging, hybridization, or any arrangement that makes them look like one object.
+- FORBIDDEN: geometric embedding, projection replacement, or structural integration.
+- The image MUST be purely SIDE_BY_SIDE (two separate objects) - NO hybrid/fusion elements whatsoever.
+- If the image shows ANY fusion or hybrid appearance, it is INVALID."""
+    
+    image_prompt = f"""YOU ARE A PROFESSIONAL ADVERTISING PHOTOGRAPHER (ACE Engine V2).
+YOU MUST FOLLOW ALL RULES BELOW. NO EXCEPTIONS.
+
+{camera_instruction}
+
+LAYOUT INSTRUCTION:
+{layout_instruction}
+
+BACKGROUND AND LIGHTING RULE (CRITICAL - ENGINE V2):
+- The background MUST be: {background_classic_of_C}
+- This is the classic natural background of Object A (the dominant object C).
+- C (Object A's projection) controls lighting, texture, composition, and background.
+- D (Object B's projection) must NOT change C's background or lighting.
+- Background and lighting must match ONLY C. D must not affect background/lighting.
+- NEVER use studio backgrounds, black backgrounds, gradients, or abstract scenes.
+- The entire scene's lighting, texture, and composition must be determined by C only.
+
+STYLE RULES (Engine V2 - 07H):
+- Ultra-realistic photography ONLY.
+- Looks like a real camera photograph.
+- Natural lighting, correct perspective, real materials.
+- NO illustration, NO 3D render, NO CGI, NO AI-art look.
+- Full realistic photo only.
+
+HEADLINE RULES (INSIDE IMAGE - Engine V2 - 06H):
+- The headline "{headline}" MUST appear INSIDE the image.
+- The headline must be clearly readable and visually integrated into the composition.
+- Headline must be 3-7 words, includes product name "{product_name}", original promise (not quote/description).
+- Place headline near/above/below silhouettes, NEVER on them.
+- The headline must be placed on the background area (on A's background), NEVER on top of the projections.
+
+SAFE MARGIN RULE (CRITICAL - PREVENTS CLIPPING):
+- ALL text (the headline) MUST be positioned at least 8-12% away from EVERY edge of the canvas.
+- Keep the headline at least 8-12% from the top edge, bottom edge, left edge, and right edge.
+- This ensures the headline is NEVER cut off or clipped at the edges.
+- The headline MUST remain fully visible within the safe margin zone.
+
+COMPOSITION RULE (HEADLINE PLACEMENT):
+- The headline MUST be placed on the background area (on A's background), NEVER on top of the projections.
+- The headline must be positioned in an area of the background that does NOT overlap with Object A or Object B projections.
+- The headline must remain fully visible and readable, positioned in a clear background area.
+- If the headline is too long to fit safely, shorten or rephrase it to 3-7 words while still including the product name "{product_name}".
+
+PRODUCT NAME: {product_name}
+PRODUCT DESCRIPTION: {product_description}
+
+TASK:
+Generate ONE final advertising image that fully follows ALL the rules above (ACE Engine V2).
+Do not explain. Do not describe."""
+    
+    return image_prompt
+
+
 def generate_image(product_name, product_description, headline, ad_size, attempt, ad_goal, used_A_list=None, used_pairs_list=None, request_id=None):
-    """Generate image using OpenAI DALL-E with strict two-object enforcement."""
+    """Generate image using OpenAI DALL-E with ACE Engine V2 logic."""
     if not client:
         raise ValueError("OpenAI API key not configured")
     
@@ -727,157 +1221,75 @@ def generate_image(product_name, product_description, headline, ad_size, attempt
     else:
         logger.info(f"USED_PAIRS{req_id_str}: [] (first attempt)")
     
-    # Step 1: Pick two objects, projections, overlap assessment, hybrid_mode, layout, and background (with ad_goal, used_pairs_list, attempt, and request_id)
-    # Note: used_A_list is deprecated and not used
-    objects = pick_two_objects(product_name, product_description, headline, ad_goal, None, used_pairs_list, attempt, request_id)
-    A = objects["A"]
-    B = objects["B"]
-    C_projection_description = objects["C_projection_description"]
-    D_projection_description = objects["D_projection_description"]
-    overlap_assessment = objects["overlap_assessment"]
-    hybrid_mode = objects.get("hybrid_mode", "SIDE_BY_SIDE")
-    layout = objects["layout"]
-    background_classic_of_C = objects["background_classic_of_C"]
-    c_is_dominant = objects.get("c_is_dominant", True)
+    # Step 1: Pick two objects using V2 engine logic (100 associations -> filter -> select A/B with overlap_class)
+    # Handle retry with +10 associations for NO_SIMILARITY (V2 policy)
+    num_associations = 100
+    max_association_retries = 3  # Max 3 retries with +10 associations each
+    
+    for assoc_retry in range(max_association_retries):
+        try:
+            objects = pick_two_objects_v2(product_name, product_description, headline, ad_goal, used_pairs_list, attempt, request_id, num_associations)
+            A = objects["A"]
+            B = objects["B"]
+            C_projection_description = objects["C_projection_description"]
+            D_projection_description = objects["D_projection_description"]
+            overlap_class = objects["overlap_class"]
+            layout = objects["layout"]
+            background_classic_of_C = objects["background_classic_of_C"]
+            c_is_dominant = objects.get("c_is_dominant", True)
+            
+            # If we got NO_SIMILARITY and haven't exhausted retries, increase associations and retry
+            if overlap_class == "NO_SIMILARITY" and assoc_retry < max_association_retries - 1:
+                num_associations += 10
+                logger.info(f"NO_SIMILARITY_V2 retrying with +10 associations (now {num_associations}) attempt={assoc_retry + 1}")
+                continue
+            
+            # Success - break out of retry loop
+            break
+        except Exception as e:
+            if assoc_retry < max_association_retries - 1:
+                num_associations += 10
+                logger.warning(f"Object selection V2 failed (retry {assoc_retry + 1}): {str(e)}, increasing associations to {num_associations}")
+                continue
+            else:
+                # Final fallback
+                logger.warning(f"Object selection V2 failed after {max_association_retries} retries: {str(e)}, using fallback")
+                objects = {
+                    "A": "product object",
+                    "B": "complementary object",
+                    "C_projection_description": "front view maximizing silhouette area (largest silhouette, clean)",
+                    "D_projection_description": "front view maximizing silhouette area (largest silhouette, clean)",
+                    "overlap_class": "SIMILAR_ONLY",
+                    "layout": "SIDE_BY_SIDE",
+                    "background_classic_of_C": "natural background",
+                    "c_is_dominant": True
+                }
+                A = objects["A"]
+                B = objects["B"]
+                C_projection_description = objects["C_projection_description"]
+                D_projection_description = objects["D_projection_description"]
+                overlap_class = objects["overlap_class"]
+                layout = objects["layout"]
+                background_classic_of_C = objects["background_classic_of_C"]
+                c_is_dominant = objects.get("c_is_dominant", True)
     
     # Log successful selection of pair for this attempt
     pair_key = create_pair_key(A, B)
     req_id_str = f" request_id={request_id}" if request_id else ""
-    logger.info(f"SELECTED_PAIR{req_id_str} attempt={attempt} key={pair_key} (A={A}, B={B})")
+    logger.info(f"SELECTED_PAIR_V2{req_id_str} attempt={attempt} key={pair_key} (A={A}, B={B})")
     
-    # Debug log: print selected A, B, layout, overlap_assessment, hybrid_mode, and openai_size (NOT full prompt, NOT secrets)
-    logger.info(f"SELECTED A/B attempt={attempt}: A={A}, B={B}, layout={layout}, overlap_assessment={overlap_assessment}, hybrid_mode={hybrid_mode}, ad_size={ad_size} (OpenAI size: {openai_size})")
+    # Debug log: print selected A, B, layout, overlap_class, and openai_size (NOT full prompt, NOT secrets)
+    logger.info(f"SELECTED A/B V2 attempt={attempt}: A={A}, B={B}, layout={layout}, overlap_class={overlap_class}, ad_size={ad_size} (OpenAI size: {openai_size})")
     
     # Log layout decision
     req_id_str = f" request_id={request_id}" if request_id else ""
-    logger.info(f"LAYOUT_DECISION{req_id_str} layout={layout}")
+    logger.info(f"LAYOUT_DECISION_V2{req_id_str} layout={layout}")
     
-    # Step 2: Build strict image prompt with explicit A/B/projections/layout/background
-    # Camera angle instructions based on projection descriptions
-    camera_instruction = f"""CAMERA ANGLE INSTRUCTIONS (CRITICAL):
-- Object A (C projection): {C_projection_description}
-- Object B (D projection): {D_projection_description}
-- The camera angle and perspective MUST match these projection descriptions exactly.
-- Both objects must be viewed from the angles that maximize their silhouette areas."""
-    
-    if layout == "HYBRID":
-        # HYBRID is ONLY allowed if BOTH overlap_assessment is NEAR_GEOMETRIC_OVERLAP AND hybrid_mode is PROJECTION_REPLACEMENT
-        if overlap_assessment != "NEAR_GEOMETRIC_OVERLAP" or hybrid_mode != "PROJECTION_REPLACEMENT":
-            # Force SIDE_BY_SIDE if conditions not met
-            layout = "SIDE_BY_SIDE"
-            logger.info(f"HYBRID_REJECTED: overlap_assessment={overlap_assessment}, hybrid_mode={hybrid_mode}, forcing SIDE_BY_SIDE")
-        
-        layout_instruction = f"""Create a TRUE ACE HYBRID with PROJECTION REPLACEMENT (MANDATORY):
-- The final image MUST show ONE single physical object in the scene.
-- Object B's projection (D, simplified as F) must GEOMETRICALLY REPLACE an equivalent structural element of Object A's projection (C, simplified as E).
-- D must REPLACE PART OF C within C's classic structure - D becomes an integral part of C's form.
-- The silhouette F must be nearly geometrically overlapped with silhouette E after permitted adjustments (scale/angle/proportion without distortion).
-- This overlap must be clear and immediate to an average human eye - the shapes must be nearly identical.
-- Present the HYBRID at an angle that maximizes both projections' visibility while keeping full photographic realism.
-
-CRITICAL SINGLE-OBJECT REQUIREMENTS (MANDATORY):
-- The final silhouette MUST read as one contiguous object - no visible seams of two separate items.
-- Object B must NOT appear as a separate object - it must be fully integrated into Object A's structure.
-- The image must look like ONE unified physical object, not two objects placed together.
-- No visible boundaries, edges, or seams that suggest two separate items.
-- The composition must read as a single, cohesive physical entity.
-
-CRITICAL ANTI-STACKING RULES (MANDATORY):
-- D must REPLACE a structural element of C, NOT be placed on top of C.
-- FORBIDDEN: "on top of", "resting on", "placed on", "sitting on", "lying on", "inside of", "next to", or any stacking/positioning arrangement.
-- FORBIDDEN: D as a separate object positioned above, beside, or within C.
-- REQUIRED: D must be geometrically embedded INTO C's structure, replacing an equivalent part.
-- Examples of VALID hybrid: shelf of books where ONE BOOK IS A LAPTOP (laptop replaces book), tree where branches are USB cables (cables replace branches).
-- Examples of INVALID hybrid: laptop lying on an open book (this is stacking, not replacement), laptop next to a book (this is side-by-side, not replacement).
-
-MUTUALLY-EXCLUSIVE RULE FOR HYBRID (CRITICAL):
-- This layout is HYBRID - it MUST be ONE single fused object ONLY.
-- REQUIRED: complete fusion into one unified object - no visible separation.
-- FORBIDDEN: separate objects, "next to", "placed on", "resting on", "side by side", or any arrangement that shows two distinct items.
-- FORBIDDEN: any side-by-side appearance, two distinct objects, or visual separation.
-- The image MUST be purely HYBRID (one fused object) - NO side-by-side elements whatsoever.
-- If the image shows ANY side-by-side appearance or two separate objects, it is INVALID.
-
-NEGATIVE CONSTRAINT:
-- If you cannot make it look like ONE single physical object with no visible seams, REJECT this layout and output SIDE_BY_SIDE instead.
-- If the final image shows any residual side-by-side appearance or two distinct objects, it is INVALID and must be SIDE_BY_SIDE.
-- IF YOU CANNOT COMPLY WITH THE HYBRID REQUIREMENTS (one single fused object), SWITCH TO SIDE_BY_SIDE INSTEAD."""
-    else:  # SIDE_BY_SIDE
-        layout_instruction = f"""Place Object A (C projection) and Object B (D projection) SIDE BY SIDE at the same angle.
-- Highlight maximal similar area between the projections.
-- Place them close together, emphasizing their shape similarity.
-- Both objects must be viewed from angles matching their projection descriptions.
-
-MUTUALLY-EXCLUSIVE RULE FOR SIDE_BY_SIDE (CRITICAL):
-- This layout is SIDE_BY_SIDE - it MUST show TWO separate objects clearly separated.
-- REQUIRED: Two distinct, separate objects placed side by side.
-- REQUIRED: Clear visual separation between Object A and Object B.
-- FORBIDDEN: fusion, overlap, merging, hybridization, or any arrangement that makes them look like one object.
-- FORBIDDEN: geometric embedding, projection replacement, or structural integration.
-- The image MUST be purely SIDE_BY_SIDE (two separate objects) - NO hybrid/fusion elements whatsoever.
-- If the image shows ANY fusion or hybrid appearance, it is INVALID."""
-    
-    image_prompt = f"""YOU ARE A PROFESSIONAL ADVERTISING PHOTOGRAPHER.
-YOU MUST FOLLOW ALL RULES BELOW. NO EXCEPTIONS.
-
-MANDATORY OBJECTS (BOTH MUST APPEAR):
-- Object A: {A}
-- Object B: {B}
-- YOU MUST SHOW BOTH OBJECT A AND OBJECT B IN THE IMAGE.
-- NEVER show only one object. NEVER show only Object A. NEVER show only Object B.
-- BOTH objects must be clearly visible and recognizable.
-
-{camera_instruction}
-
-LAYOUT INSTRUCTION:
-{layout_instruction}
-
-BACKGROUND AND LIGHTING RULE (CRITICAL - ENGINE 05H):
-- The background MUST be: {background_classic_of_C}
-- This is the classic natural background of Object A (the dominant object C).
-- C (Object A's projection) controls lighting, texture, composition, and background.
-- D (Object B's projection) must NOT change C's background or lighting.
-- Background and lighting must match ONLY C. D must not affect background/lighting.
-- NEVER use studio backgrounds, black backgrounds, gradients, or abstract scenes.
-- The entire scene's lighting, texture, and composition must be determined by C only.
-
-STYLE RULES:
-- Ultra-realistic photography ONLY.
-- Looks like a real camera photograph.
-- Natural lighting, correct perspective, real materials.
-- NO illustration, NO 3D render, NO CGI, NO AI-art look.
-
-HEADLINE RULES (INSIDE IMAGE):
-- The headline "{headline}" MUST appear INSIDE the image.
-- The headline must be clearly readable and visually integrated into the composition.
-- Place it above/below/next-to the objects (never on them).
-
-SAFE MARGIN RULE (CRITICAL - PREVENTS CLIPPING):
-- ALL text (the headline) MUST be positioned at least 8-12% away from EVERY edge of the canvas.
-- Keep the headline at least 8-12% from the top edge, bottom edge, left edge, and right edge.
-- This ensures the headline is NEVER cut off or clipped at the edges.
-- The headline MUST remain fully visible within the safe margin zone.
-
-COMPOSITION RULE (HEADLINE PLACEMENT):
-- The headline MUST be placed on the background area (on A's background), NEVER on top of the projections.
-- The headline must be positioned in an area of the background that does NOT overlap with Object A or Object B projections.
-- The headline must remain fully visible and readable, positioned in a clear background area.
-- If the headline is too long to fit safely, shorten or rephrase it to 3-7 words while still including the product name "{product_name}".
-
-CRITICAL ENFORCEMENT:
-- YOU MUST SHOW BOTH OBJECT A ({A}) AND OBJECT B ({B}).
-- The image MUST contain BOTH objects. Single-object images are FORBIDDEN.
-- BOTH objects must be clearly visible and recognizable in the final image.
-
-PRODUCT NAME: {product_name}
-PRODUCT DESCRIPTION: {product_description}
-
-TASK:
-Generate ONE final advertising image that fully follows ALL the rules above.
-The image MUST show BOTH Object A and Object B. Do not explain. Do not describe."""
+    # Step 2: Build image prompt using V2 engine rules
+    image_prompt = build_image_prompt_v2(product_name, product_description, headline, A, B, C_projection_description, D_projection_description, layout, background_classic_of_C, ad_size)
 
     # Debug log: print image prompt, ad_size, and attempt
-    logger.debug("=== IMAGE PROMPT SENT TO OPENAI ===")
+    logger.debug("=== IMAGE PROMPT SENT TO OPENAI (V2) ===")
     logger.debug(image_prompt)
     logger.debug("=== END IMAGE PROMPT ===")
 
