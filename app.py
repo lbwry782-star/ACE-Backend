@@ -5,106 +5,172 @@ import zipfile
 import base64
 import json
 import os
+from openai import OpenAI
+import logging
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all origins
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # In-memory storage for generated ads (in production, use Redis or database)
 ads_storage = {}
 
+# Initialize OpenAI client
+openai_api_key = os.environ.get('OPENAI_API_KEY')
+if not openai_api_key:
+    logger.error("OPENAI_API_KEY is not set in environment")
+    raise ValueError("OPENAI_API_KEY environment variable is required")
 
-def generate_placeholder_image(width, height, ad_index, product_name):
-    """Generate a minimal valid JPEG placeholder without PIL"""
-    # Use a known minimal valid 1x1 pixel JPEG (base64 encoded)
-    # This is a real valid JPEG that browsers can display
-    # We'll decode it and use it as a template, then adjust dimensions in header
-    minimal_jpeg_b64 = "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/2wBDAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwA/8A"
-    
+openai_image_model = os.environ.get('OPENAI_IMAGE_MODEL', 'gpt-image-1')
+openai_text_model = os.environ.get('OPENAI_TEXT_MODEL', 'gpt-4.1-mini')
+
+client = OpenAI(api_key=openai_api_key)
+logger.info(f"OpenAI client initialized with image model: {openai_image_model}, text model: {openai_text_model}")
+
+
+def generate_headline_and_text(product_name, product_description, ad_index):
+    """Generate headline and marketing text using OpenAI"""
     try:
-        # Decode the minimal JPEG
-        minimal_jpeg = base64.b64decode(minimal_jpeg_b64)
+        prompt = f"""Generate an advertising headline and marketing text for a product.
+
+Product Name: {product_name}
+Product Description: {product_description}
+
+Requirements:
+- Headline: 3-7 words, must include the product name "{product_name}", original and compelling
+- Marketing text: Exactly 50 words (headline excluded), persuasive and informative
+
+Return JSON format:
+{{
+    "headline": "the headline text here",
+    "marketing_text": "exactly 50 words of marketing text here"
+}}"""
+
+        response = client.chat.completions.create(
+            model=openai_text_model,
+            messages=[
+                {"role": "system", "content": "You are an expert copywriter. Return only valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.8,
+            max_tokens=300
+        )
         
-        # For a placeholder, we'll return a larger valid JPEG by repeating/expanding
-        # the minimal structure. Since we can't easily resize without PIL, we'll
-        # create a minimal valid JPEG with the requested dimensions in the header
-        # but use the same encoded data structure (browsers will handle it)
+        content = response.choices[0].message.content.strip()
+        # Remove markdown code blocks if present
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
         
-        # Build a minimal valid JPEG with correct dimensions
-        # Start of Image
-        soi = bytes([0xFF, 0xD8])
+        result = json.loads(content)
+        headline = result.get("headline", f"{product_name}: Innovation You Need")
+        marketing_text = result.get("marketing_text", f"Discover {product_name}: {product_description[:200]}")
         
-        # JFIF APP0
-        app0 = bytes([
-            0xFF, 0xE0, 0x00, 0x10,
-            0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,  # "JFIF\0\1"
-            0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00
-        ])
+        # Ensure marketing text is exactly 50 words
+        words = marketing_text.split()
+        if len(words) > 50:
+            marketing_text = " ".join(words[:50])
+        elif len(words) < 50:
+            # Pad with product description if needed
+            desc_words = product_description.split()
+            needed = 50 - len(words)
+            marketing_text = marketing_text + " " + " ".join(desc_words[:needed])
+            marketing_text = " ".join(marketing_text.split()[:50])
         
-        # Quantization table
-        dqt = bytes([0xFF, 0xDB, 0x00, 0x43, 0x00]) + bytes([8] * 64)
+        return headline, marketing_text
         
-        # Start of Frame with correct dimensions
-        sof = bytes([
-            0xFF, 0xC0, 0x00, 0x11, 0x08,
-            (height >> 8) & 0xFF, height & 0xFF,
-            (width >> 8) & 0xFF, width & 0xFF,
-            0x01, 0x11, 0x00
-        ])
+    except Exception as e:
+        logger.error(f"Error generating headline/text: {e}")
+        # Fallback
+        headline = f"{product_name}: Innovation You Need"
+        marketing_text = f"Discover {product_name}: {product_description[:200]}"
+        words = marketing_text.split()[:50]
+        marketing_text = " ".join(words)
+        return headline, marketing_text
+
+
+def generate_image_with_openai(headline, product_name, product_description, width, height, ad_index):
+    """Generate a realistic photographic image using OpenAI with headline included"""
+    try:
+        # Map size to OpenAI format
+        openai_size = f"{width}x{height}"
         
-        # Huffman tables (DC)
-        dht_dc = bytes([
-            0xFF, 0xC4, 0x00, 0x1F, 0x00,
-            0x00, 0x01, 0x05, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B
-        ])
+        # Build image prompt that includes the headline
+        image_prompt = f"""Create a realistic, professional photographic advertisement image.
+
+Product: {product_name}
+Description: {product_description}
+
+Image Requirements:
+- Realistic photographic style (not illustration, not cartoon, not graphic design)
+- Professional product photography quality
+- The headline text "{headline}" must appear clearly inside the image, integrated naturally into the composition
+- Headline should be placed on a background area, not overlapping the main product/subject
+- Keep all text and important elements at least 8-12% away from all edges (safe margins)
+- High quality, sharp, well-lit, professional composition
+- Size: {width}x{height} pixels
+
+The image should be a complete, realistic photograph suitable for advertising."""
+
+        logger.info(f"Generating image for ad {ad_index} with size {openai_size}")
         
-        # Huffman tables (AC) - minimal
-        dht_ac = bytes([
-            0xFF, 0xC4, 0x00, 0xB5, 0x10,
-            0x00, 0x02, 0x01, 0x03, 0x03, 0x02, 0x04, 0x03, 0x05, 0x05, 0x04, 0x04, 0x00, 0x00, 0x01, 0x7D,
-            0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06, 0x13, 0x51, 0x61, 0x07,
-            0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xA1, 0x08, 0x23, 0x42, 0xB1, 0xC1, 0x15, 0x52, 0xD1, 0xF0,
-            0x24, 0x33, 0x62, 0x72, 0x82, 0x09, 0x0A, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x25, 0x26, 0x27, 0x28,
-            0x29, 0x2A, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49,
-            0x4A, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69,
-            0x6A, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89,
-            0x8A, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7,
-            0xA8, 0xA9, 0xAA, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xC2, 0xC3, 0xC4, 0xC5,
-            0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xE1, 0xE2,
-            0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8,
-            0xF9, 0xFA
-        ])
+        # Generate image with OpenAI (gpt-image-1 returns base64 by default)
+        response = client.images.generate(
+            model=openai_image_model,
+            prompt=image_prompt,
+            size=openai_size,
+            quality="auto"
+        )
         
-        # Start of Scan
-        sos = bytes([0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00])
-        
-        # Minimal encoded scan data (represents a simple gray image)
-        # This is a minimal valid JPEG scan data
-        scan_data = bytes([0x3F, 0x00] + [0x00] * 400)  # Ensure minimum size
-        
-        # End of Image
-        eoi = bytes([0xFF, 0xD9])
-        
-        jpeg_bytes = soi + app0 + dqt + sof + dht_dc + dht_ac + sos + scan_data + eoi
-        
-        return jpeg_bytes
-        
-    except Exception:
-        # Fallback: return the minimal JPEG as-is (it's valid)
-        return base64.b64decode(minimal_jpeg_b64)
+        # Get base64 image from response
+        if hasattr(response, 'data') and len(response.data) > 0:
+            image_data = response.data[0]
+            # Check for b64_json field (base64 encoded image)
+            if hasattr(image_data, 'b64_json') and image_data.b64_json:
+                image_base64 = image_data.b64_json
+                image_bytes = base64.b64decode(image_base64)
+                
+                # Validate the image
+                is_valid, error_msg = validate_jpeg_bytes(image_bytes)
+                if not is_valid:
+                    raise ValueError(f"Generated image validation failed: {error_msg}")
+                
+                logger.info(f"Successfully generated image for ad {ad_index}, size: {len(image_bytes)} bytes")
+                return image_bytes, image_base64
+            else:
+                # Log available fields for debugging
+                available_fields = [attr for attr in dir(image_data) if not attr.startswith('_')]
+                logger.error(f"OpenAI response does not contain b64_json. Available fields: {available_fields}")
+                raise ValueError("OpenAI response does not contain b64_json field. Image generation may have failed.")
+        else:
+            raise ValueError("OpenAI response does not contain image data")
+            
+    except Exception as e:
+        logger.error(f"Error generating image with OpenAI: {e}")
+        raise
 
 
 def validate_jpeg_bytes(image_bytes):
     """Validate that bytes represent a valid JPEG image"""
-    if not image_bytes or len(image_bytes) < 100:
-        return False, "Image data too small (less than 100 bytes)"
+    # Minimum size threshold: at least 5KB for a real image
+    MIN_SIZE_BYTES = 5000
+    
+    if not image_bytes or len(image_bytes) < MIN_SIZE_BYTES:
+        return False, f"Image data too small (less than {MIN_SIZE_BYTES} bytes, got {len(image_bytes) if image_bytes else 0})"
     
     # Check JPEG magic bytes
-    if not (image_bytes[0] == 0xFF and image_bytes[1] == 0xD8):
+    if len(image_bytes) < 2 or not (image_bytes[0] == 0xFF and image_bytes[1] == 0xD8):
         return False, "Invalid JPEG magic bytes (not starting with FF D8)"
     
     # Check JPEG end marker
-    if not (image_bytes[-2] == 0xFF and image_bytes[-1] == 0xD9):
+    if len(image_bytes) < 2 or not (image_bytes[-2] == 0xFF and image_bytes[-1] == 0xD9):
         return False, "Invalid JPEG end marker (not ending with FF D9)"
     
     # Basic validation passed
@@ -144,33 +210,41 @@ def generate():
         # Parse dimensions
         width, height = map(int, size.split('x'))
         
-        # Generate 3 ads (mock implementation for Phase 1)
+        # Generate 3 ads using OpenAI
         ads = []
         for ad_index in range(1, 4):
-            # Generate a valid JPEG image
             try:
-                image_bytes = generate_placeholder_image(width, height, ad_index, product_name)
+                # Generate headline and marketing text
+                headline, marketing_text = generate_headline_and_text(product_name, product_description, ad_index)
+                
+                # Generate image with OpenAI (includes headline in image)
+                image_bytes, image_base64 = generate_image_with_openai(
+                    headline, product_name, product_description, width, height, ad_index
+                )
                 
                 # Validate the generated image
                 is_valid, error_msg = validate_jpeg_bytes(image_bytes)
                 if not is_valid:
+                    logger.error(f"Image validation failed for ad {ad_index}: {error_msg}")
                     return jsonify({
                         "error": "Image generation failed",
                         "message": error_msg
                     }), 500
                 
-                # Encode to base64
-                image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+                # Create data URL
                 image_data_url = f"data:image/jpeg;base64,{image_base64}"
                 
                 ad = {
                     "ad_index": ad_index,
-                    "marketing_text": f"Discover {product_name}: {product_description[:50]}...",
+                    "marketing_text": marketing_text,
                     "image_jpg": image_data_url
                 }
                 ads.append(ad)
                 
+                logger.info(f"Successfully generated ad {ad_index} for {product_name}")
+                
             except Exception as e:
+                logger.error(f"Error generating ad {ad_index}: {e}", exc_info=True)
                 return jsonify({
                     "error": "Image generation failed",
                     "message": str(e)
