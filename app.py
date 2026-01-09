@@ -622,6 +622,9 @@ FORBIDDEN (DO NOT USE - COMPLETELY IGNORE):
 - Conceptual similarity
 - Symbolic similarity
 - Thematic similarity
+- Backgrounds are NOT objects - an object that exists only as background implication is NON-EXISTENT for shape comparison
+- If background is used as Object B, it must contain at least one clear, complete, visible instance of B
+- Abstract, painterly, symbolic, or illustrative styles are FORBIDDEN
 
 ALLOWED COMPARISON INPUTS (ONLY USE THESE):
 - Full visible outline (the complete outer edge of the object's projection)
@@ -645,6 +648,7 @@ Consider:
 - With matching scale
 - After permitted adjustments (scale/angle/proportion without distortion)
 - Such that Object A can fully replace Object B's visible form
+- Resulting in ONE visible object only
 
 PERFECT HYBRID DECISION (≥90% OVERLAP):
 - If the answer is YES (≥90% geometric overlap):
@@ -655,6 +659,7 @@ PERFECT HYBRID DECISION (≥90% OVERLAP):
   → The background MUST be the natural environment of the replaced object
   → It is strictly forbidden to show both objects, partially or fully
   → No visual hints, no additions, no secondary elements
+  → No partial overlap, no layered objects, no blend, no dual visibility, no compromise
 
 SIDE BY SIDE DECISION (<90% OVERLAP BUT SIMILAR BASIC GEOMETRY):
 - If the answer is NO (<90% overlap) BUT basic geometry is similar:
@@ -662,6 +667,7 @@ SIDE BY SIDE DECISION (<90% OVERLAP BUT SIMILAR BASIC GEOMETRY):
   → layout = "SIDE_BY_SIDE" (ONLY option)
   → Objects must be visually similar in basic geometry (e.g., circle–circle, rectangle–rectangle)
   → Both objects must be clearly visible as separate entities
+  → Conceptual, symbolic, or thematic similarity without geometric similarity is INVALID
 
 REJECTION DECISION (NO SIMILARITY):
 - If the answer is NO AND basic geometry is NOT similar:
@@ -669,6 +675,7 @@ REJECTION DECISION (NO SIMILARITY):
   → This pair is INVALID and must be REJECTED
   → Select a different pair (A,B) from the list
   → NEVER return NO_SIMILARITY as a final result
+  → If similarity <90% and basic geometry NOT similar → Side By Side is FORBIDDEN, reject pair
 
 FORBIDDEN OUTCOMES (NEVER ALLOW):
 - Partial hybrid (overlap but <90%)
@@ -713,6 +720,12 @@ CRITICAL ENFORCEMENT:
 - ONLY use abstract geometric silhouette comparison of the dominant outer contour.
 - At no point is a "partial hybrid" allowed (no overlap, no fusion, no object-on-object, no illustrative or symbolic compositions).
 - If neither PERFECT_HYBRID nor valid SIDE_BY_SIDE is possible, reject the pair and select a new one.
+- Perfect Hybrid is allowed ONLY IF: Object A and Object B share ≥90% silhouette overlap from the same viewing angle with matching scale, such that Object A can fully replace Object B's visible form, resulting in ONE visible object only.
+- If ANY of the above is not met → Perfect Hybrid is FORBIDDEN.
+- If similarity <90% → Side By Side ONLY (if basic geometry similar).
+- No partial overlap. No layered objects. No blend. No dual visibility. No compromise.
+- Backgrounds are NOT objects. An object that exists only as background implication is NON-EXISTENT for shape comparison.
+- If background is used as Object B: it must contain at least one clear, complete, visible instance of B. Repetition of identical B objects is allowed. Abstract, painterly, symbolic, or illustrative styles are FORBIDDEN.
 
 Background:
 - background_classic_of_C = classic natural background for the dominant object (A's projection C)
@@ -873,9 +886,9 @@ def build_image_prompt_v2(product_name, product_description, headline, A, B, C_p
 - Both objects must be viewed from the angles that maximize their silhouette areas (largest silhouette, clean)."""
     
     if layout == "PERFECT_HYBRID":
-        layout_instruction = f"""Create a PERFECT_HYBRID (Engine V2 - MANDATORY):
+        layout_instruction = f"""Create a PERFECT_HYBRID (Engine V2 - MANDATORY - STRICT SILHOUETTE ENFORCEMENT):
 - The final image MUST show exactly ONE object/projection only.
-- Object B ({B})'s projection (D) must REPLACE Object A ({A})'s projection (C) in the same footprint through full geometric overlap.
+- Object B ({B})'s projection (D) must REPLACE Object A ({A})'s projection (C) in the same footprint through full geometric overlap (≥90%).
 - This is REPLACEMENT, NOT stacking, NOT blending, NOT "{A} with {B} on top", NOT "{B} placed on {A}".
 - D REPLACES a structural element of C - they become ONE unified projection where D replaces part of C within C's classic structure.
 - The other object (the one not shown as the main projection) contributes ONLY background/environment/context and must NOT appear as a separate object.
@@ -883,14 +896,18 @@ def build_image_prompt_v2(product_name, product_description, headline, A, B, C_p
 - No visible boundaries, edges, or seams that suggest two separate items.
 - The composition must read as a single, cohesive physical entity.
 
-CRITICAL REPLACEMENT RULE (MANDATORY - NOT STACKING):
-- D must REPLACE C in the same footprint through geometric embedding.
+CRITICAL SILHOUETTE-BASED REPLACEMENT RULE (MANDATORY - NOT STACKING):
+- This PERFECT_HYBRID is allowed ONLY because Object A ({A}) and Object B ({B}) share ≥90% silhouette overlap.
+- The silhouette comparison was based STRICTLY on: full visible outline, dominant contour, proportional geometry, negative space, overall silhouette footprint.
+- IGNORED: texture, color, meaning, symbolism, theme, aesthetics, visual harmony, conceptual meaning, context, function, environment hints.
+- D must REPLACE C in the same footprint through geometric embedding based on silhouette overlap.
 - D replaces an equivalent structural element of C (e.g., if C is a shelf of books, D replaces ONE BOOK with a laptop).
 - This is REPLACEMENT, NOT positioning, NOT stacking, NOT blending.
 - FORBIDDEN: "on top of", "resting on", "placed on", "sitting on", "lying on", "inside of", "next to", "with {B} on top", "{A} with {B}", or any stacking/positioning arrangement.
 - FORBIDDEN: D as a separate object positioned above, beside, or within C.
 - FORBIDDEN: Any visual arrangement that shows {B} placed on {A} or {A} with {B} on top.
 - REQUIRED: D must be geometrically embedded INTO C's structure, replacing it in the same footprint.
+- REQUIRED: The final silhouette must show ≥90% geometric overlap between the two objects' projections.
 
 CRITICAL: NOT A SINGLE NORMAL OBJECT (MANDATORY - STRICT ENFORCEMENT):
 - This is INVALID if it looks like a single normal object without clear hybrid characteristics.
@@ -913,12 +930,20 @@ MUTUALLY-EXCLUSIVE RULE FOR PERFECT_HYBRID (CRITICAL):
 - FORBIDDEN: showing only one object without clear hybrid characteristics from both.
 - The image MUST be purely PERFECT_HYBRID (one fused object through replacement) - NO side-by-side elements whatsoever.
 - If the image shows ANY side-by-side appearance or two separate objects, it is INVALID.
-- If the image shows a single normal object without clear hybrid characteristics, it is INVALID."""
+- If the image shows a single normal object without clear hybrid characteristics, it is INVALID.
+- Backgrounds are NOT objects - an object that exists only as background implication is NON-EXISTENT."""
     else:  # SIDE_BY_SIDE
         layout_instruction = f"""Place Object A ({A}) (C projection) and Object B ({B}) (D projection) SIDE_BY_SIDE at parallel angles.
 - Highlight maximal similar area between the projections.
 - Place them close together, emphasizing their shape similarity.
 - Both objects must be viewed from angles matching their projection descriptions (parallel angles for side-by-side).
+
+CRITICAL SILHOUETTE-BASED SIDE_BY_SIDE RULE (MANDATORY):
+- This SIDE_BY_SIDE is used because Object A ({A}) and Object B ({B}) have <90% silhouette overlap.
+- The silhouette comparison showed: basic geometry is similar (e.g., circle-circle, rectangle-rectangle) but <90% overlap.
+- IGNORED: texture, color, meaning, symbolism, theme, aesthetics, visual harmony, conceptual meaning, context, function, environment hints.
+- Conceptual, symbolic, or thematic similarity without geometric similarity is INVALID for pairing.
+- Both objects must be visually similar in basic geometry (e.g., circle–circle, rectangle–rectangle).
 
 MUTUALLY-EXCLUSIVE RULE FOR SIDE_BY_SIDE (CRITICAL):
 - This layout is SIDE_BY_SIDE - it MUST show TWO separate objects/projections clearly separated.
@@ -929,6 +954,7 @@ MUTUALLY-EXCLUSIVE RULE FOR SIDE_BY_SIDE (CRITICAL):
 - FORBIDDEN: showing only one object, fusion, overlap, merging, hybridization, or any arrangement that makes them look like one object.
 - FORBIDDEN: geometric embedding, projection replacement, or structural integration.
 - FORBIDDEN: any visual arrangement that suggests the objects are fused or merged.
+- FORBIDDEN: ≥90% silhouette overlap (if that existed, PERFECT_HYBRID would be used instead).
 - The image MUST be purely SIDE_BY_SIDE (two separate objects) - NO hybrid/fusion elements whatsoever.
 - If the image shows ANY fusion or hybrid appearance, it is INVALID.
 - INVALID if only one object is visible. Both A and B must be visible."""
