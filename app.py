@@ -49,81 +49,6 @@ def load_ace_engine_spec():
 logger.info(f"OpenAI client initialized with image model: {openai_image_model}, text model: {openai_text_model}")
 
 
-def build_visual_prompt_v3(mode, object_a, object_b, environment_context, goal_message):
-    """Build short, strict visual prompt for image generation (SWAP or SIDE-BY-SIDE)"""
-    if mode.lower() == "replacement" or mode.lower() == "swap" or mode.lower() == "החלפה":
-        # SWAP mode: object B replaces object A in A's environment
-        prompt = f"SWAP mode: {object_b} replaces {object_a} in {object_a}'s {environment_context}. Photorealistic product photography DSLR realistic lighting. Both {object_a} and {object_b} are physical objects. No text, no logos, no labels, no packaging text, no signs, no typography, no watermarks."
-    else:
-        # SIDE-BY-SIDE mode: both objects adjacent in same scene
-        prompt = f"SIDE-BY-SIDE mode: {object_a} and {object_b} shown together side by side in {environment_context}. Photorealistic product photography DSLR realistic lighting. Both objects are physical objects. No text, no logos, no labels, no packaging text, no signs, no typography, no watermarks."
-    return prompt
-
-
-def clamp_prompt(prompt, max_len=950):
-    """Clamp prompt to max_len by removing lowest-priority clauses. Never remove: mode, objects, photorealistic, no text."""
-    if len(prompt) <= max_len:
-        return prompt
-    
-    # Priority order (never remove these):
-    # 1. Mode statement (SWAP/SIDE-BY-SIDE)
-    # 2. Object A and Object B
-    # 3. "Photorealistic photo/photography"
-    # 4. "No text/logos/labels"
-    
-    # Extract protected parts
-    protected_keywords = ["SWAP", "SIDE-BY-SIDE", "photorealistic", "photo", "photography", "DSLR", "realistic lighting", 
-                          "No text", "no logos", "no labels", "no packaging", "no signs", "no typography", "no watermarks"]
-    
-    # Find object names (they appear after ":" or "mode:")
-    words = prompt.split()
-    objects = []
-    for i, word in enumerate(words):
-        if word in ["replaces", "and", "shown"]:
-            if i > 0 and i < len(words) - 1:
-                objects.extend([words[i-1], words[i+1]])
-    
-    # If still too long, remove extra adjectives and descriptive phrases while keeping core structure
-    original_prompt = prompt
-    while len(prompt) > max_len:
-        # Remove redundant phrases
-        replacements = [
-            ("realistic lighting", ""),
-            ("DSLR", ""),
-            ("product photography", "photo"),
-            ("physical objects", "objects"),
-            ("No text, no logos, no labels, no packaging text, no signs, no typography, no watermarks", "No text, no logos, no labels"),
-        ]
-        
-        new_prompt = prompt
-        for old, new in replacements:
-            if old in new_prompt:
-                new_prompt = new_prompt.replace(old, new)
-                if len(new_prompt) <= max_len:
-                    break
-        
-        if new_prompt == prompt:
-            # No more reductions possible, truncate from end but keep protected parts
-            protected_start = prompt.find("Photorealistic")
-            protected_end = prompt.find("No text")
-            if protected_start > 0 and protected_end > protected_start:
-                # Keep everything before protected section, truncate middle if needed
-                before = prompt[:protected_start]
-                protected = prompt[protected_start:protected_end + 200]  # Keep protected section
-                if len(before) > max_len - len(protected):
-                    before = before[:max_len - len(protected)]
-                prompt = before + protected
-            else:
-                # Fallback: just truncate carefully
-                prompt = prompt[:max_len]
-            break
-        
-        prompt = new_prompt
-    
-    logger.info(f"prompt_len={len(prompt)} (clamped from {len(original_prompt)})")
-    return prompt
-
-
 def plan_ads(product_name, product_description, size, run_index):
     """Plan 3 ads following ACE_ENGINE_HE.txt specification exactly. Returns strict JSON with run_index and ads array."""
     # Read ACE_ENGINE_HE.txt fresh on each request (no caching)
@@ -389,25 +314,17 @@ def clamp_prompt(prompt, max_len=950):
     return compressed
 
 
-def generate_visual_image_openai(mode, object_a, object_b, environment_context, goal_message, ad_index, requested_width, requested_height):
-    """Generate VISUAL image at 1024x1024 internally following ACE_ENGINE_HE.txt rules exactly. Visual does NOT include headline (rendered separately)."""
+def generate_visual_image_openai(visual_prompt, ad_index, requested_width, requested_height):
+    """Generate VISUAL image at 1024x1024 internally using pre-built visual_prompt. Visual does NOT include headline (rendered separately)."""
     try:
         # Always generate at 1024x1024 internally for visual component (Size Adapter)
         internal_size = "1024x1024"
         
-        # Build mode-specific visual prompt using v3 builder (short, strict)
-        # goal_message parameter is for future use (currently unused in prompt, kept for signature consistency)
-        raw_prompt = build_visual_prompt_v3(mode, object_a, object_b, environment_context, goal_message)
+        # Visual prompt should already be clamped to <= 950 chars by caller
+        final_prompt = visual_prompt
         
-        # Compress prompt to ensure <= 950 chars (endpoint limit)
-        final_prompt = clamp_prompt(raw_prompt, max_len=950)
-        
-        # Log generation start with required fields BEFORE generation (MANDATORY)
-        mode_label = "SWAP" if mode.lower() in ["replacement", "swap", "החלפה"] else "SIDE_BY_SIDE"
-        logger.info(f"EngineDocument=ACE_ENGINE_HE.txt")
-        logger.info(f"Generating VISUAL for ad_index={ad_index} mode={mode_label} objectA={object_a} objectB={object_b}")
-        logger.info(f"visual_prompt={final_prompt}")
-        logger.info(f"internal_size={internal_size} requested_size={requested_width}x{requested_height}")
+        # Log generation start (visual_prompt already logged by caller)
+        logger.info(f"Generating VISUAL for ad_index={ad_index} internal_size={internal_size} requested_size={requested_width}x{requested_height}")
         
         # Generate image with OpenAI (legacy SDK pattern) - always 1024x1024 internally
         response = openai.Image.create(
@@ -560,20 +477,19 @@ def compose_final_ad(visual_bytes, headline_text, requested_width, requested_hei
         gap = 48
         
         # Deterministic layout template per ACE_ENGINE_HE.txt: exactly 50% visual, 50% headline with fixed gap
-        # Equal dominance (בולטות שווה): visual and headline are equally prominent
+        # Equal dominance (בולטות שווה): visual and headline are equally prominent (each gets exactly 50% of canvas)
         if requested_width > requested_height:  # Landscape: 1536x1024
-            # Left half = visual, right half = headline (big text), with fixed gap
-            # Each gets exactly 50% of width (minus gap)
-            available_width = requested_width - gap
-            visual_area_width = available_width // 2  # Exactly 50% for visual
-            headline_area_width = available_width // 2  # Exactly 50% for headline
+            # Left half = visual, right half = headline (big text), with fixed gap between them
+            # Visual gets exactly 50% of width, headline gets exactly 50% of width, gap is between them
+            visual_area_width = (requested_width - gap) // 2  # Exactly 50% for visual
+            headline_area_width = (requested_width - gap) // 2  # Exactly 50% for headline
             visual_area_height = requested_height  # Full height
             headline_area_height = requested_height  # Full height
             
             # Render headline with allocated area
             headline_img = render_headline_image(headline_text, headline_area_width, headline_area_height)
             
-            # Scale visual to fill allocated area (50% width, full height)
+            # Scale visual to fill allocated area (exactly 50% width, full height)
             visual_aspect = visual_img.width / visual_img.height
             target_visual_aspect = visual_area_width / visual_area_height
             
@@ -582,7 +498,7 @@ def compose_final_ad(visual_bytes, headline_text, requested_width, requested_hei
                 scaled_visual_height = visual_area_height
                 scaled_visual_width = int(visual_area_height * visual_aspect)
             else:
-                # Visual is taller: fit to width
+                # Visual is taller: fit to width (exactly 50% width)
                 scaled_visual_width = visual_area_width
                 scaled_visual_height = int(visual_area_width / visual_aspect)
             
@@ -592,31 +508,30 @@ def compose_final_ad(visual_bytes, headline_text, requested_width, requested_hei
             headline_rgb = Image.new('RGB', headline_img.size, (255, 255, 255))
             headline_rgb.paste(headline_img, mask=headline_img.split()[3] if headline_img.mode == 'RGBA' else None)
             
-            # Position visual: left half, centered vertically
+            # Position visual: left half (exactly 50%), centered vertically
             visual_x = 0
             visual_y = (requested_height - scaled_visual_height) // 2
             
-            # Position headline: right half (after gap), centered vertically
+            # Position headline: right half (after gap, exactly 50%), centered vertically
             headline_x = visual_area_width + gap
             headline_y = (requested_height - headline_img.height) // 2
             
         elif requested_height > requested_width:  # Portrait: 1024x1536
-            # Top half = visual, bottom half = headline, with fixed gap
-            available_height = requested_height - gap
+            # Top half = visual (exactly 50%), bottom half = headline (exactly 50%), with fixed gap between them
             visual_area_width = requested_width  # Full width
-            visual_area_height = available_height // 2  # Exactly 50% for visual
+            visual_area_height = (requested_height - gap) // 2  # Exactly 50% for visual
             headline_area_width = requested_width  # Full width
-            headline_area_height = available_height // 2  # Exactly 50% for headline
+            headline_area_height = (requested_height - gap) // 2  # Exactly 50% for headline
             
             # Render headline with allocated area
             headline_img = render_headline_image(headline_text, headline_area_width, headline_area_height)
             
-            # Scale visual to fill allocated area (full width, 50% height)
+            # Scale visual to fill allocated area (full width, exactly 50% height)
             visual_aspect = visual_img.width / visual_img.height
             target_visual_aspect = visual_area_width / visual_area_height
             
             if visual_aspect > target_visual_aspect:
-                # Visual is wider: fit to height, center horizontally
+                # Visual is wider: fit to height (exactly 50%), center horizontally
                 scaled_visual_height = visual_area_height
                 scaled_visual_width = int(visual_area_height * visual_aspect)
             else:
@@ -630,31 +545,30 @@ def compose_final_ad(visual_bytes, headline_text, requested_width, requested_hei
             headline_rgb = Image.new('RGB', headline_img.size, (255, 255, 255))
             headline_rgb.paste(headline_img, mask=headline_img.split()[3] if headline_img.mode == 'RGBA' else None)
             
-            # Position visual: top half, centered horizontally
+            # Position visual: top half (exactly 50%), centered horizontally
             visual_x = (requested_width - scaled_visual_width) // 2
             visual_y = 0
             
-            # Position headline: bottom half (after gap), centered horizontally
+            # Position headline: bottom half (after gap, exactly 50%), centered horizontally
             headline_x = (requested_width - headline_img.width) // 2
             headline_y = visual_area_height + gap
             
         else:  # Square: 1024x1024
-            # Top half = visual (scaled to fill), bottom half = headline (big text), with fixed gap
-            available_height = requested_height - gap
+            # Top half = visual (exactly 50%), bottom half = headline (exactly 50%), with fixed gap between them
             visual_area_width = requested_width  # Full width
-            visual_area_height = available_height // 2  # Exactly 50% for visual
+            visual_area_height = (requested_height - gap) // 2  # Exactly 50% for visual
             headline_area_width = requested_width  # Full width
-            headline_area_height = available_height // 2  # Exactly 50% for headline
+            headline_area_height = (requested_height - gap) // 2  # Exactly 50% for headline
             
             # Render headline with allocated area
             headline_img = render_headline_image(headline_text, headline_area_width, headline_area_height)
             
-            # Scale visual to fill allocated area (full width, 50% height)
+            # Scale visual to fill allocated area (full width, exactly 50% height)
             visual_aspect = visual_img.width / visual_img.height
             target_visual_aspect = visual_area_width / visual_area_height
             
             if visual_aspect > target_visual_aspect:
-                # Visual is wider: fit to height, center horizontally
+                # Visual is wider: fit to height (exactly 50%), center horizontally
                 scaled_visual_height = visual_area_height
                 scaled_visual_width = int(visual_area_height * visual_aspect)
             else:
@@ -668,11 +582,11 @@ def compose_final_ad(visual_bytes, headline_text, requested_width, requested_hei
             headline_rgb = Image.new('RGB', headline_img.size, (255, 255, 255))
             headline_rgb.paste(headline_img, mask=headline_img.split()[3] if headline_img.mode == 'RGBA' else None)
             
-            # Position visual: top half, centered horizontally
+            # Position visual: top half (exactly 50%), centered horizontally
             visual_x = (requested_width - scaled_visual_width) // 2
             visual_y = 0
             
-            # Position headline: bottom half (after gap), centered horizontally
+            # Position headline: bottom half (after gap, exactly 50%), centered horizontally
             headline_x = (requested_width - headline_img.width) // 2
             headline_y = visual_area_height + gap
         
@@ -813,18 +727,29 @@ def generate():
                     logger.warning(f"Ad {ad_index} marketing_text is too short ({len(words)} words, expected ~50)")
                 
                 # Step B: Generate visual image at 1024x1024 internally (Size Adapter) following ACE_ENGINE_HE.txt
-                # Logging is done INSIDE generate_visual_image_openai before generation
-                logger.info(f"requested_size={width}x{height} internal_gen_size=1024x1024 final_canvas_size={width}x{height}")
+                # Build visual prompt using v3 builder (mode-specific, short, strict)
                 goal_message = ad_plan.get('message', '')
+                
+                # Build visual prompt using v3 builder
+                raw_visual_prompt = build_visual_prompt_v3(mode, object_a, object_b, environment_context, goal_message)
+                final_visual_prompt = clamp_prompt(raw_visual_prompt, max_len=950)
+                
+                # Mode label for logs (SWAP for replacement/החלפה, SIDE_BY_SIDE for side_by_side/זה לצד זה)
+                mode_label = "SWAP" if mode.lower() in ["replacement", "swap", "החלפה"] else "SIDE_BY_SIDE"
+                
+                # MANDATORY logs per ad (required by specification):
+                logger.info(f"EngineDocument=ACE_ENGINE_HE.txt")
+                logger.info(f"ad_index={ad_index} mode={mode_label} objectA={object_a} objectB={object_b}")
+                logger.info(f"headline_text='{headline}'")
+                logger.info(f"visual_prompt={final_visual_prompt}")
+                logger.info(f"requested_size={width}x{height} internal_gen_size=1024x1024 final_canvas_size={width}x{height}")
+                
+                # Generate visual image using the pre-built and logged prompt
                 visual_bytes = generate_visual_image_openai(
-                    mode, object_a, object_b, environment_context, goal_message, ad_index, width, height
+                    final_visual_prompt, ad_index, width, height
                 )
                 
-                # Log headline AFTER generation (headline_text is required in logs per requirements)
-                mode_label = "SWAP" if mode.lower() in ["replacement", "swap", "החלפה"] else "SIDE_BY_SIDE"
-                logger.info(f"headline_text='{headline}'")
-                
-                # Step B: Compose final ad (visual + headline) on canvas of requested size with 50/50 dominance
+                # Step B: Compose final ad (visual + headline) on canvas of requested size with exact 50/50 dominance
                 image_bytes, image_base64, mime_type = compose_final_ad(
                     visual_bytes, headline, width, height, ad_index
                 )
@@ -844,11 +769,13 @@ def generate():
                 # Extension is always jpg from composition
                 extension = "jpg"
                 
-                # API response (Step C: API output - unchanged shape)
+                # API response (Step C: API output - unchanged shape, but headline="" since embedded in image)
+                # Headline is embedded in the image, so set headline="" to avoid duplicate in frontend
                 ad = {
                     "ad_index": ad_index,
                     "marketing_text": marketing_text,
-                    "image_jpg": image_data_url
+                    "image_jpg": image_data_url,
+                    "headline": ""  # Empty since headline is embedded in image_jpg
                 }
                 ads.append(ad)
                 
