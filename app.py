@@ -235,27 +235,61 @@ CRITICAL: Exactly 2 ads with mode="replacement", exactly 1 with mode="side_by_si
     raise ValueError("Failed to generate valid plan after 2 attempts")
 
 
-def generate_visual_image_openai(image_prompt, ad_index, requested_width, requested_height):
+def build_swap_visual_prompt(object_a, object_b, environment_context, visual_description):
+    """Build visual prompt for replacement mode (החלפה) according to ACE_ENGINE_HE.txt"""
+    # In replacement mode: object A replaces object B, and replacing object stands in replaced object's environment
+    prompt = f"""Photorealistic product photography of a physical scene. Realistic photography only, no illustration, no vector graphics, no 3D rendering, no CGI, no AI-style effects, no synthetic or digital appearance.
+
+Physical objects: {object_a} replacing {object_b}. The {object_a} stands in the environment context of {object_b}.
+
+Environment: {environment_context} (existence-inference context, not a scene or narrative).
+
+Visual composition: {visual_description}
+
+Photography style: Realistic product photography. Natural lighting. Professional camera shot. Clean background. Physical objects only. No text, no logos, no labels, no packaging text, no signs, no typography anywhere. Graphics allowed only if physically inherent to the object structure (like playing cards with Ace/King/Queen, dice with dots, engraved compass with markings). No decorative text, no brand names, no words.
+
+Forbidden: Vector art, illustration, drawing, sketch, 3D model, CGI, AI-generated appearance, synthetic look, digital art style, text overlays, labels, logos, packaging with text, clothing with logos, signs with writing.
+
+If any object requires textual interpretation to understand it, it is forbidden."""
+    return prompt
+
+
+def build_side_by_side_visual_prompt(object_a, object_b, environment_context, visual_description):
+    """Build visual prompt for side_by_side mode (זה לצד זה) according to ACE_ENGINE_HE.txt"""
+    # In side_by_side mode: both objects appear together side by side
+    prompt = f"""Photorealistic product photography of physical objects. Realistic photography only, no illustration, no vector graphics, no 3D rendering, no CGI, no AI-style effects, no synthetic or digital appearance.
+
+Physical objects: {object_a} and {object_b} shown together side by side.
+
+Environment: {environment_context} (existence-inference context, not a scene or narrative).
+
+Visual composition: {visual_description}. Both objects are visible as separate objects, positioned side by side with proximity.
+
+Photography style: Realistic product photography. Natural lighting. Professional camera shot. Clean background. Physical objects only. No text, no logos, no labels, no packaging text, no signs, no typography anywhere. Graphics allowed only if physically inherent to the object structure (like playing cards with Ace/King/Queen, dice with dots, engraved compass with markings). No decorative text, no brand names, no words.
+
+Forbidden: Vector art, illustration, drawing, sketch, 3D model, CGI, AI-generated appearance, synthetic look, digital art style, text overlays, labels, logos, packaging with text, clothing with logos, signs with writing.
+
+If any object requires textual interpretation to understand it, it is forbidden."""
+    return prompt
+
+
+def generate_visual_image_openai(mode, object_a, object_b, environment_context, visual_description, ad_index, requested_width, requested_height):
     """Generate VISUAL image at 1024x1024 internally following ACE_ENGINE_HE.txt rules exactly. Visual does NOT include headline (rendered separately)."""
     try:
         # Always generate at 1024x1024 internally for visual component (Size Adapter)
         internal_size = "1024x1024"
         
-        # Use the image_prompt from plan as base (already follows ACE rules from planning)
-        # Add ACE engine constraints per ACE_ENGINE_HE.txt:
-        # - כלל צילום ריאליסטי: realistic photography only
-        # - איסורים סגנוניים: no vector, illustration, 3D, CGI, AI effects, synthetic look
-        # - גרפיקה אסורה: no logos, labels, packaging text, signs
-        # - כלל טקסט מכריע: no objects requiring textual interpretation
-        # - Headline is rendered separately, visual contains NO text
-        ace_constraints = """ Photorealistic photograph. Realistic photography only. No illustration, no vector, no 3D, no CGI, no graphic style, no AI effects, no synthetic or digital appearance. No logos, no labels, no packaging text, no signs, no text anywhere. No decorative elements, no secondary elements, no symbols, no effects."""
-        
-        # The image_prompt from plan should already describe the visual composition correctly
-        # Just append ACE constraints to enforce style
-        final_prompt = image_prompt + ace_constraints
+        # Build mode-specific visual prompt according to ACE_ENGINE_HE.txt
+        if mode.lower() == "replacement":
+            final_prompt = build_swap_visual_prompt(object_a, object_b, environment_context, visual_description)
+        elif mode.lower() == "side_by_side":
+            final_prompt = build_side_by_side_visual_prompt(object_a, object_b, environment_context, visual_description)
+        else:
+            # Fallback: should not happen if validation works, but handle gracefully
+            final_prompt = f"""Photorealistic product photography. Physical objects: {object_a} and {object_b}. Environment: {environment_context}. Visual: {visual_description}. Realistic photography only, no illustration, no vector, no 3D, no CGI, no AI style. No text, no logos, no labels, no packaging text, no signs."""
         
         logger.info(f"Generating VISUAL (ACE_ENGINE_HE.txt) for ad {ad_index} with internal_size={internal_size} (requested_size={requested_width}x{requested_height})")
-        logger.info(f"Full visual_prompt (with ACE constraints) for ad {ad_index}: {final_prompt}")
+        logger.info(f"EngineDocument=ACE_ENGINE_HE.txt mode={mode} objectA={object_a} objectB={object_b} visual_prompt='{final_prompt}'")
         
         # Generate image with OpenAI (legacy SDK pattern) - always 1024x1024 internally
         response = openai.Image.create(
@@ -304,46 +338,31 @@ def generate_visual_image_openai(image_prompt, ad_index, requested_width, reques
         raise
 
 
-def render_headline_image(headline_text, canvas_width, canvas_height):
-    """Render headline as a separate image with transparent background"""
+def render_headline_image(headline_text, headline_area_width, headline_area_height):
+    """Render headline as a separate image with transparent background. Headline must be large, bold, highly readable."""
     try:
-        # Calculate headline area: approximately 45-50% of canvas, but account for margins
-        margin = 48
-        available_width = canvas_width - (2 * margin)
-        available_height = canvas_height - (2 * margin)
-        
-        # Headline occupies roughly 45-50% of available space
-        headline_area_fraction = 0.48
-        
-        # For landscape (1536x1024): headline on right side, vertical space ~50%
-        # For portrait (1024x1536): headline on bottom, horizontal space ~50%
-        # For square (1024x1024): can be either, use ~50% for each dimension
-        
-        if canvas_width > canvas_height:  # Landscape: 1536x1024
-            headline_width = int(available_width * headline_area_fraction)
-            headline_height = available_height
-        elif canvas_height > canvas_width:  # Portrait: 1024x1536
-            headline_width = available_width
-            headline_height = int(available_height * headline_area_fraction)
-        else:  # Square: 1024x1024
-            headline_width = int(available_width * 0.9)  # Use most of width
-            headline_height = int(available_height * headline_area_fraction)
+        # Headline area is exactly allocated (50% of canvas minus gap)
+        headline_width = headline_area_width
+        headline_height = headline_area_height
         
         # Create transparent background image for headline
         headline_img = Image.new('RGBA', (headline_width, headline_height), (255, 255, 255, 0))
         draw = ImageDraw.Draw(headline_img)
         
-        # Try to use a bold font, fallback to default if unavailable
-        font_size = max(48, min(headline_width // len(headline_text) if len(headline_text) > 0 else 72, 120))
+        # Calculate font size to fill ~80% of headline area (large, bold, highly readable)
+        # Start with size based on area - make it LARGE and BOLD
+        initial_font_size = max(72, min(headline_height // 2, headline_width // max(len(headline_text), 1) if headline_text else 100))
+        font_size = initial_font_size
         font = None
         
-        # Try multiple font paths (system-dependent)
+        # Try multiple font paths (system-dependent) - prefer bold fonts
         font_paths = [
             "arial.ttf",  # Windows
             "Arial.ttf",  # Windows alternate
             "/System/Library/Fonts/Helvetica.ttc",  # macOS
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",  # Linux
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",  # Linux alternative
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",  # Linux (bold)
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",  # Linux alternative (bold)
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # Linux fallback
         ]
         
         for font_path in font_paths:
@@ -354,15 +373,10 @@ def render_headline_image(headline_text, canvas_width, canvas_height):
                 continue
         
         if font is None:
-            # Fallback to default font
+            # Fallback to default font - try to make it as large as possible
             try:
                 font = ImageFont.load_default()
-                # Default font is small, try to scale up
-                if hasattr(font, 'getsize'):
-                    # Legacy PIL
-                    pass
             except:
-                # Ultimate fallback
                 font = ImageFont.load_default()
         
         # Calculate text bounding box
@@ -408,7 +422,7 @@ def render_headline_image(headline_text, canvas_width, canvas_height):
 
 
 def compose_final_ad(visual_bytes, headline_text, requested_width, requested_height, ad_index):
-    """Compose final ad image: visual + headline on canvas of requested size"""
+    """Compose final ad image: visual + headline on canvas of requested size following ACE_ENGINE_HE.txt deterministic layout"""
     try:
         logger.info(f"COMPOSING final_ad ad_index={ad_index} requested_size={requested_width}x{requested_height} internal_gen_size=1024x1024 final_canvas_size={requested_width}x{requested_height}")
         
@@ -423,149 +437,125 @@ def compose_final_ad(visual_bytes, headline_text, requested_width, requested_hei
         # Create blank RGB canvas with requested size (white background)
         canvas = Image.new('RGB', (requested_width, requested_height), (255, 255, 255))
         
-        # Fixed gap margin (48px) to ensure visual and headline do not touch
-        margin = 48
+        # Fixed gap (48px) to ensure visual and headline do not touch (ACE_ENGINE_HE.txt: הפרדה בין רכיבים)
+        gap = 48
         
-        # Render headline as separate image
-        headline_img = render_headline_image(headline_text, requested_width, requested_height)
-        
-        # Calculate layout based on requested size
+        # Deterministic layout template per ACE_ENGINE_HE.txt: exactly 50% visual, 50% headline with fixed gap
+        # Equal dominance (בולטות שווה): visual and headline are equally prominent
         if requested_width > requested_height:  # Landscape: 1536x1024
-            # Side-by-side layout: visual left, headline right
-            visual_area_width = int((requested_width - 3 * margin) * 0.48)  # ~48% for visual
-            headline_area_width = int((requested_width - 3 * margin) * 0.48)  # ~48% for headline
-            visual_area_height = requested_height - (2 * margin)
-            headline_area_height = requested_height - (2 * margin)
+            # Left half = visual, right half = headline (big text), with fixed gap
+            # Each gets exactly 50% of width (minus gap)
+            available_width = requested_width - gap
+            visual_area_width = available_width // 2  # Exactly 50% for visual
+            headline_area_width = available_width // 2  # Exactly 50% for headline
+            visual_area_height = requested_height  # Full height
+            headline_area_height = requested_height  # Full height
             
-            # Scale visual to fit allocated area while maintaining aspect ratio
+            # Render headline with allocated area
+            headline_img = render_headline_image(headline_text, headline_area_width, headline_area_height)
+            
+            # Scale visual to fill allocated area (50% width, full height)
             visual_aspect = visual_img.width / visual_img.height
             target_visual_aspect = visual_area_width / visual_area_height
             
             if visual_aspect > target_visual_aspect:
-                # Visual is wider: fit to width
-                scaled_visual_width = visual_area_width
-                scaled_visual_height = int(visual_area_width / visual_aspect)
-            else:
-                # Visual is taller: fit to height
+                # Visual is wider: fit to height, center horizontally
                 scaled_visual_height = visual_area_height
                 scaled_visual_width = int(visual_area_height * visual_aspect)
+            else:
+                # Visual is taller: fit to width
+                scaled_visual_width = visual_area_width
+                scaled_visual_height = int(visual_area_width / visual_aspect)
             
             scaled_visual = visual_img.resize((scaled_visual_width, scaled_visual_height), Image.Resampling.LANCZOS)
             
-            # Scale headline to fit allocated area
-            headline_aspect = headline_img.width / headline_img.height if headline_img.height > 0 else 1
-            target_headline_aspect = headline_area_width / headline_area_height
+            # Headline is already rendered at correct size, just convert to RGB
+            headline_rgb = Image.new('RGB', headline_img.size, (255, 255, 255))
+            headline_rgb.paste(headline_img, mask=headline_img.split()[3] if headline_img.mode == 'RGBA' else None)
             
-            if headline_aspect > target_headline_aspect:
-                scaled_headline_width = headline_area_width
-                scaled_headline_height = int(headline_area_width / headline_aspect)
-            else:
-                scaled_headline_height = headline_area_height
-                scaled_headline_width = int(headline_area_height * headline_aspect)
-            
-            scaled_headline = headline_img.resize((scaled_headline_width, scaled_headline_height), Image.Resampling.LANCZOS)
-            
-            # Convert headline from RGBA to RGB for pasting
-            headline_rgb = Image.new('RGB', scaled_headline.size, (255, 255, 255))
-            headline_rgb.paste(scaled_headline, mask=scaled_headline.split()[3] if scaled_headline.mode == 'RGBA' else None)
-            
-            # Position visual: left side, centered vertically
-            visual_x = margin
+            # Position visual: left half, centered vertically
+            visual_x = 0
             visual_y = (requested_height - scaled_visual_height) // 2
             
-            # Position headline: right side, centered vertically
-            headline_x = requested_width - margin - scaled_headline_width
-            headline_y = (requested_height - scaled_headline_height) // 2
+            # Position headline: right half (after gap), centered vertically
+            headline_x = visual_area_width + gap
+            headline_y = (requested_height - headline_img.height) // 2
             
         elif requested_height > requested_width:  # Portrait: 1024x1536
-            # Stacked layout: visual top, headline bottom
-            visual_area_width = requested_width - (2 * margin)
-            visual_area_height = int((requested_height - 3 * margin) * 0.48)  # ~48% for visual
-            headline_area_width = requested_width - (2 * margin)
-            headline_area_height = int((requested_height - 3 * margin) * 0.48)  # ~48% for headline
+            # Top half = visual, bottom half = headline, with fixed gap
+            available_height = requested_height - gap
+            visual_area_width = requested_width  # Full width
+            visual_area_height = available_height // 2  # Exactly 50% for visual
+            headline_area_width = requested_width  # Full width
+            headline_area_height = available_height // 2  # Exactly 50% for headline
             
-            # Scale visual to fit allocated area
+            # Render headline with allocated area
+            headline_img = render_headline_image(headline_text, headline_area_width, headline_area_height)
+            
+            # Scale visual to fill allocated area (full width, 50% height)
             visual_aspect = visual_img.width / visual_img.height
             target_visual_aspect = visual_area_width / visual_area_height
             
             if visual_aspect > target_visual_aspect:
-                scaled_visual_width = visual_area_width
-                scaled_visual_height = int(visual_area_width / visual_aspect)
-            else:
+                # Visual is wider: fit to height, center horizontally
                 scaled_visual_height = visual_area_height
                 scaled_visual_width = int(visual_area_height * visual_aspect)
+            else:
+                # Visual is taller: fit to width
+                scaled_visual_width = visual_area_width
+                scaled_visual_height = int(visual_area_width / visual_aspect)
             
             scaled_visual = visual_img.resize((scaled_visual_width, scaled_visual_height), Image.Resampling.LANCZOS)
             
-            # Scale headline to fit allocated area
-            headline_aspect = headline_img.width / headline_img.height if headline_img.height > 0 else 1
-            target_headline_aspect = headline_area_width / headline_area_height
+            # Headline is already rendered at correct size, just convert to RGB
+            headline_rgb = Image.new('RGB', headline_img.size, (255, 255, 255))
+            headline_rgb.paste(headline_img, mask=headline_img.split()[3] if headline_img.mode == 'RGBA' else None)
             
-            if headline_aspect > target_headline_aspect:
-                scaled_headline_width = headline_area_width
-                scaled_headline_height = int(headline_area_width / headline_aspect)
-            else:
-                scaled_headline_height = headline_area_height
-                scaled_headline_width = int(headline_area_height * headline_aspect)
-            
-            scaled_headline = headline_img.resize((scaled_headline_width, scaled_headline_height), Image.Resampling.LANCZOS)
-            
-            # Convert headline from RGBA to RGB
-            headline_rgb = Image.new('RGB', scaled_headline.size, (255, 255, 255))
-            headline_rgb.paste(scaled_headline, mask=scaled_headline.split()[3] if scaled_headline.mode == 'RGBA' else None)
-            
-            # Position visual: top, centered horizontally
+            # Position visual: top half, centered horizontally
             visual_x = (requested_width - scaled_visual_width) // 2
-            visual_y = margin
+            visual_y = 0
             
-            # Position headline: bottom, centered horizontally
-            headline_x = (requested_width - scaled_headline_width) // 2
-            headline_y = requested_height - margin - scaled_headline_height
+            # Position headline: bottom half (after gap), centered horizontally
+            headline_x = (requested_width - headline_img.width) // 2
+            headline_y = visual_area_height + gap
             
         else:  # Square: 1024x1024
-            # Can use stacked or side-by-side, use stacked (visual top, headline bottom)
-            visual_area_width = requested_width - (2 * margin)
-            visual_area_height = int((requested_height - 3 * margin) * 0.48)
-            headline_area_width = requested_width - (2 * margin)
-            headline_area_height = int((requested_height - 3 * margin) * 0.48)
+            # Top half = visual (scaled to fill), bottom half = headline (big text), with fixed gap
+            available_height = requested_height - gap
+            visual_area_width = requested_width  # Full width
+            visual_area_height = available_height // 2  # Exactly 50% for visual
+            headline_area_width = requested_width  # Full width
+            headline_area_height = available_height // 2  # Exactly 50% for headline
             
-            # Scale visual
+            # Render headline with allocated area
+            headline_img = render_headline_image(headline_text, headline_area_width, headline_area_height)
+            
+            # Scale visual to fill allocated area (full width, 50% height)
             visual_aspect = visual_img.width / visual_img.height
             target_visual_aspect = visual_area_width / visual_area_height
             
             if visual_aspect > target_visual_aspect:
-                scaled_visual_width = visual_area_width
-                scaled_visual_height = int(visual_area_width / visual_aspect)
-            else:
+                # Visual is wider: fit to height, center horizontally
                 scaled_visual_height = visual_area_height
                 scaled_visual_width = int(visual_area_height * visual_aspect)
+            else:
+                # Visual is taller: fit to width
+                scaled_visual_width = visual_area_width
+                scaled_visual_height = int(visual_area_width / visual_aspect)
             
             scaled_visual = visual_img.resize((scaled_visual_width, scaled_visual_height), Image.Resampling.LANCZOS)
             
-            # Scale headline
-            headline_aspect = headline_img.width / headline_img.height if headline_img.height > 0 else 1
-            target_headline_aspect = headline_area_width / headline_area_height
+            # Headline is already rendered at correct size, just convert to RGB
+            headline_rgb = Image.new('RGB', headline_img.size, (255, 255, 255))
+            headline_rgb.paste(headline_img, mask=headline_img.split()[3] if headline_img.mode == 'RGBA' else None)
             
-            if headline_aspect > target_headline_aspect:
-                scaled_headline_width = headline_area_width
-                scaled_headline_height = int(headline_area_width / headline_aspect)
-            else:
-                scaled_headline_height = headline_area_height
-                scaled_headline_width = int(headline_area_height * headline_aspect)
-            
-            scaled_headline = headline_img.resize((scaled_headline_width, scaled_headline_height), Image.Resampling.LANCZOS)
-            
-            # Convert headline from RGBA to RGB
-            headline_rgb = Image.new('RGB', scaled_headline.size, (255, 255, 255))
-            headline_rgb.paste(scaled_headline, mask=scaled_headline.split()[3] if scaled_headline.mode == 'RGBA' else None)
-            
-            # Position visual: top, centered
+            # Position visual: top half, centered horizontally
             visual_x = (requested_width - scaled_visual_width) // 2
-            visual_y = margin
+            visual_y = 0
             
-            # Position headline: bottom, centered
-            headline_x = (requested_width - scaled_headline_width) // 2
-            headline_y = requested_height - margin - scaled_headline_height
+            # Position headline: bottom half (after gap), centered horizontally
+            headline_x = (requested_width - headline_img.width) // 2
+            headline_y = visual_area_height + gap
         
         # Paste visual and headline onto canvas
         canvas.paste(scaled_visual, (visual_x, visual_y))
@@ -689,9 +679,11 @@ def generate():
                 mode = ad_plan.get('mode', 'unknown')
                 object_a = ad_plan.get('object_a', 'unknown')
                 object_b = ad_plan.get('object_b', 'unknown')
+                environment_context = ad_plan.get('environment_context', '')
+                visual_description = ad_plan.get('visual_description', '')
                 
-                # Log per ad as required by ACE_ENGINE_HE.txt implementation (logging already done in plan_ads, but ensure it's here too)
-                logger.info(f"EngineDocument=ACE_ENGINE_HE.txt ad_index={ad_index} mode={mode} object_a={object_a} object_b={object_b} visual_prompt='{image_prompt}'")
+                # Log per ad as MANDATORY per ACE_ENGINE_HE.txt implementation
+                logger.info(f"EngineDocument=ACE_ENGINE_HE.txt ad_index={ad_index} mode={mode} objectA={object_a} objectB={object_b} headline_text='{headline}'")
                 
                 # Ensure marketing_text is approximately 50 words (trim if needed) per ACE rules
                 words = marketing_text.split()
@@ -704,7 +696,7 @@ def generate():
                 # Step B: Generate visual image at 1024x1024 internally (Size Adapter) following ACE_ENGINE_HE.txt
                 logger.info(f"requested_size={width}x{height} internal_gen_size=1024x1024 final_canvas_size={width}x{height}")
                 visual_bytes = generate_visual_image_openai(
-                    image_prompt, ad_index, width, height
+                    mode, object_a, object_b, environment_context, visual_description, ad_index, width, height
                 )
                 
                 # Step B: Compose final ad (visual + headline) on canvas of requested size
