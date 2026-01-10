@@ -185,10 +185,11 @@ CRITICAL: Exactly 2 ads with mode="replacement", exactly 1 with mode="side_by_si
                 if ad_plan.get('ad_index') != i + 1:
                     ad_plan['ad_index'] = i + 1
                 
-                # Validate mode values
+                # Validate mode values (accept Hebrew terms from ACE_ENGINE_HE.txt: "החלפה" for replacement/SWAP, "זה לצד זה" for side_by_side)
                 mode = ad_plan.get('mode', '').lower()
-                if mode not in ['replacement', 'side_by_side']:
-                    raise ValueError(f"Ad {i+1} has invalid mode: {mode}. Must be 'replacement' or 'side_by_side'")
+                valid_modes = ['replacement', 'swap', 'החלפה', 'side_by_side', 'side-by-side', 'זה לצד זה']
+                if mode not in valid_modes:
+                    raise ValueError(f"Ad {i+1} has invalid mode: {mode}. Must be one of: {valid_modes}")
                 
                 # Validate headline: should not be empty and should include product name (case-insensitive check)
                 headline = ad_plan.get('headline', '')
@@ -200,13 +201,17 @@ CRITICAL: Exactly 2 ads with mode="replacement", exactly 1 with mode="side_by_si
                 if len(marketing_words) < 40 or len(marketing_words) > 60:
                     logger.warning(f"Ad {i+1} marketing_text has {len(marketing_words)} words (expected ~50)")
             
-            # Validate mode distribution: exactly 2 replacement, exactly 1 side_by_side
+            # Validate mode distribution: exactly 2 replacement/SWAP (החלפה), exactly 1 side_by_side (זה לצד זה)
+            # Per ACE_ENGINE_HE.txt line 116: "מבין שלוש המודעות: שתיים הן במצב החלפה ואחת היא במצב זה לצד זה"
             modes = [ad.get('mode', '').lower() for ad in ads_plan]
-            replacement_count = modes.count('replacement')
-            side_by_side_count = modes.count('side_by_side')
+            replacement_modes = ['replacement', 'swap', 'החלפה']
+            side_by_side_modes = ['side_by_side', 'side-by-side', 'זה לצד זה']
+            
+            replacement_count = sum(1 for m in modes if m in replacement_modes)
+            side_by_side_count = sum(1 for m in modes if m in side_by_side_modes)
             
             if replacement_count != 2 or side_by_side_count != 1:
-                raise ValueError(f"Invalid mode distribution: {replacement_count} replacement, {side_by_side_count} side_by_side. Expected: 2 replacement, 1 side_by_side")
+                raise ValueError(f"Invalid mode distribution: {replacement_count} replacement/SWAP (החלפה), {side_by_side_count} side_by_side (זה לצד זה). Expected: 2 replacement/SWAP, 1 side_by_side per ACE_ENGINE_HE.txt line 116")
             
             # Set run_index if not present or incorrect
             plan['run_index'] = run_index
@@ -457,8 +462,9 @@ def render_headline_image(headline_text, headline_area_width, headline_area_heig
         raise
 
 
-def compose_final_ad(visual_bytes, headline_text, requested_width, requested_height, ad_index):
-    """Compose final ad image: visual + headline on canvas of requested size following ACE_ENGINE_HE.txt deterministic layout"""
+def compose_final_ad(visual_bytes, headline_text, requested_width, requested_height, ad_index, object_a_environment=None):
+    """Compose final ad image: visual + headline on canvas of requested size following ACE_ENGINE_HE.txt deterministic layout.
+    Headline background must match Object A's environment (ACE_ENGINE_HE.txt line 77: 'הכותרת נמצאת על רקע אובייקט A')."""
     try:
         logger.info(f"COMPOSING final_ad ad_index={ad_index} requested_size={requested_width}x{requested_height} internal_gen_size=1024x1024 final_canvas_size={requested_width}x{requested_height}")
         
@@ -470,14 +476,60 @@ def compose_final_ad(visual_bytes, headline_text, requested_width, requested_hei
             rgb_visual.paste(visual_img, mask=visual_img.split()[3] if visual_img.mode == 'RGBA' else None)
             visual_img = rgb_visual
         
-        # Create blank RGB canvas with requested size (white background)
-        canvas = Image.new('RGB', (requested_width, requested_height), (255, 255, 255))
+        # Extract background tones from visual (Object A's environment) for headline background
+        # Sample from edges/corners of visual to get environment tones (not from object centers)
+        # ACE_ENGINE_HE.txt line 77: headline is on background of Object A
+        background_sample_size = 100  # Sample 100x100 pixels from corners/edges
+        background_samples = []
+        
+        # Sample from four corners and center edges to get environment tones
+        h, w = visual_img.height, visual_img.width
+        sample_positions = [
+            (0, 0),  # Top-left corner
+            (w - background_sample_size, 0),  # Top-right corner
+            (0, h - background_sample_size),  # Bottom-left corner
+            (w - background_sample_size, h - background_sample_size),  # Bottom-right corner
+            (w // 2 - background_sample_size // 2, 0),  # Top center edge
+            (w // 2 - background_sample_size // 2, h - background_sample_size),  # Bottom center edge
+            (0, h // 2 - background_sample_size // 2),  # Left center edge
+            (w - background_sample_size, h // 2 - background_sample_size // 2),  # Right center edge
+        ]
+        
+        for x, y in sample_positions:
+            if x >= 0 and y >= 0 and x + background_sample_size <= w and y + background_sample_size <= h:
+                sample = visual_img.crop((x, y, x + background_sample_size, y + background_sample_size))
+                # Calculate average color of sample (environment tone)
+                pixels = list(sample.getdata())
+                if pixels:
+                    avg_r = sum(p[0] for p in pixels) // len(pixels)
+                    avg_g = sum(p[1] for p in pixels) // len(pixels)
+                    avg_b = sum(p[2] for p in pixels) // len(pixels)
+                    background_samples.append((avg_r, avg_g, avg_b))
+        
+        # Calculate overall average background tone (Object A's environment background)
+        if background_samples:
+            env_r = sum(s[0] for s in background_samples) // len(background_samples)
+            env_g = sum(s[1] for s in background_samples) // len(background_samples)
+            env_b = sum(s[2] for s in background_samples) // len(background_samples)
+            # Slightly lighten for headline background (ensure readability)
+            background_color = (
+                min(255, int(env_r * 1.1) if env_r < 200 else env_r),
+                min(255, int(env_g * 1.1) if env_g < 200 else env_g),
+                min(255, int(env_b * 1.1) if env_b < 200 else env_b)
+            )
+        else:
+            # Fallback: light neutral background if sampling fails
+            background_color = (245, 245, 245)
+        
+        # Create canvas with requested size (headline area will use Object A's background color)
+        canvas = Image.new('RGB', (requested_width, requested_height), background_color)
         
         # Fixed gap (48px) to ensure visual and headline do not touch (ACE_ENGINE_HE.txt: הפרדה בין רכיבים)
         gap = 48
         
         # Deterministic layout template per ACE_ENGINE_HE.txt: exactly 50% visual, 50% headline with fixed gap
         # Equal dominance (בולטות שווה): visual and headline are equally prominent (each gets exactly 50% of canvas)
+        # Headline background must match Object A's environment (ACE_ENGINE_HE.txt line 77: "הכותרת נמצאת על רקע אובייקט A")
         if requested_width > requested_height:  # Landscape: 1536x1024
             # Left half = visual, right half = headline (big text), with fixed gap between them
             # Visual gets exactly 50% of width, headline gets exactly 50% of width, gap is between them
@@ -486,7 +538,7 @@ def compose_final_ad(visual_bytes, headline_text, requested_width, requested_hei
             visual_area_height = requested_height  # Full height
             headline_area_height = requested_height  # Full height
             
-            # Render headline with allocated area
+            # Render headline with allocated area (will be placed on Object A's background)
             headline_img = render_headline_image(headline_text, headline_area_width, headline_area_height)
             
             # Scale visual to fill allocated area (exactly 50% width, full height)
@@ -504,8 +556,8 @@ def compose_final_ad(visual_bytes, headline_text, requested_width, requested_hei
             
             scaled_visual = visual_img.resize((scaled_visual_width, scaled_visual_height), Image.Resampling.LANCZOS)
             
-            # Headline is already rendered at correct size, just convert to RGB
-            headline_rgb = Image.new('RGB', headline_img.size, (255, 255, 255))
+            # Headline RGB with Object A's background color (ACE_ENGINE_HE.txt line 77: headline on Object A's background)
+            headline_rgb = Image.new('RGB', headline_img.size, background_color)
             headline_rgb.paste(headline_img, mask=headline_img.split()[3] if headline_img.mode == 'RGBA' else None)
             
             # Position visual: left half (exactly 50%), centered vertically
@@ -513,8 +565,13 @@ def compose_final_ad(visual_bytes, headline_text, requested_width, requested_hei
             visual_y = (requested_height - scaled_visual_height) // 2
             
             # Position headline: right half (after gap, exactly 50%), centered vertically
+            # Headline area background is Object A's environment background
             headline_x = visual_area_width + gap
             headline_y = (requested_height - headline_img.height) // 2
+            
+            # Fill headline area with Object A's background color (ensure full area is covered)
+            headline_bg = Image.new('RGB', (headline_area_width, headline_area_height), background_color)
+            canvas.paste(headline_bg, (headline_x, 0, headline_x + headline_area_width, requested_height))
             
         elif requested_height > requested_width:  # Portrait: 1024x1536
             # Top half = visual (exactly 50%), bottom half = headline (exactly 50%), with fixed gap between them
@@ -523,7 +580,7 @@ def compose_final_ad(visual_bytes, headline_text, requested_width, requested_hei
             headline_area_width = requested_width  # Full width
             headline_area_height = (requested_height - gap) // 2  # Exactly 50% for headline
             
-            # Render headline with allocated area
+            # Render headline with allocated area (will be placed on Object A's background)
             headline_img = render_headline_image(headline_text, headline_area_width, headline_area_height)
             
             # Scale visual to fill allocated area (full width, exactly 50% height)
@@ -541,8 +598,8 @@ def compose_final_ad(visual_bytes, headline_text, requested_width, requested_hei
             
             scaled_visual = visual_img.resize((scaled_visual_width, scaled_visual_height), Image.Resampling.LANCZOS)
             
-            # Headline is already rendered at correct size, just convert to RGB
-            headline_rgb = Image.new('RGB', headline_img.size, (255, 255, 255))
+            # Headline RGB with Object A's background color (ACE_ENGINE_HE.txt line 77: headline on Object A's background)
+            headline_rgb = Image.new('RGB', headline_img.size, background_color)
             headline_rgb.paste(headline_img, mask=headline_img.split()[3] if headline_img.mode == 'RGBA' else None)
             
             # Position visual: top half (exactly 50%), centered horizontally
@@ -550,8 +607,13 @@ def compose_final_ad(visual_bytes, headline_text, requested_width, requested_hei
             visual_y = 0
             
             # Position headline: bottom half (after gap, exactly 50%), centered horizontally
+            # Headline area background is Object A's environment background
             headline_x = (requested_width - headline_img.width) // 2
             headline_y = visual_area_height + gap
+            
+            # Fill headline area with Object A's background color (ensure full area is covered)
+            headline_bg = Image.new('RGB', (headline_area_width, headline_area_height), background_color)
+            canvas.paste(headline_bg, (0, headline_y, requested_width, headline_y + headline_area_height))
             
         else:  # Square: 1024x1024
             # Top half = visual (exactly 50%), bottom half = headline (exactly 50%), with fixed gap between them
@@ -560,7 +622,7 @@ def compose_final_ad(visual_bytes, headline_text, requested_width, requested_hei
             headline_area_width = requested_width  # Full width
             headline_area_height = (requested_height - gap) // 2  # Exactly 50% for headline
             
-            # Render headline with allocated area
+            # Render headline with allocated area (will be placed on Object A's background)
             headline_img = render_headline_image(headline_text, headline_area_width, headline_area_height)
             
             # Scale visual to fill allocated area (full width, exactly 50% height)
@@ -578,8 +640,8 @@ def compose_final_ad(visual_bytes, headline_text, requested_width, requested_hei
             
             scaled_visual = visual_img.resize((scaled_visual_width, scaled_visual_height), Image.Resampling.LANCZOS)
             
-            # Headline is already rendered at correct size, just convert to RGB
-            headline_rgb = Image.new('RGB', headline_img.size, (255, 255, 255))
+            # Headline RGB with Object A's background color (ACE_ENGINE_HE.txt line 77: headline on Object A's background)
+            headline_rgb = Image.new('RGB', headline_img.size, background_color)
             headline_rgb.paste(headline_img, mask=headline_img.split()[3] if headline_img.mode == 'RGBA' else None)
             
             # Position visual: top half (exactly 50%), centered horizontally
@@ -587,8 +649,13 @@ def compose_final_ad(visual_bytes, headline_text, requested_width, requested_hei
             visual_y = 0
             
             # Position headline: bottom half (after gap, exactly 50%), centered horizontally
+            # Headline area background is Object A's environment background
             headline_x = (requested_width - headline_img.width) // 2
             headline_y = visual_area_height + gap
+            
+            # Fill headline area with Object A's background color (ensure full area is covered)
+            headline_bg = Image.new('RGB', (headline_area_width, headline_area_height), background_color)
+            canvas.paste(headline_bg, (0, headline_y, requested_width, headline_y + headline_area_height))
         
         # Paste visual and headline onto canvas
         canvas.paste(scaled_visual, (visual_x, visual_y))
@@ -714,11 +781,14 @@ def generate():
                 object_b = ad_plan.get('object_b', 'unknown')
                 environment_context = ad_plan.get('environment_context', '')
                 visual_description = ad_plan.get('visual_description', '')
+                goal_message = ad_plan.get('message', '')
                 
-                # Mode: use "SWAP" for replacement (החלפה), "SIDE_BY_SIDE" for side_by_side (זה לצד זה)
+                # Mode label for logs (SWAP for replacement/החלפה, SIDE_BY_SIDE for side_by_side/זה לצד זה)
+                # Per ACE_ENGINE_HE.txt: "החלפה" (replacement/SWAP) and "זה לצד זה" (side_by_side)
                 mode_label = "SWAP" if mode.lower() in ["replacement", "swap", "החלפה"] else "SIDE_BY_SIDE"
                 
                 # Ensure marketing_text is approximately 50 words (trim if needed) per ACE rules
+                # Per ACE_ENGINE_HE.txt line 42: "טקסט שיווקי נלווה באורך של כ־50 מילים"
                 words = marketing_text.split()
                 if len(words) > 60:
                     marketing_text = " ".join(words[:50])
@@ -727,15 +797,9 @@ def generate():
                     logger.warning(f"Ad {ad_index} marketing_text is too short ({len(words)} words, expected ~50)")
                 
                 # Step B: Generate visual image at 1024x1024 internally (Size Adapter) following ACE_ENGINE_HE.txt
-                # Build visual prompt using v3 builder (mode-specific, short, strict)
-                goal_message = ad_plan.get('message', '')
-                
-                # Build visual prompt using v3 builder
+                # Build visual prompt using v3 builder (mode-specific, short, strict, <=950 chars)
                 raw_visual_prompt = build_visual_prompt_v3(mode, object_a, object_b, environment_context, goal_message)
                 final_visual_prompt = clamp_prompt(raw_visual_prompt, max_len=950)
-                
-                # Mode label for logs (SWAP for replacement/החלפה, SIDE_BY_SIDE for side_by_side/זה לצד זה)
-                mode_label = "SWAP" if mode.lower() in ["replacement", "swap", "החלפה"] else "SIDE_BY_SIDE"
                 
                 # MANDATORY logs per ad (required by specification):
                 logger.info(f"EngineDocument=ACE_ENGINE_HE.txt")
