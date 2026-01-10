@@ -5,7 +5,7 @@ import zipfile
 import base64
 import json
 import os
-from openai import OpenAI
+import openai
 import logging
 
 app = Flask(__name__)
@@ -18,16 +18,17 @@ logger = logging.getLogger(__name__)
 # In-memory storage for generated ads (in production, use Redis or database)
 ads_storage = {}
 
-# Initialize OpenAI client
+# Initialize OpenAI client (legacy SDK pattern)
 openai_api_key = os.environ.get('OPENAI_API_KEY')
 if not openai_api_key:
     logger.error("OPENAI_API_KEY is not set in environment")
     raise ValueError("OPENAI_API_KEY environment variable is required")
 
+openai.api_key = openai_api_key
+
 openai_image_model = os.environ.get('OPENAI_IMAGE_MODEL', 'gpt-image-1')
 openai_text_model = os.environ.get('OPENAI_TEXT_MODEL', 'gpt-4.1-mini')
 
-client = OpenAI(api_key=openai_api_key)
 logger.info(f"OpenAI client initialized with image model: {openai_image_model}, text model: {openai_text_model}")
 
 
@@ -49,7 +50,7 @@ Return JSON format:
     "marketing_text": "exactly 50 words of marketing text here"
 }}"""
 
-        response = client.chat.completions.create(
+        response = openai.ChatCompletion.create(
             model=openai_text_model,
             messages=[
                 {"role": "system", "content": "You are an expert copywriter. Return only valid JSON."},
@@ -59,7 +60,11 @@ Return JSON format:
             max_tokens=300
         )
         
-        content = response.choices[0].message.content.strip()
+        # Handle both dict and object responses (legacy SDK compatibility)
+        if isinstance(response, dict):
+            content = response['choices'][0]['message']['content'].strip()
+        else:
+            content = response.choices[0].message.content.strip()
         # Remove markdown code blocks if present
         if content.startswith("```json"):
             content = content[7:]
@@ -121,32 +126,45 @@ The image should be a complete, realistic photograph suitable for advertising.""
 
         logger.info(f"Generating image for ad {ad_index} with size {openai_size}")
         
-        # Generate image with OpenAI (gpt-image-1 returns base64 by default)
-        response = client.images.generate(
-            model=openai_image_model,
+        # Generate image with OpenAI (legacy SDK pattern)
+        # Legacy SDK Image.create: prompt, n, size, response_format (if supported)
+        # Note: legacy SDK may not support 'model' parameter in Image.create
+        response = openai.Image.create(
             prompt=image_prompt,
+            n=1,
             size=openai_size,
-            quality="auto"
+            response_format="b64_json"
         )
         
-        # Get base64 image from response
-        if hasattr(response, 'data') and len(response.data) > 0:
-            image_data = response.data[0]
-            # Check for b64_json field (base64 encoded image)
-            if hasattr(image_data, 'b64_json') and image_data.b64_json:
-                image_base64 = image_data.b64_json
+        # Get base64 image from response (legacy SDK format - handles both dict and object)
+        response_data = response.get('data') if isinstance(response, dict) else (response.data if hasattr(response, 'data') else None)
+        
+        if response_data and len(response_data) > 0:
+            image_data = response_data[0]
+            
+            # Extract b64_json (handles both dict and object access)
+            if isinstance(image_data, dict):
+                image_base64 = image_data.get('b64_json')
+            else:
+                image_base64 = getattr(image_data, 'b64_json', None)
+            
+            if image_base64:
                 image_bytes = base64.b64decode(image_base64)
                 
-                # Validate the image
-                is_valid, error_msg = validate_jpeg_bytes(image_bytes)
+                # Detect image format and validate
+                mime_type, extension = detect_image_format(image_bytes)
+                if not mime_type:
+                    raise ValueError("Generated image format is not supported. Expected PNG, JPEG, or WebP")
+                
+                is_valid, error_msg = validate_image_bytes(image_bytes)
                 if not is_valid:
                     raise ValueError(f"Generated image validation failed: {error_msg}")
                 
-                logger.info(f"Successfully generated image for ad {ad_index}, size: {len(image_bytes)} bytes")
-                return image_bytes, image_base64
+                logger.info(f"Successfully generated image for ad {ad_index}, format: {mime_type}, size: {len(image_bytes)} bytes")
+                return image_bytes, image_base64, mime_type
             else:
                 # Log available fields for debugging
-                available_fields = [attr for attr in dir(image_data) if not attr.startswith('_')]
+                available_fields = list(image_data.keys()) if isinstance(image_data, dict) else [attr for attr in dir(image_data) if not attr.startswith('_')]
                 logger.error(f"OpenAI response does not contain b64_json. Available fields: {available_fields}")
                 raise ValueError("OpenAI response does not contain b64_json field. Image generation may have failed.")
         else:
@@ -157,21 +175,43 @@ The image should be a complete, realistic photograph suitable for advertising.""
         raise
 
 
-def validate_jpeg_bytes(image_bytes):
-    """Validate that bytes represent a valid JPEG image"""
+def detect_image_format(image_bytes):
+    """Detect image format from magic bytes. Returns (mime_type, extension) or (None, None) if unknown."""
+    if not image_bytes or len(image_bytes) < 4:
+        return None, None
+    
+    # JPEG: starts with FF D8
+    if image_bytes[0] == 0xFF and image_bytes[1] == 0xD8:
+        return "image/jpeg", "jpg"
+    
+    # PNG: starts with 89 50 4E 47
+    if (image_bytes[0] == 0x89 and image_bytes[1] == 0x50 and 
+        image_bytes[2] == 0x4E and image_bytes[3] == 0x47):
+        return "image/png", "png"
+    
+    # WebP: starts with RIFF...WEBP (52 49 46 46 ... 57 45 42 50)
+    if (len(image_bytes) >= 12 and 
+        image_bytes[0] == 0x52 and image_bytes[1] == 0x49 and 
+        image_bytes[2] == 0x46 and image_bytes[3] == 0x46 and
+        image_bytes[8] == 0x57 and image_bytes[9] == 0x45 and
+        image_bytes[10] == 0x42 and image_bytes[11] == 0x50):
+        return "image/webp", "webp"
+    
+    return None, None
+
+
+def validate_image_bytes(image_bytes):
+    """Validate that bytes represent a valid image (PNG, JPEG, or WebP)"""
     # Minimum size threshold: at least 5KB for a real image
     MIN_SIZE_BYTES = 5000
     
     if not image_bytes or len(image_bytes) < MIN_SIZE_BYTES:
         return False, f"Image data too small (less than {MIN_SIZE_BYTES} bytes, got {len(image_bytes) if image_bytes else 0})"
     
-    # Check JPEG magic bytes
-    if len(image_bytes) < 2 or not (image_bytes[0] == 0xFF and image_bytes[1] == 0xD8):
-        return False, "Invalid JPEG magic bytes (not starting with FF D8)"
-    
-    # Check JPEG end marker
-    if len(image_bytes) < 2 or not (image_bytes[-2] == 0xFF and image_bytes[-1] == 0xD9):
-        return False, "Invalid JPEG end marker (not ending with FF D9)"
+    # Detect image format
+    mime_type, extension = detect_image_format(image_bytes)
+    if not mime_type:
+        return False, "Invalid image format. Expected PNG, JPEG, or WebP"
     
     # Basic validation passed
     return True, None
@@ -218,12 +258,12 @@ def generate():
                 headline, marketing_text = generate_headline_and_text(product_name, product_description, ad_index)
                 
                 # Generate image with OpenAI (includes headline in image)
-                image_bytes, image_base64 = generate_image_with_openai(
+                image_bytes, image_base64, mime_type = generate_image_with_openai(
                     headline, product_name, product_description, width, height, ad_index
                 )
                 
                 # Validate the generated image
-                is_valid, error_msg = validate_jpeg_bytes(image_bytes)
+                is_valid, error_msg = validate_image_bytes(image_bytes)
                 if not is_valid:
                     logger.error(f"Image validation failed for ad {ad_index}: {error_msg}")
                     return jsonify({
@@ -231,8 +271,8 @@ def generate():
                         "message": error_msg
                     }), 500
                 
-                # Create data URL
-                image_data_url = f"data:image/jpeg;base64,{image_base64}"
+                # Create data URL with correct MIME type
+                image_data_url = f"data:{mime_type};base64,{image_base64}"
                 
                 ad = {
                     "ad_index": ad_index,
@@ -318,15 +358,23 @@ def download():
                         "message": str(e)
                     }), 400
             
-            # Validate JPEG before adding to ZIP
-            is_valid, error_msg = validate_jpeg_bytes(image_bytes)
+            # Detect image format and validate before adding to ZIP
+            mime_type, extension = detect_image_format(image_bytes)
+            if not mime_type:
+                return jsonify({
+                    "error": "Invalid image format",
+                    "message": "Expected PNG, JPEG, or WebP"
+                }), 400
+            
+            is_valid, error_msg = validate_image_bytes(image_bytes)
             if not is_valid:
                 return jsonify({
-                    "error": "Invalid JPEG image",
+                    "error": "Invalid image",
                     "message": error_msg
                 }), 400
             
-            zip_file.writestr(f"ad_{ad_index}.jpg", image_bytes)
+            # Use detected extension for ZIP filename
+            zip_file.writestr(f"ad_{ad_index}.{extension}", image_bytes)
             
             # Add text file
             marketing_text = ad.get('marketing_text', '')
