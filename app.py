@@ -30,27 +30,105 @@ openai.api_key = openai_api_key
 openai_image_model = os.environ.get('OPENAI_IMAGE_MODEL', 'gpt-image-1')
 openai_text_model = os.environ.get('OPENAI_TEXT_MODEL', 'gpt-4.1-mini')
 
-# Load ACE Engine specification from file
+# ACE Engine specification path (read fresh on each request)
 ACE_ENGINE_SPEC_PATH = 'ACE_ENGINE_HE.txt'
-ace_engine_system_prompt = None
 
-try:
-    if os.path.exists(ACE_ENGINE_SPEC_PATH):
-        with open(ACE_ENGINE_SPEC_PATH, 'r', encoding='utf-8') as f:
-            ace_engine_system_prompt = f.read().strip()
-        logger.info(f"ACE Engine specification loaded from {ACE_ENGINE_SPEC_PATH} ({len(ace_engine_system_prompt)} characters)")
-    else:
-        logger.warning(f"ACE Engine specification file {ACE_ENGINE_SPEC_PATH} not found. Using default placeholder.")
-        ace_engine_system_prompt = "[PLACEHOLDER: ACE Engine specification not loaded]"
-except Exception as e:
-    logger.error(f"Error loading ACE Engine specification: {e}")
-    ace_engine_system_prompt = "[ERROR: Failed to load ACE Engine specification]"
+def load_ace_engine_spec():
+    """Load ACE_ENGINE_HE.txt fresh from disk (no caching)"""
+    try:
+        if os.path.exists(ACE_ENGINE_SPEC_PATH):
+            with open(ACE_ENGINE_SPEC_PATH, 'r', encoding='utf-8') as f:
+                return f.read().strip()
+        else:
+            logger.error(f"ACE Engine specification file {ACE_ENGINE_SPEC_PATH} not found.")
+            raise FileNotFoundError(f"ACE_ENGINE_HE.txt not found at {ACE_ENGINE_SPEC_PATH}")
+    except Exception as e:
+        logger.error(f"Error loading ACE Engine specification: {e}")
+        raise
 
 logger.info(f"OpenAI client initialized with image model: {openai_image_model}, text model: {openai_text_model}")
 
 
+def build_visual_prompt_v3(mode, object_a, object_b, environment_context, goal_message):
+    """Build short, strict visual prompt for image generation (SWAP or SIDE-BY-SIDE)"""
+    if mode.lower() == "replacement" or mode.lower() == "swap" or mode.lower() == "החלפה":
+        # SWAP mode: object B replaces object A in A's environment
+        prompt = f"SWAP mode: {object_b} replaces {object_a} in {object_a}'s {environment_context}. Photorealistic product photography DSLR realistic lighting. Both {object_a} and {object_b} are physical objects. No text, no logos, no labels, no packaging text, no signs, no typography, no watermarks."
+    else:
+        # SIDE-BY-SIDE mode: both objects adjacent in same scene
+        prompt = f"SIDE-BY-SIDE mode: {object_a} and {object_b} shown together side by side in {environment_context}. Photorealistic product photography DSLR realistic lighting. Both objects are physical objects. No text, no logos, no labels, no packaging text, no signs, no typography, no watermarks."
+    return prompt
+
+
+def clamp_prompt(prompt, max_len=950):
+    """Clamp prompt to max_len by removing lowest-priority clauses. Never remove: mode, objects, photorealistic, no text."""
+    if len(prompt) <= max_len:
+        return prompt
+    
+    # Priority order (never remove these):
+    # 1. Mode statement (SWAP/SIDE-BY-SIDE)
+    # 2. Object A and Object B
+    # 3. "Photorealistic photo/photography"
+    # 4. "No text/logos/labels"
+    
+    # Extract protected parts
+    protected_keywords = ["SWAP", "SIDE-BY-SIDE", "photorealistic", "photo", "photography", "DSLR", "realistic lighting", 
+                          "No text", "no logos", "no labels", "no packaging", "no signs", "no typography", "no watermarks"]
+    
+    # Find object names (they appear after ":" or "mode:")
+    words = prompt.split()
+    objects = []
+    for i, word in enumerate(words):
+        if word in ["replaces", "and", "shown"]:
+            if i > 0 and i < len(words) - 1:
+                objects.extend([words[i-1], words[i+1]])
+    
+    # If still too long, remove extra adjectives and descriptive phrases while keeping core structure
+    original_prompt = prompt
+    while len(prompt) > max_len:
+        # Remove redundant phrases
+        replacements = [
+            ("realistic lighting", ""),
+            ("DSLR", ""),
+            ("product photography", "photo"),
+            ("physical objects", "objects"),
+            ("No text, no logos, no labels, no packaging text, no signs, no typography, no watermarks", "No text, no logos, no labels"),
+        ]
+        
+        new_prompt = prompt
+        for old, new in replacements:
+            if old in new_prompt:
+                new_prompt = new_prompt.replace(old, new)
+                if len(new_prompt) <= max_len:
+                    break
+        
+        if new_prompt == prompt:
+            # No more reductions possible, truncate from end but keep protected parts
+            protected_start = prompt.find("Photorealistic")
+            protected_end = prompt.find("No text")
+            if protected_start > 0 and protected_end > protected_start:
+                # Keep everything before protected section, truncate middle if needed
+                before = prompt[:protected_start]
+                protected = prompt[protected_start:protected_end + 200]  # Keep protected section
+                if len(before) > max_len - len(protected):
+                    before = before[:max_len - len(protected)]
+                prompt = before + protected
+            else:
+                # Fallback: just truncate carefully
+                prompt = prompt[:max_len]
+            break
+        
+        prompt = new_prompt
+    
+    logger.info(f"prompt_len={len(prompt)} (clamped from {len(original_prompt)})")
+    return prompt
+
+
 def plan_ads(product_name, product_description, size, run_index):
     """Plan 3 ads following ACE_ENGINE_HE.txt specification exactly. Returns strict JSON with run_index and ads array."""
+    # Read ACE_ENGINE_HE.txt fresh on each request (no caching)
+    ace_engine_system_prompt = load_ace_engine_spec()
+    
     user_prompt = f"""Product Name: {product_name}
 Product Description: {product_description}
 Size: {size}
@@ -130,6 +208,7 @@ CRITICAL: Exactly 2 ads with mode="replacement", exactly 1 with mode="side_by_si
 
     for attempt in range(2):  # Retry once if invalid
         try:
+            # Use fresh-loaded ACE_ENGINE_HE.txt as system prompt
             response = openai.ChatCompletion.create(
                 model=openai_text_model,
                 messages=[
@@ -231,19 +310,20 @@ CRITICAL: Exactly 2 ads with mode="replacement", exactly 1 with mode="side_by_si
     raise ValueError("Failed to generate valid plan after 2 attempts")
 
 
-def build_visual_prompt_v3(mode, object_a, object_b, environment_context, visual_description):
-    """Build short, strict visual prompt (v3) following ACE_ENGINE_HE.txt. Max 950 chars after compression."""
+def build_visual_prompt_v3(mode, object_a, object_b, environment_context, goal_message):
+    """Build short, strict visual prompt (v3) following ACE_ENGINE_HE.txt exactly. Max 950 chars after compression."""
     mode_lower = mode.lower()
     
-    if mode_lower == "replacement":
-        # SWAP mode: object A replaces object B in B's environment
-        prompt = f"SWAP: {object_a} replaces {object_b} in {object_b}'s environment. {object_a} stands where {object_b} would be. Photorealistic product photography, DSLR, realistic lighting. Physical objects: {object_a}, {object_b}. Environment: {environment_context}. No text, no logos, no labels, no typography."
-    elif mode_lower == "side_by_side":
-        # SIDE-BY-SIDE mode: both objects shown together
-        prompt = f"SIDE-BY-SIDE: {object_a} and {object_b} shown together side by side. Photorealistic product photography, DSLR, realistic lighting. Physical objects: {object_a}, {object_b}. Environment: {environment_context}. No text, no logos, no labels, no typography."
+    if mode_lower == "replacement" or mode_lower == "swap" or mode_lower == "החלפה":
+        # SWAP mode (החלפה) per ACE_ENGINE_HE.txt line 97-98: object B replaces object A, and B stands in A's environment
+        # "אובייקט אחד מחליף אובייקט אחר, והאובייקט המחליף עומד בסביבתו של האובייקט המוחלף"
+        prompt = f"SWAP: {object_b} replaces {object_a} in {object_a}'s {environment_context}. {object_b} stands where {object_a} would be. Photorealistic product photography DSLR realistic lighting. Physical objects: {object_a}, {object_b}. No text, no logos, no labels, no packaging text, no signs, no typography, no watermarks."
+    elif mode_lower == "side_by_side" or mode_lower == "זה לצד זה":
+        # SIDE-BY-SIDE mode (זה לצד זה) per ACE_ENGINE_HE.txt line 100-101: both objects shown together side by side
+        prompt = f"SIDE-BY-SIDE: {object_a} and {object_b} shown together side by side in {environment_context}. Photorealistic product photography DSLR realistic lighting. Physical objects: {object_a}, {object_b}. No text, no logos, no labels, no packaging text, no signs, no typography, no watermarks."
     else:
-        # Fallback
-        prompt = f"Photorealistic product photography, DSLR, realistic lighting. Objects: {object_a}, {object_b}. Environment: {environment_context}. No text, no logos, no labels."
+        # Fallback (should not happen with proper validation)
+        prompt = f"Photorealistic product photography DSLR realistic lighting. Objects: {object_a}, {object_b}. Environment: {environment_context}. No text, no logos, no labels, no typography."
     
     return prompt
 
@@ -309,20 +389,25 @@ def clamp_prompt(prompt, max_len=950):
     return compressed
 
 
-def generate_visual_image_openai(mode, object_a, object_b, environment_context, visual_description, ad_index, requested_width, requested_height):
+def generate_visual_image_openai(mode, object_a, object_b, environment_context, goal_message, ad_index, requested_width, requested_height):
     """Generate VISUAL image at 1024x1024 internally following ACE_ENGINE_HE.txt rules exactly. Visual does NOT include headline (rendered separately)."""
     try:
         # Always generate at 1024x1024 internally for visual component (Size Adapter)
         internal_size = "1024x1024"
         
         # Build mode-specific visual prompt using v3 builder (short, strict)
-        raw_prompt = build_visual_prompt_v3(mode, object_a, object_b, environment_context, visual_description)
+        # goal_message parameter is for future use (currently unused in prompt, kept for signature consistency)
+        raw_prompt = build_visual_prompt_v3(mode, object_a, object_b, environment_context, goal_message)
         
-        # Compress prompt to ensure <= 950 chars
+        # Compress prompt to ensure <= 950 chars (endpoint limit)
         final_prompt = clamp_prompt(raw_prompt, max_len=950)
         
-        # Log generation start
-        logger.info(f"Generating VISUAL (ACE_ENGINE_HE.txt) for ad {ad_index} with internal_size={internal_size} (requested_size={requested_width}x{requested_height})")
+        # Log generation start with required fields BEFORE generation (MANDATORY)
+        mode_label = "SWAP" if mode.lower() in ["replacement", "swap", "החלפה"] else "SIDE_BY_SIDE"
+        logger.info(f"EngineDocument=ACE_ENGINE_HE.txt")
+        logger.info(f"Generating VISUAL for ad_index={ad_index} mode={mode_label} objectA={object_a} objectB={object_b}")
+        logger.info(f"visual_prompt={final_prompt}")
+        logger.info(f"internal_size={internal_size} requested_size={requested_width}x{requested_height}")
         
         # Generate image with OpenAI (legacy SDK pattern) - always 1024x1024 internally
         response = openai.Image.create(
@@ -357,7 +442,7 @@ def generate_visual_image_openai(mode, object_a, object_b, environment_context, 
                     raise ValueError(f"Generated image validation failed: {error_msg}")
                 
                 logger.info(f"Successfully generated VISUAL for ad {ad_index}, format: {mime_type}, size: {len(image_bytes)} bytes")
-                return image_bytes, final_prompt  # Return bytes and prompt for logging
+                return image_bytes  # Return bytes only (prompt already logged)
             else:
                 # Log available fields for debugging
                 available_fields = list(image_data.keys()) if isinstance(image_data, dict) else [attr for attr in dir(image_data) if not attr.startswith('_')]
@@ -717,7 +802,7 @@ def generate():
                 visual_description = ad_plan.get('visual_description', '')
                 
                 # Mode: use "SWAP" for replacement (החלפה), "SIDE_BY_SIDE" for side_by_side (זה לצד זה)
-                mode_label = "SWAP" if mode.lower() == "replacement" else "SIDE_BY_SIDE"
+                mode_label = "SWAP" if mode.lower() in ["replacement", "swap", "החלפה"] else "SIDE_BY_SIDE"
                 
                 # Ensure marketing_text is approximately 50 words (trim if needed) per ACE rules
                 words = marketing_text.split()
@@ -728,13 +813,16 @@ def generate():
                     logger.warning(f"Ad {ad_index} marketing_text is too short ({len(words)} words, expected ~50)")
                 
                 # Step B: Generate visual image at 1024x1024 internally (Size Adapter) following ACE_ENGINE_HE.txt
+                # Logging is done INSIDE generate_visual_image_openai before generation
                 logger.info(f"requested_size={width}x{height} internal_gen_size=1024x1024 final_canvas_size={width}x{height}")
-                visual_bytes, visual_prompt = generate_visual_image_openai(
-                    mode, object_a, object_b, environment_context, visual_description, ad_index, width, height
+                goal_message = ad_plan.get('message', '')
+                visual_bytes = generate_visual_image_openai(
+                    mode, object_a, object_b, environment_context, goal_message, ad_index, width, height
                 )
                 
-                # Log per ad with ALL required fields (MANDATORY per requirements)
-                logger.info(f"EngineDocument=ACE_ENGINE_HE.txt ad_index={ad_index} mode={mode_label} objectA={object_a} objectB={object_b} headline_text='{headline}' visual_prompt='{visual_prompt}'")
+                # Log headline AFTER generation (headline_text is required in logs per requirements)
+                mode_label = "SWAP" if mode.lower() in ["replacement", "swap", "החלפה"] else "SIDE_BY_SIDE"
+                logger.info(f"headline_text='{headline}'")
                 
                 # Step B: Compose final ad (visual + headline) on canvas of requested size with 50/50 dominance
                 image_bytes, image_base64, mime_type = compose_final_ad(
