@@ -50,45 +50,83 @@ logger.info(f"OpenAI client initialized with image model: {openai_image_model}, 
 
 
 def plan_ads(product_name, product_description, size, run_index):
-    """Plan 3 ads using ACE engine specification as SYSTEM prompt. Returns strict JSON with run_index and ads array."""
+    """Plan 3 ads following ACE_ENGINE_HE.txt specification exactly. Returns strict JSON with run_index and ads array."""
     user_prompt = f"""Product Name: {product_name}
 Product Description: {product_description}
 Size: {size}
 Run Index: {run_index}
 
-Return ONLY valid JSON according to the schema below. No prose.
+Follow the ACE engine specification EXACTLY. Execute these steps in order:
 
-Schema:
+STEP 1: Define 3 distinct advertising goals (מטרות פרסום)
+- Derive from product description
+- Each goal is an advertising message (מסר פרסומי)
+- Goals must be different from each other
+
+STEP 2: For each advertising goal, generate exactly 100 associations
+- Each association must be ONE physical, tangible, photographable object
+- No scenes, no words, no non-objects
+- Objects can express emotion/idea/action/state, but must be physical objects
+- Objects may express meaning of the advertising goal (perceptual meaning only)
+
+STEP 3: Group objects into graphic shapes
+- Sort objects into simple graphic shapes (max 25 shapes total)
+- Each object belongs to one shape category
+
+STEP 4: Pair objects by shape similarity (hierarchical pairing)
+- Create pairs based on shape similarity
+- Order pairs from highest shape similarity to lowest
+- Consider advertising message when pairing (all objects are associations of the goal)
+
+STEP 5: Split pairs into two groups
+- Group 1: Pairs with very high shape similarity → mode "replacement" (החלפה)
+- Group 2: Pairs with lower shape similarity → mode "side_by_side" (זה לצד זה)
+- Reject pairs with no similarity (cannot appear in visual)
+
+STEP 6: Assign modes to 3 ads (arbitrary assignment)
+- Exactly 2 ads with mode="replacement"
+- Exactly 1 ad with mode="side_by_side"
+- Assignment to advertising goals is arbitrary
+
+STEP 7: For each ad, determine:
+- object_a: first physical object from selected pair
+- object_b: second physical object from selected pair
+- environment_context: existence-inference context for objects (NOT a scene, NOT narrative, adds NO message)
+  * In replacement mode: environment is the replaced object's environment
+- visual_description: matches the mode rules
+  * replacement: one object replaces another, replacing object stands in replaced object's environment
+  * side_by_side: both objects appear together side by side
+- headline: INTERPRETS the visual, does NOT describe visual/objects/environment, 3-7 words, includes "{product_name}"
+- marketing_text: ~50 words, loyal to advertising message, does NOT describe visual, does NOT add new message
+- image_prompt: photorealistic photograph description (realistic photography only, NO vector/illustration/3D/CGI/AI effects/synthetic look). 
+  * Visual structure: always based on a PAIR of objects (even in replacement mode)
+  * No text/logos/labels/packaging text anywhere (graphics only if physically inherent: playing cards, dice, engraved compass)
+  * If object requires textual interpretation to understand it → FORBIDDEN
+  * Describe the visual composition without mentioning headline (headline is rendered separately)
+
+Return ONLY valid JSON according to this schema. No prose, no markdown:
+
 {{
   "run_index": {run_index},
   "ads": [
     {{
       "ad_index": 1,
-      "message": "...",
+      "message": "advertising goal 1",
       "mode": "replacement",
-      "object_a": "...",
-      "object_b": "...",
-      "environment_context": "...",
-      "visual_description": "...",
-      "headline": "...",
-      "marketing_text": "...",
-      "image_prompt": "..."
+      "object_a": "physical object",
+      "object_b": "physical object",
+      "environment_context": "existence-inference context (not scene, not narrative)",
+      "visual_description": "description matching mode rules",
+      "headline": "interprets visual, 3-7 words, includes {product_name}",
+      "marketing_text": "~50 words, loyal to message, does not describe visual",
+      "image_prompt": "photorealistic visual description (no headline mentioned)"
     }},
     {{ "ad_index": 2, ... }},
     {{ "ad_index": 3, ... }}
   ]
 }}
 
-Requirements:
-- Exactly 3 ads
-- Exactly 2 ads with mode="replacement", exactly 1 ad with mode="side_by_side"
-- headline interprets visual (does not describe it), 3-7 words, includes product name
-- marketing_text ~50 words, does not describe visual
-- object_a and object_b are physical objects (no words, no scenes)
-- environment_context is existence-inference context (not narrative)
-- image_prompt: photorealistic only (no vector/illustration/3D/CGI/AI-look)
-- No text/logos/labels except headline (graphics only if inherent physical structure)
-- Image contains ONLY ONE headline, NO OTHER TEXT"""
+CRITICAL: Exactly 2 ads with mode="replacement", exactly 1 with mode="side_by_side"."""
 
     for attempt in range(2):  # Retry once if invalid
         try:
@@ -169,9 +207,9 @@ Requirements:
             # Set run_index if not present or incorrect
             plan['run_index'] = run_index
             
-            # Debug logging: planned mode, object_a, object_b, headline
+            # Debug logging per ACE_ENGINE_HE.txt requirements
             for ad in ads_plan:
-                logger.info(f"PLANNED ad_index={ad['ad_index']} mode={ad['mode']} object_a={ad['object_a']} object_b={ad['object_b']} headline='{ad['headline']}'")
+                logger.info(f"EngineDocument=ACE_ENGINE_HE.txt ad_index={ad['ad_index']} mode={ad['mode']} object_a={ad['object_a']} object_b={ad['object_b']} visual_prompt='{ad['image_prompt']}'")
             
             logger.info(f"Successfully planned 3 ads (2 replacement, 1 side_by_side) for run_index={run_index}")
             return plan
@@ -198,26 +236,26 @@ Requirements:
 
 
 def generate_visual_image_openai(image_prompt, ad_index, requested_width, requested_height):
-    """Generate VISUAL image at 1024x1024 internally (headline is NOT included in generation, will be composed separately)"""
+    """Generate VISUAL image at 1024x1024 internally following ACE_ENGINE_HE.txt rules exactly. Visual does NOT include headline (rendered separately)."""
     try:
-        # Always generate at 1024x1024 internally for visual component
+        # Always generate at 1024x1024 internally for visual component (Size Adapter)
         internal_size = "1024x1024"
         
-        # Force these additions to EVERY image_prompt, but REMOVE headline requirement
-        # Visual should NOT contain headline - headline will be rendered separately and composed
-        forced_constraints = """ Photorealistic photograph. No illustration, no vector, no 3D, no CGI, no AI style. No logos, no labels, no packaging text, no signs. No text anywhere in the image."""
+        # Use the image_prompt from plan as base (already follows ACE rules from planning)
+        # Add ACE engine constraints per ACE_ENGINE_HE.txt:
+        # - כלל צילום ריאליסטי: realistic photography only
+        # - איסורים סגנוניים: no vector, illustration, 3D, CGI, AI effects, synthetic look
+        # - גרפיקה אסורה: no logos, labels, packaging text, signs
+        # - כלל טקסט מכריע: no objects requiring textual interpretation
+        # - Headline is rendered separately, visual contains NO text
+        ace_constraints = """ Photorealistic photograph. Realistic photography only. No illustration, no vector, no 3D, no CGI, no graphic style, no AI effects, no synthetic or digital appearance. No logos, no labels, no packaging text, no signs, no text anywhere. No decorative elements, no secondary elements, no symbols, no effects."""
         
-        # Remove any headline instructions from the original prompt
-        visual_prompt = image_prompt
-        # Ensure no headline-related text in the visual prompt
-        if "headline" in visual_prompt.lower():
-            # Remove headline references if present
-            visual_prompt = visual_prompt.replace("headline", "").replace("text", "visual element")
+        # The image_prompt from plan should already describe the visual composition correctly
+        # Just append ACE constraints to enforce style
+        final_prompt = image_prompt + ace_constraints
         
-        final_prompt = visual_prompt + forced_constraints
-        
-        logger.info(f"Generating VISUAL for ad {ad_index} with internal_size={internal_size} (requested_size={requested_width}x{requested_height})")
-        logger.debug(f"Visual prompt (first 200 chars): {visual_prompt[:200]}...")
+        logger.info(f"Generating VISUAL (ACE_ENGINE_HE.txt) for ad {ad_index} with internal_size={internal_size} (requested_size={requested_width}x{requested_height})")
+        logger.info(f"Full visual_prompt (with ACE constraints) for ad {ad_index}: {final_prompt}")
         
         # Generate image with OpenAI (legacy SDK pattern) - always 1024x1024 internally
         response = openai.Image.create(
@@ -652,19 +690,18 @@ def generate():
                 object_a = ad_plan.get('object_a', 'unknown')
                 object_b = ad_plan.get('object_b', 'unknown')
                 
-                # Log debug info: mode, object_a, object_b, headline (Step D: Debug logging)
-                logger.info(f"PLANNED ad_index={ad_index} mode={mode} object_a={object_a} object_b={object_b}")
-                logger.info(f"FINAL_HEADLINE ad_index={ad_index}: '{headline}'")
+                # Log per ad as required by ACE_ENGINE_HE.txt implementation (logging already done in plan_ads, but ensure it's here too)
+                logger.info(f"EngineDocument=ACE_ENGINE_HE.txt ad_index={ad_index} mode={mode} object_a={object_a} object_b={object_b} visual_prompt='{image_prompt}'")
                 
-                # Ensure marketing_text is approximately 50 words (trim if needed)
+                # Ensure marketing_text is approximately 50 words (trim if needed) per ACE rules
                 words = marketing_text.split()
                 if len(words) > 60:
                     marketing_text = " ".join(words[:50])
                     logger.warning(f"Ad {ad_index} marketing_text trimmed from {len(words)} to 50 words")
                 elif len(words) < 40:
-                    logger.warning(f"Ad {ad_index} marketing_text is too short ({len(words)} words)")
+                    logger.warning(f"Ad {ad_index} marketing_text is too short ({len(words)} words, expected ~50)")
                 
-                # Step B: Generate visual image at 1024x1024 internally (Size Adapter)
+                # Step B: Generate visual image at 1024x1024 internally (Size Adapter) following ACE_ENGINE_HE.txt
                 logger.info(f"requested_size={width}x{height} internal_gen_size=1024x1024 final_canvas_size={width}x{height}")
                 visual_bytes = generate_visual_image_openai(
                     image_prompt, ad_index, width, height
