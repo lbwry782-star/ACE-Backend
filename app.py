@@ -7,6 +7,7 @@ import json
 import os
 import openai
 import logging
+from PIL import Image, ImageDraw, ImageFont
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all origins
@@ -196,27 +197,33 @@ Requirements:
     raise ValueError("Failed to generate valid plan after 2 attempts")
 
 
-def generate_image_with_openai(image_prompt, width, height, ad_index, headline):
-    """Generate image using ONLY the image_prompt from ACE engine plan, with forced constraints appended"""
+def generate_visual_image_openai(image_prompt, ad_index, requested_width, requested_height):
+    """Generate VISUAL image at 1024x1024 internally (headline is NOT included in generation, will be composed separately)"""
     try:
-        # Map size to OpenAI format
-        openai_size = f"{width}x{height}"
+        # Always generate at 1024x1024 internally for visual component
+        internal_size = "1024x1024"
         
-        # Force these additions to EVERY image_prompt before calling the image model
-        forced_constraints = """ Photorealistic photograph. No illustration, no vector, no 3D, no CGI, no AI style. No logos, no labels, no packaging text, no signs. The ONLY text in the entire image is the headline (3-7 words). No other text at all. Headline must be integrated in the image as one separate element and must not touch the visual."""
+        # Force these additions to EVERY image_prompt, but REMOVE headline requirement
+        # Visual should NOT contain headline - headline will be rendered separately and composed
+        forced_constraints = """ Photorealistic photograph. No illustration, no vector, no 3D, no CGI, no AI style. No logos, no labels, no packaging text, no signs. No text anywhere in the image."""
         
-        final_prompt = image_prompt + forced_constraints
+        # Remove any headline instructions from the original prompt
+        visual_prompt = image_prompt
+        # Ensure no headline-related text in the visual prompt
+        if "headline" in visual_prompt.lower():
+            # Remove headline references if present
+            visual_prompt = visual_prompt.replace("headline", "").replace("text", "visual element")
         
-        logger.info(f"Generating image for ad {ad_index} with size {openai_size}")
-        logger.info(f"NO_OTHER_TEXT_CONSTRAINT_APPENDED: True (forced constraints added to image_prompt)")
-        logger.debug(f"Image prompt (first 200 chars): {image_prompt[:200]}...")
+        final_prompt = visual_prompt + forced_constraints
         
-        # Generate image with OpenAI (legacy SDK pattern)
-        # Use the image_prompt with forced constraints appended
+        logger.info(f"Generating VISUAL for ad {ad_index} with internal_size={internal_size} (requested_size={requested_width}x{requested_height})")
+        logger.debug(f"Visual prompt (first 200 chars): {visual_prompt[:200]}...")
+        
+        # Generate image with OpenAI (legacy SDK pattern) - always 1024x1024 internally
         response = openai.Image.create(
             prompt=final_prompt,
             n=1,
-            size=openai_size,
+            size=internal_size,
             response_format="b64_json"
         )
         
@@ -244,8 +251,8 @@ def generate_image_with_openai(image_prompt, width, height, ad_index, headline):
                 if not is_valid:
                     raise ValueError(f"Generated image validation failed: {error_msg}")
                 
-                logger.info(f"Successfully generated image for ad {ad_index}, format: {mime_type}, size: {len(image_bytes)} bytes")
-                return image_bytes, image_base64, mime_type
+                logger.info(f"Successfully generated VISUAL for ad {ad_index}, format: {mime_type}, size: {len(image_bytes)} bytes")
+                return image_bytes  # Return bytes only (not base64, will be processed)
             else:
                 # Log available fields for debugging
                 available_fields = list(image_data.keys()) if isinstance(image_data, dict) else [attr for attr in dir(image_data) if not attr.startswith('_')]
@@ -255,7 +262,292 @@ def generate_image_with_openai(image_prompt, width, height, ad_index, headline):
             raise ValueError("OpenAI response does not contain image data")
             
     except Exception as e:
-        logger.error(f"Error generating image with OpenAI: {e}")
+        logger.error(f"Error generating visual image with OpenAI: {e}")
+        raise
+
+
+def render_headline_image(headline_text, canvas_width, canvas_height):
+    """Render headline as a separate image with transparent background"""
+    try:
+        # Calculate headline area: approximately 45-50% of canvas, but account for margins
+        margin = 48
+        available_width = canvas_width - (2 * margin)
+        available_height = canvas_height - (2 * margin)
+        
+        # Headline occupies roughly 45-50% of available space
+        headline_area_fraction = 0.48
+        
+        # For landscape (1536x1024): headline on right side, vertical space ~50%
+        # For portrait (1024x1536): headline on bottom, horizontal space ~50%
+        # For square (1024x1024): can be either, use ~50% for each dimension
+        
+        if canvas_width > canvas_height:  # Landscape: 1536x1024
+            headline_width = int(available_width * headline_area_fraction)
+            headline_height = available_height
+        elif canvas_height > canvas_width:  # Portrait: 1024x1536
+            headline_width = available_width
+            headline_height = int(available_height * headline_area_fraction)
+        else:  # Square: 1024x1024
+            headline_width = int(available_width * 0.9)  # Use most of width
+            headline_height = int(available_height * headline_area_fraction)
+        
+        # Create transparent background image for headline
+        headline_img = Image.new('RGBA', (headline_width, headline_height), (255, 255, 255, 0))
+        draw = ImageDraw.Draw(headline_img)
+        
+        # Try to use a bold font, fallback to default if unavailable
+        font_size = max(48, min(headline_width // len(headline_text) if len(headline_text) > 0 else 72, 120))
+        font = None
+        
+        # Try multiple font paths (system-dependent)
+        font_paths = [
+            "arial.ttf",  # Windows
+            "Arial.ttf",  # Windows alternate
+            "/System/Library/Fonts/Helvetica.ttc",  # macOS
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",  # Linux
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",  # Linux alternative
+        ]
+        
+        for font_path in font_paths:
+            try:
+                font = ImageFont.truetype(font_path, font_size)
+                break
+            except (OSError, IOError):
+                continue
+        
+        if font is None:
+            # Fallback to default font
+            try:
+                font = ImageFont.load_default()
+                # Default font is small, try to scale up
+                if hasattr(font, 'getsize'):
+                    # Legacy PIL
+                    pass
+            except:
+                # Ultimate fallback
+                font = ImageFont.load_default()
+        
+        # Calculate text bounding box
+        bbox = draw.textbbox((0, 0), headline_text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        
+        # Scale font if text is too large
+        if text_width > headline_width * 0.9 or text_height > headline_height * 0.9:
+            scale_factor = min((headline_width * 0.9) / text_width, (headline_height * 0.9) / text_height)
+            font_size = int(font_size * scale_factor)
+            
+            # Re-try font loading with scaled size
+            scaled_font = None
+            for font_path in font_paths:
+                try:
+                    scaled_font = ImageFont.truetype(font_path, font_size)
+                    break
+                except (OSError, IOError):
+                    continue
+            
+            if scaled_font is not None:
+                font = scaled_font
+            else:
+                font = ImageFont.load_default()
+            
+            bbox = draw.textbbox((0, 0), headline_text, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+        
+        # Center text in headline image
+        x = (headline_width - text_width) // 2
+        y = (headline_height - text_height) // 2
+        
+        # Draw text in black (bold and dominant)
+        draw.text((x, y), headline_text, fill=(0, 0, 0, 255), font=font)
+        
+        return headline_img
+        
+    except Exception as e:
+        logger.error(f"Error rendering headline image: {e}")
+        raise
+
+
+def compose_final_ad(visual_bytes, headline_text, requested_width, requested_height, ad_index):
+    """Compose final ad image: visual + headline on canvas of requested size"""
+    try:
+        logger.info(f"COMPOSING final_ad ad_index={ad_index} requested_size={requested_width}x{requested_height} internal_gen_size=1024x1024 final_canvas_size={requested_width}x{requested_height}")
+        
+        # Load visual image from bytes
+        visual_img = Image.open(io.BytesIO(visual_bytes))
+        # Convert to RGB if needed (handles PNG/WebP transparency)
+        if visual_img.mode != 'RGB':
+            rgb_visual = Image.new('RGB', visual_img.size, (255, 255, 255))
+            rgb_visual.paste(visual_img, mask=visual_img.split()[3] if visual_img.mode == 'RGBA' else None)
+            visual_img = rgb_visual
+        
+        # Create blank RGB canvas with requested size (white background)
+        canvas = Image.new('RGB', (requested_width, requested_height), (255, 255, 255))
+        
+        # Fixed gap margin (48px) to ensure visual and headline do not touch
+        margin = 48
+        
+        # Render headline as separate image
+        headline_img = render_headline_image(headline_text, requested_width, requested_height)
+        
+        # Calculate layout based on requested size
+        if requested_width > requested_height:  # Landscape: 1536x1024
+            # Side-by-side layout: visual left, headline right
+            visual_area_width = int((requested_width - 3 * margin) * 0.48)  # ~48% for visual
+            headline_area_width = int((requested_width - 3 * margin) * 0.48)  # ~48% for headline
+            visual_area_height = requested_height - (2 * margin)
+            headline_area_height = requested_height - (2 * margin)
+            
+            # Scale visual to fit allocated area while maintaining aspect ratio
+            visual_aspect = visual_img.width / visual_img.height
+            target_visual_aspect = visual_area_width / visual_area_height
+            
+            if visual_aspect > target_visual_aspect:
+                # Visual is wider: fit to width
+                scaled_visual_width = visual_area_width
+                scaled_visual_height = int(visual_area_width / visual_aspect)
+            else:
+                # Visual is taller: fit to height
+                scaled_visual_height = visual_area_height
+                scaled_visual_width = int(visual_area_height * visual_aspect)
+            
+            scaled_visual = visual_img.resize((scaled_visual_width, scaled_visual_height), Image.Resampling.LANCZOS)
+            
+            # Scale headline to fit allocated area
+            headline_aspect = headline_img.width / headline_img.height if headline_img.height > 0 else 1
+            target_headline_aspect = headline_area_width / headline_area_height
+            
+            if headline_aspect > target_headline_aspect:
+                scaled_headline_width = headline_area_width
+                scaled_headline_height = int(headline_area_width / headline_aspect)
+            else:
+                scaled_headline_height = headline_area_height
+                scaled_headline_width = int(headline_area_height * headline_aspect)
+            
+            scaled_headline = headline_img.resize((scaled_headline_width, scaled_headline_height), Image.Resampling.LANCZOS)
+            
+            # Convert headline from RGBA to RGB for pasting
+            headline_rgb = Image.new('RGB', scaled_headline.size, (255, 255, 255))
+            headline_rgb.paste(scaled_headline, mask=scaled_headline.split()[3] if scaled_headline.mode == 'RGBA' else None)
+            
+            # Position visual: left side, centered vertically
+            visual_x = margin
+            visual_y = (requested_height - scaled_visual_height) // 2
+            
+            # Position headline: right side, centered vertically
+            headline_x = requested_width - margin - scaled_headline_width
+            headline_y = (requested_height - scaled_headline_height) // 2
+            
+        elif requested_height > requested_width:  # Portrait: 1024x1536
+            # Stacked layout: visual top, headline bottom
+            visual_area_width = requested_width - (2 * margin)
+            visual_area_height = int((requested_height - 3 * margin) * 0.48)  # ~48% for visual
+            headline_area_width = requested_width - (2 * margin)
+            headline_area_height = int((requested_height - 3 * margin) * 0.48)  # ~48% for headline
+            
+            # Scale visual to fit allocated area
+            visual_aspect = visual_img.width / visual_img.height
+            target_visual_aspect = visual_area_width / visual_area_height
+            
+            if visual_aspect > target_visual_aspect:
+                scaled_visual_width = visual_area_width
+                scaled_visual_height = int(visual_area_width / visual_aspect)
+            else:
+                scaled_visual_height = visual_area_height
+                scaled_visual_width = int(visual_area_height * visual_aspect)
+            
+            scaled_visual = visual_img.resize((scaled_visual_width, scaled_visual_height), Image.Resampling.LANCZOS)
+            
+            # Scale headline to fit allocated area
+            headline_aspect = headline_img.width / headline_img.height if headline_img.height > 0 else 1
+            target_headline_aspect = headline_area_width / headline_area_height
+            
+            if headline_aspect > target_headline_aspect:
+                scaled_headline_width = headline_area_width
+                scaled_headline_height = int(headline_area_width / headline_aspect)
+            else:
+                scaled_headline_height = headline_area_height
+                scaled_headline_width = int(headline_area_height * headline_aspect)
+            
+            scaled_headline = headline_img.resize((scaled_headline_width, scaled_headline_height), Image.Resampling.LANCZOS)
+            
+            # Convert headline from RGBA to RGB
+            headline_rgb = Image.new('RGB', scaled_headline.size, (255, 255, 255))
+            headline_rgb.paste(scaled_headline, mask=scaled_headline.split()[3] if scaled_headline.mode == 'RGBA' else None)
+            
+            # Position visual: top, centered horizontally
+            visual_x = (requested_width - scaled_visual_width) // 2
+            visual_y = margin
+            
+            # Position headline: bottom, centered horizontally
+            headline_x = (requested_width - scaled_headline_width) // 2
+            headline_y = requested_height - margin - scaled_headline_height
+            
+        else:  # Square: 1024x1024
+            # Can use stacked or side-by-side, use stacked (visual top, headline bottom)
+            visual_area_width = requested_width - (2 * margin)
+            visual_area_height = int((requested_height - 3 * margin) * 0.48)
+            headline_area_width = requested_width - (2 * margin)
+            headline_area_height = int((requested_height - 3 * margin) * 0.48)
+            
+            # Scale visual
+            visual_aspect = visual_img.width / visual_img.height
+            target_visual_aspect = visual_area_width / visual_area_height
+            
+            if visual_aspect > target_visual_aspect:
+                scaled_visual_width = visual_area_width
+                scaled_visual_height = int(visual_area_width / visual_aspect)
+            else:
+                scaled_visual_height = visual_area_height
+                scaled_visual_width = int(visual_area_height * visual_aspect)
+            
+            scaled_visual = visual_img.resize((scaled_visual_width, scaled_visual_height), Image.Resampling.LANCZOS)
+            
+            # Scale headline
+            headline_aspect = headline_img.width / headline_img.height if headline_img.height > 0 else 1
+            target_headline_aspect = headline_area_width / headline_area_height
+            
+            if headline_aspect > target_headline_aspect:
+                scaled_headline_width = headline_area_width
+                scaled_headline_height = int(headline_area_width / headline_aspect)
+            else:
+                scaled_headline_height = headline_area_height
+                scaled_headline_width = int(headline_area_height * headline_aspect)
+            
+            scaled_headline = headline_img.resize((scaled_headline_width, scaled_headline_height), Image.Resampling.LANCZOS)
+            
+            # Convert headline from RGBA to RGB
+            headline_rgb = Image.new('RGB', scaled_headline.size, (255, 255, 255))
+            headline_rgb.paste(scaled_headline, mask=scaled_headline.split()[3] if scaled_headline.mode == 'RGBA' else None)
+            
+            # Position visual: top, centered
+            visual_x = (requested_width - scaled_visual_width) // 2
+            visual_y = margin
+            
+            # Position headline: bottom, centered
+            headline_x = (requested_width - scaled_headline_width) // 2
+            headline_y = requested_height - margin - scaled_headline_height
+        
+        # Paste visual and headline onto canvas
+        canvas.paste(scaled_visual, (visual_x, visual_y))
+        canvas.paste(headline_rgb, (headline_x, headline_y))
+        
+        # Export as JPEG bytes
+        jpeg_buffer = io.BytesIO()
+        canvas.save(jpeg_buffer, format='JPEG', quality=95)
+        jpeg_bytes = jpeg_buffer.getvalue()
+        jpeg_buffer.close()
+        
+        # Convert to base64 for data URL
+        jpeg_base64 = base64.b64encode(jpeg_bytes).decode('utf-8')
+        
+        logger.info(f"Successfully composed final_ad ad_index={ad_index} final_size={len(jpeg_bytes)} bytes")
+        
+        return jpeg_bytes, jpeg_base64, "image/jpeg"
+        
+    except Exception as e:
+        logger.error(f"Error composing final ad: {e}", exc_info=True)
         raise
 
 
@@ -372,9 +664,15 @@ def generate():
                 elif len(words) < 40:
                     logger.warning(f"Ad {ad_index} marketing_text is too short ({len(words)} words)")
                 
-                # Generate image using image_prompt with forced constraints (Step B)
-                image_bytes, image_base64, mime_type = generate_image_with_openai(
-                    image_prompt, width, height, ad_index, headline
+                # Step B: Generate visual image at 1024x1024 internally (Size Adapter)
+                logger.info(f"requested_size={width}x{height} internal_gen_size=1024x1024 final_canvas_size={width}x{height}")
+                visual_bytes = generate_visual_image_openai(
+                    image_prompt, ad_index, width, height
+                )
+                
+                # Step B: Compose final ad (visual + headline) on canvas of requested size
+                image_bytes, image_base64, mime_type = compose_final_ad(
+                    visual_bytes, headline, width, height, ad_index
                 )
                 
                 # Validate the generated image
@@ -386,11 +684,11 @@ def generate():
                         "message": error_msg
                     }), 500
                 
-                # Create data URL with correct MIME type (preserve PNG/WebP if model returns them)
+                # Create data URL with correct MIME type (always JPEG from composition)
                 image_data_url = f"data:{mime_type};base64,{image_base64}"
                 
-                # Detect extension for ZIP filename
-                _, extension = detect_image_format(image_bytes)
+                # Extension is always jpg from composition
+                extension = "jpg"
                 
                 # API response (Step C: API output - unchanged shape)
                 ad = {
@@ -465,36 +763,34 @@ def download():
         # Create ZIP in memory
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            # Add image (decode base64 if it's a data URL)
-            image_data = ad.get('image_jpg', '')
-            if image_data.startswith('data:image'):
-                # Extract base64 part
-                base64_data = image_data.split(',')[1] if ',' in image_data else image_data
-                try:
-                    image_bytes = base64.b64decode(base64_data)
-                except Exception as e:
+            # Use stored image_bytes if available (from composed final ad), otherwise extract from data URL
+            image_bytes = ad.get('image_bytes')
+            extension = ad.get('extension', 'jpg')
+            
+            if image_bytes is None:
+                # Fallback: extract from data URL
+                image_data = ad.get('image_jpg', '')
+                if image_data.startswith('data:image'):
+                    # Extract base64 part
+                    base64_data = image_data.split(',')[1] if ',' in image_data else image_data
+                    try:
+                        image_bytes = base64.b64decode(base64_data)
+                        # Detect extension if not stored
+                        _, detected_ext = detect_image_format(image_bytes)
+                        if detected_ext:
+                            extension = detected_ext
+                    except Exception as e:
+                        return jsonify({
+                            "error": "Invalid base64 image data",
+                            "message": str(e)
+                        }), 400
+                else:
                     return jsonify({
-                        "error": "Invalid base64 image data",
-                        "message": str(e)
-                    }), 400
-            else:
-                # Assume it's already base64
-                try:
-                    image_bytes = base64.b64decode(image_data)
-                except Exception as e:
-                    return jsonify({
-                        "error": "Invalid base64 image data",
-                        "message": str(e)
+                        "error": "Image data not available",
+                        "message": "Cannot generate ZIP without image data"
                     }), 400
             
-            # Detect image format and validate before adding to ZIP
-            mime_type, extension = detect_image_format(image_bytes)
-            if not mime_type:
-                return jsonify({
-                    "error": "Invalid image format",
-                    "message": "Expected PNG, JPEG, or WebP"
-                }), 400
-            
+            # Validate image bytes
             is_valid, error_msg = validate_image_bytes(image_bytes)
             if not is_valid:
                 return jsonify({
@@ -502,7 +798,7 @@ def download():
                     "message": error_msg
                 }), 400
             
-            # Use detected extension for ZIP filename
+            # Use extension (should be 'jpg' from composition, but allow fallback)
             zip_file.writestr(f"ad_{ad_index}.{extension}", image_bytes)
             
             # Add text file
