@@ -29,35 +29,61 @@ openai.api_key = openai_api_key
 openai_image_model = os.environ.get('OPENAI_IMAGE_MODEL', 'gpt-image-1')
 openai_text_model = os.environ.get('OPENAI_TEXT_MODEL', 'gpt-4.1-mini')
 
+# Load ACE Engine specification from file
+ACE_ENGINE_SPEC_PATH = 'ACE_ENGINE_HE.txt'
+ace_engine_system_prompt = None
+
+try:
+    if os.path.exists(ACE_ENGINE_SPEC_PATH):
+        with open(ACE_ENGINE_SPEC_PATH, 'r', encoding='utf-8') as f:
+            ace_engine_system_prompt = f.read().strip()
+        logger.info(f"ACE Engine specification loaded from {ACE_ENGINE_SPEC_PATH} ({len(ace_engine_system_prompt)} characters)")
+    else:
+        logger.warning(f"ACE Engine specification file {ACE_ENGINE_SPEC_PATH} not found. Using default placeholder.")
+        ace_engine_system_prompt = "[PLACEHOLDER: ACE Engine specification not loaded]"
+except Exception as e:
+    logger.error(f"Error loading ACE Engine specification: {e}")
+    ace_engine_system_prompt = "[ERROR: Failed to load ACE Engine specification]"
+
 logger.info(f"OpenAI client initialized with image model: {openai_image_model}, text model: {openai_text_model}")
 
 
-def generate_headline_and_text(product_name, product_description, ad_index):
-    """Generate headline and marketing text using OpenAI"""
+def generate_ace_ads_plan(product_name, product_description):
+    """Generate ACE engine JSON plan for 3 ads using the loaded engine specification as SYSTEM prompt"""
     try:
-        prompt = f"""Generate an advertising headline and marketing text for a product.
+        user_prompt = f"""Generate a strict JSON plan for exactly 3 ads based on the ACE engine rules.
 
 Product Name: {product_name}
 Product Description: {product_description}
 
-Requirements:
-- Headline: 3-7 words, must include the product name "{product_name}", original and compelling
-- Marketing text: Exactly 50 words (headline excluded), persuasive and informative
+Return a JSON array with exactly 3 objects. Each object must have:
+- ad_index: 1, 2, or 3 (sequential)
+- message: advertising message
+- mode: "replacement" (for 2 ads) or "side_by_side" (for 1 ad)
+- object_a: physical object (photographable)
+- object_b: physical object (photographable)
+- environment_context: existence-inference context
+- visual_description: must match the mode rules
+- headline: interprets visual, not describes (3-7 words, includes product name)
+- marketing_text: approximately 50 words, not describing visual
+- image_prompt: photorealistic prompt (no AI style, no illustration, no vector, no 3D, no CGI)
 
-Return JSON format:
-{{
-    "headline": "the headline text here",
-    "marketing_text": "exactly 50 words of marketing text here"
-}}"""
+Enforce engine constraints:
+- Photorealistic only
+- No text/logos/labels except headline (which must appear in image)
+- Graphics only if physically inherent (playing cards, dice, engraved compass)
+- Forbid textual-meaning objects
+
+Return ONLY valid JSON array, no markdown, no explanation."""
 
         response = openai.ChatCompletion.create(
             model=openai_text_model,
             messages=[
-                {"role": "system", "content": "You are an expert copywriter. Return only valid JSON."},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": ace_engine_system_prompt},
+                {"role": "user", "content": user_prompt}
             ],
             temperature=0.8,
-            max_tokens=300
+            max_tokens=2500
         )
         
         # Handle both dict and object responses (legacy SDK compatibility)
@@ -65,6 +91,7 @@ Return JSON format:
             content = response['choices'][0]['message']['content'].strip()
         else:
             content = response.choices[0].message.content.strip()
+        
         # Remove markdown code blocks if present
         if content.startswith("```json"):
             content = content[7:]
@@ -74,61 +101,44 @@ Return JSON format:
             content = content[:-3]
         content = content.strip()
         
-        result = json.loads(content)
-        headline = result.get("headline", f"{product_name}: Innovation You Need")
-        marketing_text = result.get("marketing_text", f"Discover {product_name}: {product_description[:200]}")
+        # Parse JSON array
+        ads_plan = json.loads(content)
         
-        # Ensure marketing text is exactly 50 words
-        words = marketing_text.split()
-        if len(words) > 50:
-            marketing_text = " ".join(words[:50])
-        elif len(words) < 50:
-            # Pad with product description if needed
-            desc_words = product_description.split()
-            needed = 50 - len(words)
-            marketing_text = marketing_text + " " + " ".join(desc_words[:needed])
-            marketing_text = " ".join(marketing_text.split()[:50])
+        # Validate structure
+        if not isinstance(ads_plan, list) or len(ads_plan) != 3:
+            raise ValueError(f"Expected JSON array with 3 ads, got {type(ads_plan)} with {len(ads_plan) if isinstance(ads_plan, list) else 'N/A'} items")
         
-        return headline, marketing_text
+        # Validate each ad has required fields
+        required_fields = ['ad_index', 'message', 'mode', 'object_a', 'object_b', 'environment_context', 
+                          'visual_description', 'headline', 'marketing_text', 'image_prompt']
+        for i, ad_plan in enumerate(ads_plan):
+            for field in required_fields:
+                if field not in ad_plan:
+                    raise ValueError(f"Ad {i+1} missing required field: {field}")
+            
+            # Ensure ad_index matches position
+            if ad_plan.get('ad_index') != i + 1:
+                ad_plan['ad_index'] = i + 1
+        
+        logger.info(f"Successfully generated ACE engine plan for 3 ads")
+        return ads_plan
         
     except Exception as e:
-        logger.error(f"Error generating headline/text: {e}")
-        # Fallback
-        headline = f"{product_name}: Innovation You Need"
-        marketing_text = f"Discover {product_name}: {product_description[:200]}"
-        words = marketing_text.split()[:50]
-        marketing_text = " ".join(words)
-        return headline, marketing_text
+        logger.error(f"Error generating ACE ads plan: {e}", exc_info=True)
+        raise
 
 
-def generate_image_with_openai(headline, product_name, product_description, width, height, ad_index):
-    """Generate a realistic photographic image using OpenAI with headline included"""
+def generate_image_with_openai(image_prompt, width, height, ad_index):
+    """Generate image using ONLY the image_prompt from ACE engine plan (no additional modifications)"""
     try:
         # Map size to OpenAI format
         openai_size = f"{width}x{height}"
         
-        # Build image prompt that includes the headline
-        image_prompt = f"""Create a realistic, professional photographic advertisement image.
-
-Product: {product_name}
-Description: {product_description}
-
-Image Requirements:
-- Realistic photographic style (not illustration, not cartoon, not graphic design)
-- Professional product photography quality
-- The headline text "{headline}" must appear clearly inside the image, integrated naturally into the composition
-- Headline should be placed on a background area, not overlapping the main product/subject
-- Keep all text and important elements at least 8-12% away from all edges (safe margins)
-- High quality, sharp, well-lit, professional composition
-- Size: {width}x{height} pixels
-
-The image should be a complete, realistic photograph suitable for advertising."""
-
-        logger.info(f"Generating image for ad {ad_index} with size {openai_size}")
+        logger.info(f"Generating image for ad {ad_index} with size {openai_size} using ACE engine image_prompt")
+        logger.debug(f"Image prompt (first 200 chars): {image_prompt[:200]}...")
         
         # Generate image with OpenAI (legacy SDK pattern)
-        # Legacy SDK Image.create: prompt, n, size, response_format (if supported)
-        # Note: legacy SDK may not support 'model' parameter in Image.create
+        # Use ONLY the image_prompt from the ACE engine plan, no modifications
         response = openai.Image.create(
             prompt=image_prompt,
             n=1,
@@ -250,16 +260,36 @@ def generate():
         # Parse dimensions
         width, height = map(int, size.split('x'))
         
-        # Generate 3 ads using OpenAI
+        # Generate ACE engine plan for 3 ads (single call to text model)
+        try:
+            ads_plan = generate_ace_ads_plan(product_name, product_description)
+        except Exception as e:
+            logger.error(f"Error generating ACE ads plan: {e}", exc_info=True)
+            return jsonify({
+                "error": "Failed to generate ads plan",
+                "message": str(e)
+            }), 500
+        
+        # Generate 3 ads based on the plan
         ads = []
-        for ad_index in range(1, 4):
+        for ad_plan in ads_plan:
             try:
-                # Generate headline and marketing text
-                headline, marketing_text = generate_headline_and_text(product_name, product_description, ad_index)
+                ad_index = ad_plan['ad_index']
+                headline = ad_plan['headline']
+                marketing_text = ad_plan['marketing_text']
+                image_prompt = ad_plan['image_prompt']
                 
-                # Generate image with OpenAI (includes headline in image)
+                # Ensure marketing_text is approximately 50 words (trim if needed)
+                words = marketing_text.split()
+                if len(words) > 60:
+                    marketing_text = " ".join(words[:50])
+                elif len(words) < 40:
+                    # Pad minimally if too short (shouldn't happen with good engine spec)
+                    logger.warning(f"Ad {ad_index} marketing_text is too short ({len(words)} words)")
+                
+                # Generate image using ONLY the image_prompt from ACE engine plan
                 image_bytes, image_base64, mime_type = generate_image_with_openai(
-                    headline, product_name, product_description, width, height, ad_index
+                    image_prompt, width, height, ad_index
                 )
                 
                 # Validate the generated image
@@ -281,7 +311,7 @@ def generate():
                 }
                 ads.append(ad)
                 
-                logger.info(f"Successfully generated ad {ad_index} for {product_name}")
+                logger.info(f"Successfully generated ad {ad_index} for {product_name} (mode: {ad_plan.get('mode', 'unknown')})")
                 
             except Exception as e:
                 logger.error(f"Error generating ad {ad_index}: {e}", exc_info=True)

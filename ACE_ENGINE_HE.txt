@@ -1,0 +1,4 @@
+[PLACEHOLDER: The full canonical ACE engine specification will be provided here]
+
+This file should contain the complete ACE engine rules and requirements that will be used as the SYSTEM prompt for all text model calls that plan the ads.
+
