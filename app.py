@@ -207,10 +207,6 @@ CRITICAL: Exactly 2 ads with mode="replacement", exactly 1 with mode="side_by_si
             # Set run_index if not present or incorrect
             plan['run_index'] = run_index
             
-            # Debug logging per ACE_ENGINE_HE.txt requirements
-            for ad in ads_plan:
-                logger.info(f"EngineDocument=ACE_ENGINE_HE.txt ad_index={ad['ad_index']} mode={ad['mode']} object_a={ad['object_a']} object_b={ad['object_b']} visual_prompt='{ad['image_prompt']}'")
-            
             logger.info(f"Successfully planned 3 ads (2 replacement, 1 side_by_side) for run_index={run_index}")
             return plan
             
@@ -235,42 +231,82 @@ CRITICAL: Exactly 2 ads with mode="replacement", exactly 1 with mode="side_by_si
     raise ValueError("Failed to generate valid plan after 2 attempts")
 
 
-def build_swap_visual_prompt(object_a, object_b, environment_context, visual_description):
-    """Build visual prompt for replacement mode (החלפה) according to ACE_ENGINE_HE.txt"""
-    # In replacement mode: object A replaces object B, and replacing object stands in replaced object's environment
-    prompt = f"""Photorealistic product photography of a physical scene. Realistic photography only, no illustration, no vector graphics, no 3D rendering, no CGI, no AI-style effects, no synthetic or digital appearance.
-
-Physical objects: {object_a} replacing {object_b}. The {object_a} stands in the environment context of {object_b}.
-
-Environment: {environment_context} (existence-inference context, not a scene or narrative).
-
-Visual composition: {visual_description}
-
-Photography style: Realistic product photography. Natural lighting. Professional camera shot. Clean background. Physical objects only. No text, no logos, no labels, no packaging text, no signs, no typography anywhere. Graphics allowed only if physically inherent to the object structure (like playing cards with Ace/King/Queen, dice with dots, engraved compass with markings). No decorative text, no brand names, no words.
-
-Forbidden: Vector art, illustration, drawing, sketch, 3D model, CGI, AI-generated appearance, synthetic look, digital art style, text overlays, labels, logos, packaging with text, clothing with logos, signs with writing.
-
-If any object requires textual interpretation to understand it, it is forbidden."""
+def build_visual_prompt_v3(mode, object_a, object_b, environment_context, visual_description):
+    """Build short, strict visual prompt (v3) following ACE_ENGINE_HE.txt. Max 950 chars after compression."""
+    mode_lower = mode.lower()
+    
+    if mode_lower == "replacement":
+        # SWAP mode: object A replaces object B in B's environment
+        prompt = f"SWAP: {object_a} replaces {object_b} in {object_b}'s environment. {object_a} stands where {object_b} would be. Photorealistic product photography, DSLR, realistic lighting. Physical objects: {object_a}, {object_b}. Environment: {environment_context}. No text, no logos, no labels, no typography."
+    elif mode_lower == "side_by_side":
+        # SIDE-BY-SIDE mode: both objects shown together
+        prompt = f"SIDE-BY-SIDE: {object_a} and {object_b} shown together side by side. Photorealistic product photography, DSLR, realistic lighting. Physical objects: {object_a}, {object_b}. Environment: {environment_context}. No text, no logos, no labels, no typography."
+    else:
+        # Fallback
+        prompt = f"Photorealistic product photography, DSLR, realistic lighting. Objects: {object_a}, {object_b}. Environment: {environment_context}. No text, no logos, no labels."
+    
     return prompt
 
 
-def build_side_by_side_visual_prompt(object_a, object_b, environment_context, visual_description):
-    """Build visual prompt for side_by_side mode (זה לצד זה) according to ACE_ENGINE_HE.txt"""
-    # In side_by_side mode: both objects appear together side by side
-    prompt = f"""Photorealistic product photography of physical objects. Realistic photography only, no illustration, no vector graphics, no 3D rendering, no CGI, no AI-style effects, no synthetic or digital appearance.
-
-Physical objects: {object_a} and {object_b} shown together side by side.
-
-Environment: {environment_context} (existence-inference context, not a scene or narrative).
-
-Visual composition: {visual_description}. Both objects are visible as separate objects, positioned side by side with proximity.
-
-Photography style: Realistic product photography. Natural lighting. Professional camera shot. Clean background. Physical objects only. No text, no logos, no labels, no packaging text, no signs, no typography anywhere. Graphics allowed only if physically inherent to the object structure (like playing cards with Ace/King/Queen, dice with dots, engraved compass with markings). No decorative text, no brand names, no words.
-
-Forbidden: Vector art, illustration, drawing, sketch, 3D model, CGI, AI-generated appearance, synthetic look, digital art style, text overlays, labels, logos, packaging with text, clothing with logos, signs with writing.
-
-If any object requires textual interpretation to understand it, it is forbidden."""
-    return prompt
+def clamp_prompt(prompt, max_len=950):
+    """Compress prompt if too long. Never removes: mode, objectA/objectB, 'photorealistic photo', 'no text/logos/labels'"""
+    if len(prompt) <= max_len:
+        logger.info(f"prompt_len={len(prompt)} (within limit)")
+        return prompt
+    
+    original_len = len(prompt)
+    logger.warning(f"Prompt too long: {original_len} chars, compressing to max {max_len}")
+    
+    # Split into sentences/clauses
+    parts = prompt.split('.')
+    
+    # Identify critical parts that must be kept
+    critical_keywords = ['SWAP:', 'SIDE-BY-SIDE:', 'photorealistic', 'DSLR', 'realistic lighting', 
+                        'No text', 'no logos', 'no labels', 'no typography']
+    
+    # Keep critical parts first
+    essential_parts = []
+    optional_parts = []
+    
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        
+        is_critical = any(keyword.lower() in part.lower() for keyword in critical_keywords)
+        # Also check if it contains object names (likely critical)
+        if 'object' in part.lower() or 'Physical' in part or 'Environment' in part:
+            is_critical = True
+        
+        if is_critical:
+            essential_parts.append(part)
+        else:
+            optional_parts.append(part)
+    
+    # Build compressed prompt starting with essential parts
+    compressed = '. '.join(essential_parts)
+    
+    # Add optional parts if space allows
+    if len(compressed) < max_len:
+        remaining_space = max_len - len(compressed) - 10  # Reserve for separators
+        for part in optional_parts:
+            candidate = compressed + '. ' + part
+            if len(candidate) <= max_len:
+                compressed = candidate
+            else:
+                break
+    
+    # Final safety: truncate if still too long (shouldn't happen with critical parts only)
+    if len(compressed) > max_len:
+        # Remove extra spaces, shorten long words
+        compressed = compressed[:max_len-3].rstrip() + '...'
+    
+    # Ensure it ends properly
+    if not compressed.endswith('.'):
+        compressed += '.'
+    
+    logger.info(f"prompt_len={len(compressed)} (compressed from {original_len})")
+    return compressed
 
 
 def generate_visual_image_openai(mode, object_a, object_b, environment_context, visual_description, ad_index, requested_width, requested_height):
@@ -279,17 +315,14 @@ def generate_visual_image_openai(mode, object_a, object_b, environment_context, 
         # Always generate at 1024x1024 internally for visual component (Size Adapter)
         internal_size = "1024x1024"
         
-        # Build mode-specific visual prompt according to ACE_ENGINE_HE.txt
-        if mode.lower() == "replacement":
-            final_prompt = build_swap_visual_prompt(object_a, object_b, environment_context, visual_description)
-        elif mode.lower() == "side_by_side":
-            final_prompt = build_side_by_side_visual_prompt(object_a, object_b, environment_context, visual_description)
-        else:
-            # Fallback: should not happen if validation works, but handle gracefully
-            final_prompt = f"""Photorealistic product photography. Physical objects: {object_a} and {object_b}. Environment: {environment_context}. Visual: {visual_description}. Realistic photography only, no illustration, no vector, no 3D, no CGI, no AI style. No text, no logos, no labels, no packaging text, no signs."""
+        # Build mode-specific visual prompt using v3 builder (short, strict)
+        raw_prompt = build_visual_prompt_v3(mode, object_a, object_b, environment_context, visual_description)
         
+        # Compress prompt to ensure <= 950 chars
+        final_prompt = clamp_prompt(raw_prompt, max_len=950)
+        
+        # Log generation start
         logger.info(f"Generating VISUAL (ACE_ENGINE_HE.txt) for ad {ad_index} with internal_size={internal_size} (requested_size={requested_width}x{requested_height})")
-        logger.info(f"EngineDocument=ACE_ENGINE_HE.txt mode={mode} objectA={object_a} objectB={object_b} visual_prompt='{final_prompt}'")
         
         # Generate image with OpenAI (legacy SDK pattern) - always 1024x1024 internally
         response = openai.Image.create(
@@ -324,7 +357,7 @@ def generate_visual_image_openai(mode, object_a, object_b, environment_context, 
                     raise ValueError(f"Generated image validation failed: {error_msg}")
                 
                 logger.info(f"Successfully generated VISUAL for ad {ad_index}, format: {mime_type}, size: {len(image_bytes)} bytes")
-                return image_bytes  # Return bytes only (not base64, will be processed)
+                return image_bytes, final_prompt  # Return bytes and prompt for logging
             else:
                 # Log available fields for debugging
                 available_fields = list(image_data.keys()) if isinstance(image_data, dict) else [attr for attr in dir(image_data) if not attr.startswith('_')]
@@ -349,9 +382,10 @@ def render_headline_image(headline_text, headline_area_width, headline_area_heig
         headline_img = Image.new('RGBA', (headline_width, headline_height), (255, 255, 255, 0))
         draw = ImageDraw.Draw(headline_img)
         
-        # Calculate font size to fill ~80% of headline area (large, bold, highly readable)
-        # Start with size based on area - make it LARGE and BOLD
-        initial_font_size = max(72, min(headline_height // 2, headline_width // max(len(headline_text), 1) if headline_text else 100))
+        # Calculate font size to fill ~80-90% of headline area (large, bold, highly readable)
+        # Make it LARGE and BOLD for equal dominance (50% of canvas)
+        # Headline must be equally prominent as visual
+        initial_font_size = max(96, min(headline_height // 1.5, int(headline_width / max(len(headline_text), 1) * 0.6) if headline_text else 120))
         font_size = initial_font_size
         font = None
         
@@ -682,8 +716,8 @@ def generate():
                 environment_context = ad_plan.get('environment_context', '')
                 visual_description = ad_plan.get('visual_description', '')
                 
-                # Log per ad as MANDATORY per ACE_ENGINE_HE.txt implementation
-                logger.info(f"EngineDocument=ACE_ENGINE_HE.txt ad_index={ad_index} mode={mode} objectA={object_a} objectB={object_b} headline_text='{headline}'")
+                # Mode: use "SWAP" for replacement (החלפה), "SIDE_BY_SIDE" for side_by_side (זה לצד זה)
+                mode_label = "SWAP" if mode.lower() == "replacement" else "SIDE_BY_SIDE"
                 
                 # Ensure marketing_text is approximately 50 words (trim if needed) per ACE rules
                 words = marketing_text.split()
@@ -695,11 +729,14 @@ def generate():
                 
                 # Step B: Generate visual image at 1024x1024 internally (Size Adapter) following ACE_ENGINE_HE.txt
                 logger.info(f"requested_size={width}x{height} internal_gen_size=1024x1024 final_canvas_size={width}x{height}")
-                visual_bytes = generate_visual_image_openai(
+                visual_bytes, visual_prompt = generate_visual_image_openai(
                     mode, object_a, object_b, environment_context, visual_description, ad_index, width, height
                 )
                 
-                # Step B: Compose final ad (visual + headline) on canvas of requested size
+                # Log per ad with ALL required fields (MANDATORY per requirements)
+                logger.info(f"EngineDocument=ACE_ENGINE_HE.txt ad_index={ad_index} mode={mode_label} objectA={object_a} objectB={object_b} headline_text='{headline}' visual_prompt='{visual_prompt}'")
+                
+                # Step B: Compose final ad (visual + headline) on canvas of requested size with 50/50 dominance
                 image_bytes, image_base64, mime_type = compose_final_ad(
                     visual_bytes, headline, width, height, ad_index
                 )
