@@ -3,12 +3,14 @@ ACE Engine Interface
 
 This module defines the engine interface for generating ads.
 STEP 2: Core Decision Logic - implements canonical decision rules for A/B pair evaluation.
+STEP 2.5: Object & Input Sanitation - hard exclusions before geometry evaluation.
 """
 
 from typing import Dict, Any, Tuple, Optional, List
 from PIL import Image, ImageDraw, ImageFont
 import io
 from enum import Enum
+from dataclasses import dataclass
 
 
 class HybridType(Enum):
@@ -52,9 +54,202 @@ class BatchQuotaState:
         self.structural_exception_used = True
 
 
+def quota_state_from_dict(d: Optional[Dict[str, bool]]) -> BatchQuotaState:
+    """
+    Create BatchQuotaState from dictionary.
+    
+    Args:
+        d: Dictionary with keys: material_analogy_used, structural_morphology_used, structural_exception_used
+           If None or missing keys, defaults to False
+    
+    Returns:
+        BatchQuotaState instance
+    """
+    state = BatchQuotaState()
+    if d:
+        state.material_analogy_used = d.get('material_analogy_used', False)
+        state.structural_morphology_used = d.get('structural_morphology_used', False)
+        state.structural_exception_used = d.get('structural_exception_used', False)
+    return state
+
+
+def quota_state_to_dict(state: BatchQuotaState) -> Dict[str, bool]:
+    """
+    Convert BatchQuotaState to dictionary.
+    
+    Args:
+        state: BatchQuotaState instance
+    
+    Returns:
+        Dictionary with quota flags
+    """
+    return {
+        'material_analogy_used': state.material_analogy_used,
+        'structural_morphology_used': state.structural_morphology_used,
+        'structural_exception_used': state.structural_exception_used
+    }
+
+
 # Global threshold constants (HARD GATES)
 GEOMETRIC_OVERLAP_THRESHOLD_HYBRID = 0.70  # 70% - minimum for HYBRID eligibility
 GEOMETRIC_OVERLAP_THRESHOLD_SIDE_BY_SIDE = 0.50  # 50% - below this, forced SIDE-BY-SIDE
+
+
+# ============================================================================
+# STEP 2.5: OBJECT & INPUT SANITATION (Hard Exclusions Before Geometry)
+# ============================================================================
+#
+# HARD PROHIBITIONS (no exceptions, no quotas can override):
+# 1. Objects with readable text are FORBIDDEN
+# 2. Objects with logos/brands are FORBIDDEN
+# 3. Objects with labels/packaging text are FORBIDDEN
+# 4. Objects with communicative graphics are FORBIDDEN
+# 5. Objects that are purely symbolic (symbolic-only) are FORBIDDEN
+#
+# STRICT STRUCTURAL-GRAPHICS EXCEPTION:
+# - Graphics are allowed ONLY if:
+#   - has_structural_graphics_only == True
+#   - AND no text/logo/label/communicative graphics present
+#   - AND graphics are physically embedded (e.g., playing cards, dice pips, engraved compass)
+#   - AND graphics are non-communicative (not used for branding/labeling)
+#
+# ASSOCIATION REPRESENTATION RULE:
+# - Object must be a practical tool/carrier for the association
+# - Purely symbolic objects (is_symbolic_only == True) are rejected
+# - Object must have physical presence, not just conceptual meaning
+# ============================================================================
+
+
+@dataclass
+class ObjectCandidate:
+    """
+    Data model for object candidates with fields to support hard filtering.
+    
+    Fields:
+    - name: Object name/identifier
+    - is_physical_object: True if object is physical and photographable
+    - contains_readable_text: True if object has readable text (prohibited)
+    - contains_logo_or_brand: True if object has logos/brands (prohibited)
+    - has_label_or_packaging_text: True if object has labels/packaging text (prohibited)
+    - has_communicative_graphics: True if object has communicative graphics (prohibited)
+    - has_structural_graphics_only: True if graphics are physically embedded and non-communicative (allowed exception)
+    - is_symbolic_only: True if object is purely symbolic (e.g., graduation cap for "education") (prohibited)
+    - association_rank: Rank in association list (1..80)
+    """
+    name: str
+    is_physical_object: bool
+    contains_readable_text: bool
+    contains_logo_or_brand: bool
+    has_label_or_packaging_text: bool
+    has_communicative_graphics: bool
+    has_structural_graphics_only: bool
+    is_symbolic_only: bool
+    association_rank: int
+
+
+def is_object_graphically_eligible(obj: ObjectCandidate) -> bool:
+    """
+    Hard filter: Check if object passes graphic/text/label prohibitions.
+    
+    HARD PROHIBITIONS (immediate rejection):
+    - contains_readable_text → REJECT
+    - contains_logo_or_brand → REJECT
+    - has_label_or_packaging_text → REJECT
+    - has_communicative_graphics → REJECT
+    
+    STRICT STRUCTURAL-GRAPHICS EXCEPTION:
+    - Graphics allowed ONLY if has_structural_graphics_only == True
+    - AND no text/logo/label/communicative graphics present
+    
+    Args:
+        obj: ObjectCandidate to evaluate
+    
+    Returns:
+        True if object passes graphic eligibility, False if rejected
+    """
+    # Hard prohibition: reject if contains any readable text
+    if obj.contains_readable_text:
+        return False
+    
+    # Hard prohibition: reject if contains logos or brands
+    if obj.contains_logo_or_brand:
+        return False
+    
+    # Hard prohibition: reject if has labels or packaging text
+    if obj.has_label_or_packaging_text:
+        return False
+    
+    # Hard prohibition: reject if has communicative graphics
+    if obj.has_communicative_graphics:
+        return False
+    
+    # Structural graphics exception: allowed ONLY if:
+    # - has_structural_graphics_only == True
+    # - AND all text/logo/label prohibitions already passed above
+    # If object has graphics but NOT structural-only, it's already rejected by has_communicative_graphics check
+    
+    # Object passes graphic eligibility
+    return True
+
+
+def is_object_association_eligible(obj: ObjectCandidate) -> bool:
+    """
+    Hard filter: Check if object passes association representation rule.
+    
+    ASSOCIATION REPRESENTATION RULE:
+    - Object must be a practical tool/carrier for the association
+    - Purely symbolic objects (is_symbolic_only == True) are REJECTED
+    - Object must have physical presence, not just conceptual meaning
+    
+    Args:
+        obj: ObjectCandidate to evaluate
+    
+    Returns:
+        True if object passes association eligibility, False if rejected
+    """
+    # Hard prohibition: reject if object is purely symbolic
+    if obj.is_symbolic_only:
+        return False
+    
+    # Object must be a physical object (practical tool/carrier)
+    if not obj.is_physical_object:
+        return False
+    
+    # Object passes association eligibility
+    return True
+
+
+def sanitize_candidate_pool(objs: List[ObjectCandidate]) -> List[ObjectCandidate]:
+    """
+    Apply hard sanitation filters to object candidate pool.
+    
+    Filters applied (in order):
+    1. Graphic eligibility (text/logo/label/communicative graphics prohibitions)
+    2. Association eligibility (symbolic-only prohibition)
+    
+    Both filters must pass for object to remain in pool.
+    
+    Args:
+        objs: List of ObjectCandidate objects to sanitize
+    
+    Returns:
+        Sanitized list of eligible ObjectCandidate objects
+    
+    Raises:
+        ValueError: If sanitization removes all candidates and no valid pool exists
+    """
+    sanitized = []
+    
+    for obj in objs:
+        # Apply both hard filters
+        if is_object_graphically_eligible(obj) and is_object_association_eligible(obj):
+            sanitized.append(obj)
+    
+    # Hard gate: if no valid candidates remain, FAIL explicitly
+    if len(sanitized) == 0:
+        raise ValueError("No valid object candidates after sanitation")
+    
+    return sanitized
 
 
 def calculate_geometric_overlap(object_a_silhouette: Any, object_b_silhouette: Any) -> float:
@@ -276,15 +471,24 @@ def evaluate_ab_pair(
         # If CORE geometric, should never fail quota check
         return (False, hybrid_type, "Unexpected quota check failure")
     
+    # Step 7: Mark quota as used if this is an exception type
+    if hybrid_type == HybridType.MATERIAL_ANALOGY:
+        quota_state.use_material_analogy()
+    elif hybrid_type == HybridType.STRUCTURAL_MORPHOLOGY:
+        quota_state.use_structural_morphology()
+    elif hybrid_type == HybridType.STRUCTURAL_PATTERN:
+        quota_state.use_structural_exception()
+    # CORE_GEOMETRIC and SIDE_BY_SIDE don't use quotas
+    
     # Pair passes all rules
     return (True, hybrid_type, None)
 
 
 def find_valid_ab_pair(
-    candidate_pairs: List[Tuple[Any, Any]],
+    candidate_pairs: List[Tuple[ObjectCandidate, ObjectCandidate]],
     quota_state: BatchQuotaState,
-    ranked_associations: List[Any]
-) -> Tuple[Optional[Any], Optional[Any], HybridType, Optional[str]]:
+    ranked_associations: List[ObjectCandidate]
+) -> Tuple[Optional[ObjectCandidate], Optional[ObjectCandidate], HybridType, Optional[str]]:
     """
     Find the first valid A/B pair from candidates that passes all rules.
     
@@ -294,7 +498,7 @@ def find_valid_ab_pair(
     - NEVER use geometric overlap to choose between candidates
     
     Args:
-        candidate_pairs: List of (object_a, object_b) candidate pairs
+        candidate_pairs: List of (object_a, object_b) candidate pairs (already sanitized)
         quota_state: Batch quota state
         ranked_associations: Ranked list of associations (size 80) for resolution
     
@@ -305,6 +509,7 @@ def find_valid_ab_pair(
         - error_message: None if valid pair found, error if none found
     """
     # Evaluate candidates in ranked order (geometry is pass/fail gate)
+    # Note: All candidates in candidate_pairs have already passed hard sanitation filters
     for object_a, object_b in candidate_pairs:
         # For now, assume geometric similarity (will be determined from actual data)
         is_valid, hybrid_type, error_msg = evaluate_ab_pair(
@@ -354,10 +559,49 @@ def generate_ad(
     if quota_state is None:
         quota_state = BatchQuotaState()
     
-    # TODO: STEP 3 - Generate ranked association list (size 80)
-    # TODO: STEP 4 - Generate candidate A/B pairs from ranked list
-    # TODO: STEP 5 - Call find_valid_ab_pair() with candidates
+    # ========================================================================
+    # STEP 2.5: OBJECT & INPUT SANITATION (Hard Gates Before Geometry)
+    # ========================================================================
+    # Build/receive candidate pool (placeholder until object generation is implemented)
+    # For now, create a minimal placeholder pool with valid candidates
+    placeholder_candidates = [
+        ObjectCandidate(
+            name="placeholder_object_1",
+            association_rank=1,
+            is_physical_object=True,
+            contains_readable_text=False,
+            contains_logo_or_brand=False,
+            has_label_or_packaging_text=False,
+            has_communicative_graphics=False,
+            has_structural_graphics_only=False,
+            is_symbolic_only=False
+        ),
+        ObjectCandidate(
+            name="placeholder_object_2",
+            association_rank=2,
+            is_physical_object=True,
+            contains_readable_text=False,
+            contains_logo_or_brand=False,
+            has_label_or_packaging_text=False,
+            has_communicative_graphics=False,
+            has_structural_graphics_only=False,
+            is_symbolic_only=False
+        )
+    ]
+    
+    # Apply hard sanitation filters BEFORE any candidate pairing
+    try:
+        sanitized_pool = sanitize_candidate_pool(placeholder_candidates)
+    except ValueError as e:
+        # No valid candidates after sanitation - FAIL explicitly
+        raise ValueError("No valid object candidates after sanitation") from e
+    
+    # ========================================================================
+    # TODO: STEP 3 - Generate ranked association list (size 80) as ObjectCandidate objects
+    # TODO: STEP 4 - Generate candidate A/B pairs from sanitized pool
+    # TODO: STEP 5 - Call find_valid_ab_pair() with sanitized candidates
     # TODO: STEP 6 - If no valid pair found, raise ValueError("No valid A/B pair found")
+    # ========================================================================
     
     # For now, placeholder implementation until object generation is added
     # Parse size
@@ -415,8 +659,10 @@ def generate_ad(
     # Generate placeholder marketing text
     marketing_text = f"Demo marketing text for {product_name}. This is a placeholder implementation. The actual ACE engine will generate creative content based on: {product_description[:100]}..."
     
+    # Return result with updated batch state
     return {
         "image_bytes_jpg": image_bytes_jpg,
-        "marketing_text": marketing_text
+        "marketing_text": marketing_text,
+        "batch_state": quota_state_to_dict(quota_state)
     }
 
