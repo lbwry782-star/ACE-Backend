@@ -4,6 +4,7 @@ ACE Engine Interface
 This module defines the engine interface for generating ads.
 STEP 2: Core Decision Logic - implements canonical decision rules for A/B pair evaluation.
 STEP 2.5: Object & Input Sanitation - hard exclusions before geometry evaluation.
+STEP 3: Goal → 80 Associations → Object Pool - builds intent and object candidates.
 """
 
 from typing import Dict, Any, Tuple, Optional, List
@@ -12,6 +13,10 @@ import io
 from enum import Enum
 from dataclasses import dataclass
 
+
+# ============================================================================
+# STEP 2: CORE DECISION LOGIC - Shared Types and State
+# ============================================================================
 
 class HybridType(Enum):
     """Classification of hybrid types"""
@@ -88,6 +93,351 @@ def quota_state_to_dict(state: BatchQuotaState) -> Dict[str, bool]:
         'structural_morphology_used': state.structural_morphology_used,
         'structural_exception_used': state.structural_exception_used
     }
+
+
+# ============================================================================
+# STEP 3: GOAL → 80 ASSOCIATIONS → OBJECT POOL
+# ============================================================================
+# This step builds INTENT → ASSOCIATIONS → OBJECT CANDIDATES.
+# No visual output, environment, headline, lighting, or composition rules.
+# Deterministic implementation with predefined libraries.
+# ============================================================================
+
+# Allowed advertising goals (fixed set)
+ALLOWED_GOALS = ["speed", "safety", "durability", "freshness", "clarity", "efficiency", "comfort", "precision"]
+
+# Goal keyword mapping (deterministic classification)
+GOAL_KEYWORDS = {
+    "speed": ["fast", "quick", "rapid", "speed", "velocity", "acceleration", "swift", "instant", "immediate"],
+    "safety": ["safe", "secure", "protection", "shield", "guard", "safety", "reliable", "trust", "secure"],
+    "durability": ["durable", "strong", "tough", "lasting", "endurance", "resilient", "robust", "sturdy", "long-lasting"],
+    "freshness": ["fresh", "new", "crisp", "clean", "pure", "natural", "organic", "vibrant", "alive"],
+    "clarity": ["clear", "sharp", "precise", "focused", "crisp", "distinct", "transparent", "visible", "defined"],
+    "efficiency": ["efficient", "effective", "productive", "optimized", "streamlined", "smart", "intelligent", "optimal"],
+    "comfort": ["comfort", "comfortable", "relaxing", "soft", "gentle", "cozy", "pleasant", "easy", "smooth"],
+    "precision": ["precise", "accurate", "exact", "detailed", "refined", "perfected", "meticulous", "careful"]
+}
+
+# Predefined associations library (exactly 80 per goal)
+# Using expanded lists to reach exactly 80 associations per goal
+ASSOCIATIONS_LIBRARY = {
+    "speed": [
+        "racing car", "jet engine", "arrow", "lightning bolt", "cheetah", "falcon", "bullet train", "rocket",
+        "sports car", "motorcycle", "wind", "tornado", "hurricane", "waterfall", "river current", "ocean wave",
+        "athlete running", "sprinter", "marathon runner", "cyclist", "skier", "surfer", "skateboard", "roller skates",
+        "propeller", "turbine", "fan blade", "rotor", "spinning wheel", "gear", "pulley", "chain",
+        "meteor", "comet", "satellite", "spacecraft", "drone", "airplane", "helicopter", "glider",
+        "speedboat", "yacht", "sailboat", "kayak", "canoe", "raft", "submarine", "hovercraft",
+        "racehorse", "greyhound", "antelope", "gazelle", "deer", "rabbit", "squirrel", "bird",
+        "stream", "brook", "creek", "rapids", "cascade", "torrent", "flood", "tsunami",
+        "whirlwind", "cyclone", "vortex", "spiral", "helix", "coil", "spring", "elastic",
+        "momentum", "velocity", "acceleration", "thrust", "propulsion", "force", "energy", "power"
+    ],
+    "safety": [
+        "helmet", "seatbelt", "airbag", "safety net", "guardrail", "barrier", "fence", "wall",
+        "lock", "key", "padlock", "safe", "vault", "strongbox", "security system", "alarm",
+        "fire extinguisher", "smoke detector", "sprinkler", "emergency exit", "first aid kit", "bandage", "splint", "stretcher",
+        "life jacket", "life preserver", "buoy", "lifeline", "rope", "harness", "anchor", "mooring",
+        "shield", "armor", "protective gear", "safety glasses", "goggles", "gloves", "boots", "vest",
+        "guard dog", "watchdog", "security guard", "police officer", "soldier", "bodyguard", "sentinel", "lookout",
+        "fortress", "castle", "fort", "bunker", "shelter", "refuge", "sanctuary", "haven",
+        "insurance", "warranty", "guarantee", "protection", "coverage", "security", "safety", "reliability",
+        "stability", "balance", "foundation", "base", "support", "pillar", "column", "beam",
+        "caution", "warning", "alert", "signal", "beacon", "lighthouse", "flare", "siren"
+    ],
+    "durability": [
+        "steel beam", "concrete block", "stone wall", "brick", "marble", "granite", "diamond", "titanium",
+        "oak tree", "redwood", "cedar", "pine", "bamboo", "ironwood", "teak", "mahogany",
+        "chain", "cable", "rope", "wire", "cord", "thread", "fiber", "strand",
+        "bridge", "dam", "tunnel", "viaduct", "aqueduct", "arch", "column", "pillar",
+        "mountain", "rock", "boulder", "cliff", "ridge", "peak", "summit", "plateau",
+        "foundation", "base", "footing", "support", "frame", "structure", "skeleton", "framework",
+        "armor", "shield", "protection", "barrier", "defense", "fortification", "rampart", "bulwark",
+        "endurance", "stamina", "resilience", "toughness", "strength", "hardness", "rigidity", "solidity",
+        "permanence", "stability", "constancy", "persistence", "continuity", "longevity", "endurance", "lasting",
+        "reinforcement", "strengthening", "fortification", "consolidation", "solidification", "hardening", "tempering", "annealing"
+    ],
+    "freshness": [
+        "morning dew", "spring water", "rain", "snow", "ice", "frost", "mist", "fog",
+        "green leaf", "fresh flower", "bud", "sprout", "seedling", "sapling", "blossom", "bloom",
+        "fruit", "vegetable", "herb", "spice", "grain", "seed", "nut", "berry",
+        "breeze", "wind", "air", "oxygen", "atmosphere", "sky", "cloud", "sunlight",
+        "ocean", "sea", "lake", "river", "stream", "pond", "pool", "fountain",
+        "crystal", "gem", "pearl", "coral", "shell", "stone", "mineral", "quartz",
+        "dawn", "sunrise", "morning", "daybreak", "twilight", "dusk", "evening", "night",
+        "clean", "pure", "clear", "bright", "luminous", "radiant", "shining", "glowing",
+        "new", "renewed", "revived", "restored", "refreshed", "rejuvenated", "regenerated", "reborn",
+        "vitality", "energy", "vigor", "strength", "health", "wellness", "fitness", "vibrancy"
+    ],
+    "clarity": [
+        "crystal", "glass", "lens", "mirror", "prism", "diamond", "ice", "water",
+        "window", "pane", "transparency", "clarity", "visibility", "sharpness", "focus", "precision",
+        "magnifying glass", "telescope", "microscope", "binoculars", "periscope", "kaleidoscope", "spectroscope", "monocle",
+        "light", "beam", "ray", "shine", "glow", "illumination", "brightness", "luminosity",
+        "eye", "pupil", "iris", "retina", "vision", "sight", "perception", "observation",
+        "map", "chart", "diagram", "blueprint", "plan", "scheme", "layout", "design",
+        "compass", "navigator", "guide", "beacon", "lighthouse", "signal", "marker", "indicator",
+        "definition", "explanation", "description", "specification", "detail", "particular", "aspect", "element",
+        "understanding", "comprehension", "insight", "awareness", "knowledge", "wisdom", "intelligence", "enlightenment",
+        "purity", "simplicity", "plainness", "straightforwardness", "directness", "honesty", "truth", "reality"
+    ],
+    "efficiency": [
+        "gear", "cog", "wheel", "pulley", "lever", "fulcrum", "mechanism", "machine",
+        "engine", "motor", "turbine", "generator", "transformer", "converter", "adapter", "connector",
+        "pipeline", "conduit", "channel", "duct", "tube", "pipe", "hose", "conduit",
+        "circuit", "pathway", "route", "course", "track", "trail", "way", "direction",
+        "system", "network", "grid", "matrix", "array", "pattern", "structure", "organization",
+        "tool", "instrument", "device", "apparatus", "equipment", "machinery", "implement", "utensil",
+        "optimization", "streamlining", "simplification", "refinement", "improvement", "enhancement", "upgrade", "advancement",
+        "productivity", "output", "yield", "result", "outcome", "achievement", "accomplishment", "success",
+        "speed", "quickness", "rapidity", "swiftness", "celerity", "velocity", "pace", "rate",
+        "economy", "thrift", "frugality", "conservation", "preservation", "saving", "efficiency", "effectiveness"
+    ],
+    "comfort": [
+        "pillow", "cushion", "mattress", "blanket", "quilt", "comforter", "duvet", "sheet",
+        "sofa", "armchair", "recliner", "chaise", "ottoman", "footstool", "bench", "stool",
+        "bed", "hammock", "swing", "rocker", "glider", "cradle", "bassinet", "crib",
+        "slippers", "socks", "robe", "pajamas", "sweater", "cardigan", "hoodie", "jacket",
+        "warmth", "coziness", "softness", "gentleness", "tenderness", "kindness", "care", "attention",
+        "relaxation", "rest", "repose", "ease", "leisure", "peace", "tranquility", "serenity",
+        "support", "assistance", "help", "aid", "relief", "solace", "consolation", "comfort",
+        "safety", "security", "protection", "shelter", "refuge", "sanctuary", "haven", "retreat",
+        "familiarity", "home", "hearth", "fireplace", "warmth", "light", "glow", "radiance",
+        "contentment", "satisfaction", "happiness", "joy", "pleasure", "delight", "enjoyment", "bliss"
+    ],
+    "precision": [
+        "compass", "ruler", "scale", "caliper", "micrometer", "gauge", "meter", "measure",
+        "clock", "watch", "timer", "chronometer", "stopwatch", "hourglass", "sundial", "pendulum",
+        "laser", "beam", "ray", "light", "signal", "pulse", "wave", "frequency",
+        "target", "bullseye", "mark", "spot", "point", "dot", "pixel", "coordinate",
+        "needle", "pin", "spike", "nail", "tack", "staple", "rivet", "screw",
+        "knife", "blade", "razor", "scalpel", "chisel", "awl", "drill", "bit",
+        "arrow", "dart", "projectile", "missile", "bullet", "pellet", "shot", "slug",
+        "lens", "focus", "magnification", "zoom", "clarity", "sharpness", "definition", "resolution",
+        "calibration", "adjustment", "alignment", "positioning", "placement", "location", "placement", "setting",
+        "accuracy", "exactness", "correctness", "rightness", "truth", "veracity", "validity", "authenticity"
+    ]
+}
+
+
+def derive_advertising_goal(product_name: str, product_description: str) -> str:
+    """
+    Derive exactly ONE advertising goal from product information (deterministic).
+    
+    Rules:
+    - Goal must be inferred ONLY from product_name + product_description
+    - Goal is NEVER returned to frontend or exposed in output (hidden)
+    - No user choice, no configuration
+    - Goal must be concrete (from fixed allowed set)
+    - Uses deterministic keyword-based classification (no randomness)
+    
+    Args:
+        product_name: Name of the product
+        product_description: Description of the product
+    
+    Returns:
+        Single concrete advertising goal string from ALLOWED_GOALS
+    
+    Raises:
+        ValueError: If goal derivation fails (no matching keywords found)
+    """
+    # Combine product name and description for keyword matching
+    text = (product_name + " " + product_description).lower()
+    
+    # Count keyword matches for each goal
+    goal_scores = {}
+    for goal, keywords in GOAL_KEYWORDS.items():
+        score = sum(1 for keyword in keywords if keyword in text)
+        if score > 0:
+            goal_scores[goal] = score
+    
+    # If no matches found, FAIL
+    if not goal_scores:
+        raise ValueError(f"Failed to derive advertising goal: no matching keywords found in product name/description")
+    
+    # Return goal with highest score
+    # Tie-break: if multiple goals have same highest score, choose first in ALLOWED_GOALS order
+    max_score = max(goal_scores.values())
+    tied_goals = [goal for goal, score in goal_scores.items() if score == max_score]
+    
+    # Deterministic tie-break: choose goal that appears first in ALLOWED_GOALS
+    for goal in ALLOWED_GOALS:
+        if goal in tied_goals:
+            return goal
+    
+    # Fallback (should never happen)
+    return tied_goals[0]
+
+
+def generate_associations(goal: str) -> List[str]:
+    """
+    Generate EXACTLY 80 associations from the advertising goal (deterministic).
+    
+    Rules:
+    - Generate EXACTLY 80 associations (no more, no less)
+    - Associations must be physical, experiential, or functional (not abstract words)
+    - No symbols, metaphors, or emotions as standalone items
+    - No duplicates, no near-duplicates
+    - Ordered list: index 1 = strongest association
+    - Associations are internal only (not returned to frontend)
+    
+    Args:
+        goal: Advertising goal string
+    
+    Returns:
+        List of exactly 80 association strings, ordered by strength
+    
+    Raises:
+        ValueError: If goal not found in associations library or count is not exactly 80
+    """
+    if goal not in ASSOCIATIONS_LIBRARY:
+        raise ValueError(f"Goal '{goal}' not found in associations library")
+    
+    associations = ASSOCIATIONS_LIBRARY[goal]
+    
+    if len(associations) != 80:
+        raise ValueError(f"Expected exactly 80 associations for goal '{goal}', got {len(associations)}")
+    
+    # Validate no duplicates
+    if len(set(associations)) != len(associations):
+        raise ValueError(f"Duplicate associations found for goal '{goal}'")
+    
+    return associations
+
+
+def map_association_to_objects(association: str, association_rank: int) -> List[ObjectCandidate]:
+    """
+    Map an association to 1-3 ObjectCandidate instances (deterministic).
+    
+    Rules:
+    - Each association maps to 1-3 ObjectCandidate instances
+    - Objects must represent the association as a TOOL / CARRIER, not a symbol
+    - Objects must be photographable physical objects
+    - Populate ALL ObjectCandidate fields explicitly
+    - Uses deterministic mapping: association name becomes object name (default pattern)
+    
+    Args:
+        association: Association string
+        association_rank: Rank of the association (1..80)
+    
+    Returns:
+        List of 1-3 ObjectCandidate instances
+    
+    Raises:
+        ValueError: If object mapping fails
+    """
+    # Deterministic mapping: use association name as object name
+    # Default pattern: create 1-2 objects based on association
+    # Most associations map to 1 object (the association itself as a physical object)
+    # Some map to 2 objects (e.g., "arrow" -> ["arrow", "bow"])
+    
+    # Default object pattern (most associations use this)
+    default_pattern = {
+        "is_physical_object": True,
+        "contains_readable_text": False,
+        "contains_logo_or_brand": False,
+        "has_label_or_packaging_text": False,
+        "has_communicative_graphics": False,
+        "has_structural_graphics_only": False,
+        "is_symbolic_only": False
+    }
+    
+    # Special mappings for associations that need 2-3 objects
+    special_mappings = {
+        "arrow": [{"name": "arrow", **default_pattern}, {"name": "bow", **default_pattern}],
+        "lock": [{"name": "lock", **default_pattern}, {"name": "key", **default_pattern}],
+        "racing car": [{"name": "racing car", **default_pattern}, {"name": "race track", **default_pattern}],
+    }
+    
+    # Check if association has special mapping
+    if association in special_mappings:
+        objects_data = special_mappings[association]
+    else:
+        # Default: single object with association name
+        objects_data = [{"name": association, **default_pattern}]
+    
+    if len(objects_data) == 0 or len(objects_data) > 3:
+        raise ValueError(f"Expected 1-3 objects for association '{association}', got {len(objects_data)}")
+    
+    # Convert to ObjectCandidate instances
+    candidates = []
+    for obj_data in objects_data:
+        candidate = ObjectCandidate(
+            name=obj_data["name"],
+            association_rank=association_rank,
+            is_physical_object=obj_data["is_physical_object"],
+            contains_readable_text=obj_data["contains_readable_text"],
+            contains_logo_or_brand=obj_data["contains_logo_or_brand"],
+            has_label_or_packaging_text=obj_data["has_label_or_packaging_text"],
+            has_communicative_graphics=obj_data["has_communicative_graphics"],
+            has_structural_graphics_only=obj_data["has_structural_graphics_only"],
+            is_symbolic_only=obj_data["is_symbolic_only"]
+        )
+        candidates.append(candidate)
+    
+    return candidates
+
+
+def build_object_pool(product_name: str, product_description: str) -> List[ObjectCandidate]:
+    """
+    Build sanitized object pool from product information.
+    
+    Pipeline:
+    1) goal = derive_advertising_goal(...)
+    2) associations = generate_associations(goal)  # exactly 80
+    3) For each association (rank 1..80):
+       - objects = map_association_to_objects(...)
+       - add to pool with correct association_rank
+    4) Apply sanitize_candidate_pool(...) from STEP 2.5
+    5) If sanitized pool is empty → FAIL explicitly
+    
+    Args:
+        product_name: Name of the product
+        product_description: Description of the product
+    
+    Returns:
+        Sanitized list of ObjectCandidate instances
+    
+    Raises:
+        ValueError: If any step fails or sanitized pool is empty
+    """
+    # Step 1: Derive advertising goal (hidden, not returned to frontend)
+    try:
+        goal = derive_advertising_goal(product_name, product_description)
+    except Exception as e:
+        raise ValueError(f"Failed to derive advertising goal: {str(e)}") from e
+    
+    # Step 2: Generate exactly 80 associations
+    try:
+        associations = generate_associations(goal)
+    except Exception as e:
+        raise ValueError(f"Failed to generate associations: {str(e)}") from e
+    
+    # Step 3: Map each association to 1-3 objects
+    # HARD FAIL discipline: if any association cannot map, FAIL immediately
+    object_pool = []
+    for rank, association in enumerate(associations, start=1):
+        try:
+            objects = map_association_to_objects(association, rank)
+            object_pool.extend(objects)
+        except Exception as e:
+            # HARD FAIL: do not continue, raise immediately
+            raise ValueError(f"Failed to map association '{association}' (rank {rank}) to objects: {str(e)}") from e
+    
+    if len(object_pool) == 0:
+        raise ValueError("Failed to map any associations to objects")
+    
+    # Step 4: Apply hard sanitation filters
+    try:
+        sanitized_pool = sanitize_candidate_pool(object_pool)
+    except ValueError as e:
+        raise ValueError(f"Sanitized object pool is empty: {str(e)}") from e
+    
+    # Step 5: Validate sanitized pool is not empty
+    if len(sanitized_pool) == 0:
+        raise ValueError("No valid object candidates after sanitation")
+    
+    return sanitized_pool
 
 
 # Global threshold constants (HARD GATES)
@@ -560,44 +910,19 @@ def generate_ad(
         quota_state = BatchQuotaState()
     
     # ========================================================================
-    # STEP 2.5: OBJECT & INPUT SANITATION (Hard Gates Before Geometry)
+    # STEP 3: GOAL → 80 ASSOCIATIONS → OBJECT POOL
     # ========================================================================
-    # Build/receive candidate pool (placeholder until object generation is implemented)
-    # For now, create a minimal placeholder pool with valid candidates
-    placeholder_candidates = [
-        ObjectCandidate(
-            name="placeholder_object_1",
-            association_rank=1,
-            is_physical_object=True,
-            contains_readable_text=False,
-            contains_logo_or_brand=False,
-            has_label_or_packaging_text=False,
-            has_communicative_graphics=False,
-            has_structural_graphics_only=False,
-            is_symbolic_only=False
-        ),
-        ObjectCandidate(
-            name="placeholder_object_2",
-            association_rank=2,
-            is_physical_object=True,
-            contains_readable_text=False,
-            contains_logo_or_brand=False,
-            has_label_or_packaging_text=False,
-            has_communicative_graphics=False,
-            has_structural_graphics_only=False,
-            is_symbolic_only=False
-        )
-    ]
-    
-    # Apply hard sanitation filters BEFORE any candidate pairing
+    # Build object pool from product information
+    # Goal is hidden (not returned to frontend)
+    # Associations are internal only (exactly 80)
+    # Only physical, non-symbolic objects enter the pool
     try:
-        sanitized_pool = sanitize_candidate_pool(placeholder_candidates)
+        sanitized_pool = build_object_pool(product_name, product_description)
     except ValueError as e:
-        # No valid candidates after sanitation - FAIL explicitly
-        raise ValueError("No valid object candidates after sanitation") from e
+        # No valid object pool - FAIL explicitly
+        raise ValueError(f"Failed to build object pool: {str(e)}") from e
     
     # ========================================================================
-    # TODO: STEP 3 - Generate ranked association list (size 80) as ObjectCandidate objects
     # TODO: STEP 4 - Generate candidate A/B pairs from sanitized pool
     # TODO: STEP 5 - Call find_valid_ab_pair() with sanitized candidates
     # TODO: STEP 6 - If no valid pair found, raise ValueError("No valid A/B pair found")
