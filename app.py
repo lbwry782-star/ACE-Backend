@@ -60,14 +60,23 @@ def generate():
         product_name = data.get('productName', '').strip()
         product_description = data.get('productDescription', '').strip()
         image_size = data.get('imageSize', '').strip()
+        ad_index = data.get('adIndex', 0)  # Get ad_index from request, default 0
         batch_state_dict = data.get('batchState')  # Optional
+        
+        # Load quota_state from X-ACE-Batch-State header if present, otherwise from request JSON
+        batch_state_header = request.headers.get('X-ACE-Batch-State')
+        if batch_state_header:
+            try:
+                batch_state_dict = json.loads(batch_state_header)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning(f"Request {request_id}: Invalid X-ACE-Batch-State header, using request batchState")
         
         # Convert batchState dict to BatchQuotaState (defaults to all False if missing)
         quota_state = quota_state_from_dict(batch_state_dict)
         current_batch_state = quota_state_to_dict(quota_state)
         
         # Log request (input lengths only, no content)
-        logger.info(f"Request {request_id}: productName length={len(product_name)}, productDescription length={len(product_description)}, imageSize={image_size}, batchState={current_batch_state}")
+        logger.info(f"Request {request_id}: productName length={len(product_name)}, productDescription length={len(product_description)}, imageSize={image_size}, adIndex={ad_index}, batchState={current_batch_state}")
         
         # Validation: productName
         if not product_name:
@@ -104,9 +113,15 @@ def generate():
                 'batchState': current_batch_state
             }), 400
         
-        # Call engine (isolated from route logic) with quota state
+        # Call engine (isolated from route logic) with quota state and ad_index
         try:
-            engine_result = generate_ad(product_name, product_description, image_size, quota_state)
+            engine_result = generate_ad(
+                product_name,
+                product_description,
+                image_size,
+                quota_state=quota_state,
+                ad_index=ad_index
+            )
         except NotImplementedError:
             logger.error(f"Request {request_id}: Engine not yet implemented")
             return jsonify({
@@ -148,26 +163,28 @@ def generate():
         
         if not image_bytes_jpg or not isinstance(image_bytes_jpg, bytes):
             logger.error(f"Request {request_id}: Engine result missing or invalid image_bytes_jpg")
+            # Get updated batch state from quota_state (may have been modified)
+            updated_batch_state = quota_state_to_dict(quota_state)
             return jsonify({
                 'status': 'error',
                 'message': 'Engine returned invalid image data',
-                'batchState': batch_state if batch_state else current_batch_state
+                'batchState': updated_batch_state
             }), 500
         
         if not marketing_text or not isinstance(marketing_text, str):
             logger.error(f"Request {request_id}: Engine result missing or invalid marketing_text")
+            # Get updated batch state from quota_state (may have been modified)
+            updated_batch_state = quota_state_to_dict(quota_state)
             return jsonify({
                 'status': 'error',
                 'message': 'Engine returned invalid marketing text',
-                'batchState': batch_state if batch_state else current_batch_state
+                'batchState': updated_batch_state
             }), 500
         
-        # Validate batch_state is present
-        if batch_state is None:
-            logger.warning(f"Request {request_id}: Engine result missing batch_state, using current state")
-            batch_state = current_batch_state
+        # Get final batch state from quota_state (updated in-place during generation)
+        final_batch_state = quota_state_to_dict(quota_state)
         
-        # Create ZIP in memory
+        # Create ZIP in memory with single ad
         zip_buffer = io.BytesIO()
         try:
             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
@@ -189,17 +206,19 @@ def generate():
                 download_name='ad.zip'
             )
             
-            # Add batch state to response header
-            response.headers['X-ACE-Batch-State'] = json.dumps(batch_state)
+            # Add batch state to response header (updated after generation)
+            response.headers['X-ACE-Batch-State'] = json.dumps(final_batch_state)
             
             return response
             
         except Exception as e:
             logger.error(f"Request {request_id}: Error creating ZIP: {str(e)}", exc_info=True)
+            # Get final batch state (quota_state was updated in-place during generation)
+            final_batch_state = quota_state_to_dict(quota_state)
             return jsonify({
                 'status': 'error',
                 'message': 'Failed to create ZIP file',
-                'batchState': batch_state if batch_state else current_batch_state
+                'batchState': final_batch_state
             }), 500
         
     except Exception as e:

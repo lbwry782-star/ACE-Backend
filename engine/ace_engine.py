@@ -10,6 +10,8 @@ STEP 3: Goal → 80 Associations → Object Pool - builds intent and object cand
 from typing import Dict, Any, Tuple, Optional, List
 from PIL import Image, ImageDraw, ImageFont
 import io
+import hashlib
+import re
 from enum import Enum
 from dataclasses import dataclass
 
@@ -134,6 +136,7 @@ class ObjectCandidate:
     - has_structural_graphics_only: True if graphics are physically embedded and non-communicative (allowed exception)
     - is_symbolic_only: True if object is purely symbolic (e.g., graduation cap for "education") (prohibited)
     - association_rank: Rank in association list (1..80)
+    - shape_family: Geometric shape family for overlap calculation (default "unknown")
     """
     name: str
     is_physical_object: bool
@@ -144,6 +147,7 @@ class ObjectCandidate:
     has_structural_graphics_only: bool
     is_symbolic_only: bool
     association_rank: int
+    shape_family: str = "unknown"
 
 
 def is_object_graphically_eligible(obj: ObjectCandidate) -> bool:
@@ -271,25 +275,27 @@ def count_words(text: str) -> int:
     return len(text.split())
 
 
-def generate_marketing_text(product_name: str, product_description: str, goal: str) -> str:
+def generate_marketing_text(product_name: str, product_description: str, goal: str, ad_index: int = 0) -> str:
     """
     Generate marketing text that supports the advertising goal.
     
     Hard constraints:
     - Plain text only (no bullets, no formatting)
-    - Length: approximately 50 words (±10 acceptable, so 40-60 words)
+    - Length: exactly 40-60 words (enforced)
     - Must include product_name exactly as given
     - Must support and reinforce the (hidden) advertising goal conceptually
     - MUST NOT literally describe the visual (no "in the image", "shown", "pictured", "you see", etc.)
     - Tone: persuasive marketing, not technical
+    - Deterministic but varied per ad_index (different sentences for each ad)
     
     Args:
         product_name: Name of the product (must appear in output)
         product_description: Description of the product (for context)
         goal: Advertising goal from ALLOWED_GOALS (hidden, not in output)
+        ad_index: Index of ad in batch (0, 1, or 2) for variation
     
     Returns:
-        Marketing text string (40-60 words, includes product_name)
+        Marketing text string (40-60 words, includes product_name, sanitized)
     """
     # Goal-specific sentence templates (deterministic, no external APIs)
     # Each template set supports the goal conceptually without describing visuals
@@ -299,106 +305,546 @@ def generate_marketing_text(product_name: str, product_description: str, goal: s
             f"Experience the power of {product_name} with lightning-fast results.",
             f"{product_name} accelerates your success with instant responsiveness.",
             f"Get ahead faster with {product_name} and its rapid capabilities.",
-            f"{product_name} brings you swift solutions that save valuable time."
+            f"{product_name} brings you swift solutions that save valuable time.",
+            f"Unlock rapid performance with {product_name} and its instant capabilities.",
+            f"{product_name} transforms speed into tangible results every time.",
+            f"Discover the velocity advantage that {product_name} provides daily."
         ],
         "safety": [
             f"{product_name} provides reliable protection and peace of mind.",
             f"Trust {product_name} for secure and safe performance every time.",
             f"With {product_name}, you get dependable safety and robust security.",
             f"{product_name} ensures your protection with proven reliability.",
-            f"Count on {product_name} for secure and trustworthy results."
+            f"Count on {product_name} for secure and trustworthy results.",
+            f"Experience unwavering security through {product_name} and its protection.",
+            f"{product_name} stands guard with consistent safety measures always.",
+            f"Rely on {product_name} for comprehensive security and peace."
         ],
         "durability": [
             f"{product_name} is built to last with exceptional strength and resilience.",
             f"Invest in {product_name} for long-lasting quality and enduring performance.",
             f"{product_name} offers robust durability that stands the test of time.",
             f"Choose {product_name} for reliable toughness and lasting value.",
-            f"{product_name} delivers solid construction and permanent reliability."
+            f"{product_name} delivers solid construction and permanent reliability.",
+            f"Experience lasting quality through {product_name} and its resilient design.",
+            f"{product_name} maintains strength through years of continuous use.",
+            f"Build on the foundation that {product_name} provides permanently."
         ],
         "freshness": [
             f"{product_name} brings you crisp, clean quality that feels new every day.",
             f"Experience the vibrant freshness of {product_name} with every use.",
             f"{product_name} maintains pure, natural freshness that revitalizes.",
             f"Enjoy the clean, crisp benefits of {product_name} consistently.",
-            f"{product_name} delivers fresh, pure results that feel alive."
+            f"{product_name} delivers fresh, pure results that feel alive.",
+            f"Revitalize your experience with {product_name} and its natural purity.",
+            f"{product_name} keeps things vibrant and new throughout daily use.",
+            f"Feel the renewal that {product_name} brings to every moment."
         ],
         "clarity": [
             f"{product_name} provides crystal-clear results with precise focus.",
             f"See the difference with {product_name} and its sharp clarity.",
             f"{product_name} delivers transparent, clear outcomes you can trust.",
             f"Experience perfect clarity with {product_name} and its defined precision.",
-            f"{product_name} brings you sharp, focused clarity in every detail."
+            f"{product_name} brings you sharp, focused clarity in every detail.",
+            f"Gain clear understanding through {product_name} and its precise approach.",
+            f"{product_name} illuminates every aspect with perfect transparency.",
+            f"Navigate with confidence using {product_name} and its clear guidance."
         ],
         "efficiency": [
             f"{product_name} maximizes your productivity with smart, streamlined performance.",
             f"Optimize your results with {product_name} and its efficient design.",
             f"{product_name} delivers effective solutions that work smarter, not harder.",
             f"Experience peak efficiency with {product_name} and its optimized approach.",
-            f"{product_name} provides intelligent, productive solutions that save resources."
+            f"{product_name} provides intelligent, productive solutions that save resources.",
+            f"Streamline your workflow with {product_name} and its intelligent systems.",
+            f"{product_name} transforms effort into achievement through smart optimization.",
+            f"Multiply your results using {product_name} and its efficient methods."
         ],
         "comfort": [
             f"{product_name} offers gentle comfort and relaxing ease for everyday use.",
             f"Enjoy the soft, cozy benefits of {product_name} throughout your day.",
             f"{product_name} provides pleasant comfort that makes everything easier.",
             f"Feel the smooth, gentle comfort of {product_name} consistently.",
-            f"{product_name} delivers relaxing ease and comfortable satisfaction."
+            f"{product_name} delivers relaxing ease and comfortable satisfaction.",
+            f"Embrace the warmth that {product_name} brings to every experience.",
+            f"{product_name} creates a soothing environment for daily activities.",
+            f"Find your perfect comfort zone with {product_name} and its gentle touch."
         ],
         "precision": [
             f"{product_name} delivers exact accuracy with meticulous attention to detail.",
             f"Experience precise results with {product_name} and its refined accuracy.",
             f"{product_name} provides careful precision that ensures perfect outcomes.",
             f"Trust {product_name} for accurate, detailed results every single time.",
-            f"{product_name} brings you exact precision with careful, refined quality."
+            f"{product_name} brings you exact precision with careful, refined quality.",
+            f"Achieve perfection through {product_name} and its meticulous craftsmanship.",
+            f"{product_name} ensures flawless execution with its precise engineering.",
+            f"Master every detail with {product_name} and its exacting standards."
         ]
     }
     
-    # Select template set for the goal (deterministic: use first template)
+    # Select template set for the goal
     if goal not in templates:
-        # Fallback if goal not found (should not happen)
-        goal = "efficiency"
+        goal = "efficiency"  # Fallback
     
-    # Build base text from templates (combine 3-4 sentences to reach ~50 words)
-    base_sentences = templates[goal][:4]  # Take first 4 templates
-    base_text = " ".join(base_sentences)
+    # Create deterministic seed based on product info and ad_index for variation
+    seed_string = f"{product_name}{product_description}{goal}{ad_index}"
+    seed_hash = hashlib.sha256(seed_string.encode('utf-8')).hexdigest()
+    seed_int = int(seed_hash[:8], 16)  # Use first 8 hex chars as integer
     
-    # Add product description context if needed (without describing visual)
-    # Use short phrases that support the goal
-    word_count = count_words(base_text)
+    # Select 3-4 different sentences using seed (deterministic but varied per ad_index)
+    # Avoid consecutive selection to reduce repetition
+    available_templates = templates[goal]
+    num_templates = len(available_templates)
+    num_sentences = 4  # Target 4 sentences
     
-    # Adjust to 40-60 word window using short filler phrases (still plain text)
-    if word_count < 40:
-        # Add short phrases to reach minimum
-        fillers = [
-            "Discover the difference today.",
-            "Transform your experience now.",
-            "Make the smart choice.",
-            "Elevate your results.",
-            "Unlock new possibilities."
+    # Select unique indices deterministically (avoid duplicates)
+    selected_indices = set()
+    k = 0
+    while len(selected_indices) < num_sentences and k < num_templates * 2:
+        # Use seed with different multipliers to get diverse indices
+        candidate_idx = (seed_int + k * 7) % num_templates
+        if candidate_idx not in selected_indices:
+            selected_indices.add(candidate_idx)
+        k += 1
+    
+    # Convert to sorted list for deterministic order, then select first num_sentences
+    selected_indices = sorted(list(selected_indices))[:num_sentences]
+    selected_sentences = [available_templates[idx] for idx in selected_indices]
+    
+    # Anti-repetition: Check if multiple sentences start with same 1-2 words
+    # If so, replace one with an alternate that starts differently but includes product_name
+    alternate_templates = {
+        "speed": [
+            f"Rapid performance defines {product_name} and its capabilities.",
+            f"Speed becomes reality through {product_name} and its design.",
+            f"Velocity meets reliability in {product_name} and its approach."
+        ],
+        "safety": [
+            f"Protection you can trust comes from {product_name} and its design.",
+            f"Security finds its foundation in {product_name} and its reliability.",
+            f"Peace of mind starts with {product_name} and its approach."
+        ],
+        "durability": [
+            f"Longevity defines {product_name} and its construction.",
+            f"Endurance becomes reality through {product_name} and its design.",
+            f"Strength meets reliability in {product_name} and its approach."
+        ],
+        "freshness": [
+            f"Vitality you can feel comes from {product_name} and its quality.",
+            f"Renewal finds its source in {product_name} and its nature.",
+            f"Revitalization starts with {product_name} and its approach."
+        ],
+        "clarity": [
+            f"Precision you can trust comes from {product_name} and its design.",
+            f"Transparency finds its foundation in {product_name} and its quality.",
+            f"Focus starts with {product_name} and its approach."
+        ],
+        "efficiency": [
+            f"Productivity you can count on comes from {product_name} and its design.",
+            f"Optimization finds its source in {product_name} and its systems.",
+            f"Streamlining starts with {product_name} and its approach."
+        ],
+        "comfort": [
+            f"Ease you can feel comes from {product_name} and its design.",
+            f"Relaxation finds its source in {product_name} and its quality.",
+            f"Gentleness starts with {product_name} and its approach."
+        ],
+        "precision": [
+            f"Accuracy you can trust comes from {product_name} and its design.",
+            f"Exactness finds its foundation in {product_name} and its quality.",
+            f"Perfection starts with {product_name} and its approach."
         ]
-        for filler in fillers:
-            base_text += " " + filler
-            word_count = count_words(base_text)
-            if word_count >= 40:
-                break
+    }
+    
+    # Check for repetitive sentence starts (same 1-2 words)
+    sentence_starts = {}
+    for i, sentence in enumerate(selected_sentences):
+        # Get first 2 words (or first word if only one)
+        words = sentence.split()[:2]
+        start_key = " ".join(words).lower()
+        if start_key in sentence_starts:
+            # Found repetition - replace with alternate
+            if goal in alternate_templates and len(alternate_templates[goal]) > 0:
+                alt_idx = (seed_int + i * 11) % len(alternate_templates[goal])
+                selected_sentences[i] = alternate_templates[goal][alt_idx]
+                # Update start key for new sentence
+                new_words = selected_sentences[i].split()[:2]
+                start_key = " ".join(new_words).lower()
+        sentence_starts[start_key] = i
+    
+    # Remove any duplicate sentences (exact matches)
+    unique_sentences = []
+    seen = set()
+    for sentence in selected_sentences:
+        if sentence not in seen:
+            unique_sentences.append(sentence)
+            seen.add(sentence)
+    
+    # Ensure we have at least 3 sentences
+    if len(unique_sentences) < 3:
+        # Add more from templates if needed
+        selected_indices_set = set(selected_indices)  # Keep set for fast lookup
+        for idx in range(num_templates):
+            if idx not in selected_indices_set:
+                candidate = available_templates[idx]
+                if candidate not in seen:
+                    unique_sentences.append(candidate)
+                    seen.add(candidate)
+                    if len(unique_sentences) >= 3:
+                        break
+    
+    selected_sentences = unique_sentences[:num_sentences]
+    
+    # Build base text
+    base_text = " ".join(selected_sentences)
+    
+    # Sanitation: Remove forbidden words/phrases related to visual description
+    forbidden_visual_words = [
+        "in the image", "shown", "pictured", "you see", "visible", "appears",
+        "next to", "beside", "background", "silhouette", "object", "hybrid",
+        "side-by-side", "visual", "picture", "illustration", "graphic"
+    ]
+    forbidden_technical_words = [
+        "API", "Flask", "Backend", "Prompt", "Engine", "algorithm", "model",
+        "אלגוריתם", "מודל", "בתמונה", "רואים", "מופיע", "ליד", "רקע",
+        "סילואטה", "אובייקט", "היבריד", "תמונה", "ויזואל"
+    ]
+    
+    # Apply sanitation
+    sanitized_text = base_text
+    for forbidden in forbidden_visual_words + forbidden_technical_words:
+        # Case-insensitive replacement
+        sanitized_text = re.sub(re.escape(forbidden), "", sanitized_text, flags=re.IGNORECASE)
+        sanitized_text = re.sub(r'\s+', ' ', sanitized_text)  # Normalize whitespace
+    
+    # Ensure single paragraph (replace \n with space)
+    sanitized_text = sanitized_text.replace('\n', ' ').replace('\r', ' ')
+    sanitized_text = ' '.join(sanitized_text.split())  # Normalize all whitespace
+    
+    # Enforce 40-60 word constraint
+    word_count = count_words(sanitized_text)
+    
+    if word_count < 40:
+        # Add neutral short sentences to reach minimum (anti-cliché replacements)
+        neutral_sentences = [
+            "Built for consistent results.",
+            "Designed for everyday reliability.",
+            "Made to support confident decisions.",
+            "Created to stay dependable over time.",
+            "Engineered for lasting performance.",
+            "Crafted for reliable daily use.",
+            "Developed to maintain quality consistently."
+        ]
+        # Use seed to select which neutral sentence to add
+        neutral_idx = (seed_int // 1000) % len(neutral_sentences)
+        if neutral_sentences[neutral_idx] not in sanitized_text:
+            sanitized_text += " " + neutral_sentences[neutral_idx]
+            word_count = count_words(sanitized_text)
+        # Add more if still short
+        if word_count < 40:
+            neutral_idx = (seed_int // 2000) % len(neutral_sentences)
+            if neutral_sentences[neutral_idx] not in sanitized_text:
+                sanitized_text += " " + neutral_sentences[neutral_idx]
+                word_count = count_words(sanitized_text)
+            # If still short, add one more
+            if word_count < 40:
+                neutral_idx = (seed_int // 3000) % len(neutral_sentences)
+                if neutral_sentences[neutral_idx] not in sanitized_text:
+                    sanitized_text += " " + neutral_sentences[neutral_idx]
+                    word_count = count_words(sanitized_text)
     
     if word_count > 60:
-        # Trim to maximum by removing last sentence if needed
-        sentences = base_text.split(". ")
+        # Trim to maximum by removing last sentence
+        sentences = sanitized_text.split(". ")
         while count_words(". ".join(sentences)) > 60 and len(sentences) > 1:
             sentences.pop()
-        base_text = ". ".join(sentences)
-        if not base_text.endswith("."):
-            base_text += "."
+        sanitized_text = ". ".join(sentences)
+        if not sanitized_text.endswith("."):
+            sanitized_text += "."
+        word_count = count_words(sanitized_text)
     
-    # Final word count check and ensure product_name is included
-    final_text = base_text.strip()
+    # Final verification: ensure product_name is included
+    final_text = sanitized_text.strip()
     if product_name not in final_text:
-        # Safety: ensure product_name appears (should not happen with templates)
+        # Safety: prepend product_name if missing
         final_text = f"{product_name}. {final_text}"
+        word_count = count_words(final_text)
+        # Trim if exceeds limit after adding
+        if word_count > 60:
+            sentences = final_text.split(". ")
+            while count_words(". ".join(sentences)) > 60 and len(sentences) > 1:
+                sentences.pop()
+            final_text = ". ".join(sentences)
+            if not final_text.endswith("."):
+                final_text += "."
     
-    # Verify constraints: plain text, no visual descriptions, includes product_name
-    # (Hard constraint: MUST NOT describe visual - templates already avoid this)
     return final_text
+
+
+# ============================================================================
+# STEP 7: HEADLINE GENERATION (Deterministic, Engine-Level)
+# ============================================================================
+# Generate headline that includes product_name, 5-6 words exactly.
+# Declarative/atmospheric only, no questions, commands, or quotes.
+# Does not reveal goal or describe visual.
+# ============================================================================
+
+def generate_headline(product_name: str, goal: str, ad_index: int = 0) -> str:
+    """
+    Generate headline that includes product_name, exactly 5-6 words.
+    
+    Hard constraints:
+    - Exactly 5-6 words (enforced with automatic correction)
+    - Must include product_name as part of the 5-6 words
+    - Declarative/atmospheric statement only (no questions, commands, quotes)
+    - Does not reveal goal or describe visual
+    - Deterministic but varied per ad_index (different template for each ad)
+    
+    Args:
+        product_name: Name of the product (must appear in headline)
+        goal: Advertising goal (hidden, used for template selection only)
+        ad_index: Index of ad in batch (0, 1, or 2) for template variation
+    
+    Returns:
+        Headline string (exactly 5-6 words, includes product_name)
+    """
+    # Goal-specific templates (deterministic, declarative/atmospheric)
+    # Each template produces 5-6 words and includes {product_name}
+    templates = {
+        "speed": [
+            f"{product_name} moves with unmatched velocity.",
+            f"{product_name} accelerates beyond expectations.",
+            f"{product_name} delivers instant performance today.",
+            f"{product_name} transforms speed into results.",
+            f"{product_name} brings rapid transformation forward."
+        ],
+        "safety": [
+            f"{product_name} protects what matters most.",
+            f"{product_name} ensures reliable security always.",
+            f"{product_name} provides trusted safety today.",
+            f"{product_name} delivers secure peace of mind.",
+            f"{product_name} stands guard for you."
+        ],
+        "durability": [
+            f"{product_name} lasts through every challenge.",
+            f"{product_name} endures beyond expectations always.",
+            f"{product_name} stands strong over time.",
+            f"{product_name} remains resilient through years.",
+            f"{product_name} builds lasting strength today."
+        ],
+        "freshness": [
+            f"{product_name} brings new vitality forward.",
+            f"{product_name} delivers crisp freshness today.",
+            f"{product_name} maintains pure quality always.",
+            f"{product_name} revives with natural energy.",
+            f"{product_name} awakens fresh possibilities now."
+        ],
+        "clarity": [
+            f"{product_name} reveals truth with precision.",
+            f"{product_name} brings sharp focus forward.",
+            f"{product_name} delivers crystal clear vision.",
+            f"{product_name} illuminates every detail perfectly.",
+            f"{product_name} shows the way clearly."
+        ],
+        "efficiency": [
+            f"{product_name} maximizes productivity every day.",
+            f"{product_name} optimizes results with intelligence.",
+            f"{product_name} streamlines work effortlessly forward.",
+            f"{product_name} delivers smart solutions today.",
+            f"{product_name} transforms effort into achievement."
+        ],
+        "comfort": [
+            f"{product_name} offers gentle ease always.",
+            f"{product_name} brings soft comfort forward.",
+            f"{product_name} delivers relaxing peace today.",
+            f"{product_name} wraps you in warmth.",
+            f"{product_name} creates cozy moments now."
+        ],
+        "precision": [
+            f"{product_name} achieves exact accuracy always.",
+            f"{product_name} delivers meticulous perfection today.",
+            f"{product_name} measures with careful precision.",
+            f"{product_name} ensures perfect detail forward.",
+            f"{product_name} crafts refined excellence now."
+        ]
+    }
+    
+    # Select template set for the goal
+    if goal not in templates:
+        goal = "efficiency"  # Fallback
+    
+    # Select template deterministically based on ad_index (varied per ad)
+    template_index = ad_index % len(templates[goal])
+    headline = templates[goal][template_index]
+    
+    # Enforce 5-6 word constraint with automatic correction
+    word_count = count_words(headline)
+    
+    if word_count < 5:
+        # Add neutral word to reach minimum
+        neutral_words = ["now", "always", "today", "forward", "here"]
+        headline += " " + neutral_words[0]
+        word_count = count_words(headline)
+    
+    if word_count > 6:
+        # Remove last word if exceeds maximum
+        words = headline.split()
+        while len(words) > 6:
+            words.pop()
+        headline = " ".join(words)
+        word_count = count_words(headline)
+    
+    # Final verification: ensure product_name is included and word count is 5-6
+    if product_name not in headline:
+        # Safety: prepend product_name if missing (should not happen)
+        headline = f"{product_name} {headline}"
+        word_count = count_words(headline)
+        # Trim if needed
+        if word_count > 6:
+            words = headline.split()
+            while len(words) > 6:
+                words.pop()
+            headline = " ".join(words)
+    
+    # Final word count check
+    final_word_count = count_words(headline)
+    if final_word_count < 5 or final_word_count > 6:
+        # Last resort: use simple template
+        headline = f"{product_name} delivers excellence today."
+        if count_words(headline) != 5:
+            # Force 5 words
+            headline = f"{product_name} brings excellence forward now."
+    
+    return headline.strip()
+
+
+# ============================================================================
+# STEP 8: SILHOUETTE PLACEHOLDER GENERATION (Visual Representation)
+# ============================================================================
+# Draw placeholder silhouettes that reflect HYBRID or SIDE_BY_SIDE mode.
+# Maintains safe margins and avoids overlap with headline area.
+# ============================================================================
+
+def draw_silhouette_placeholder(
+    draw: ImageDraw.Draw,
+    width: int,
+    height: int,
+    shape_family_a: str,
+    shape_family_b: str,
+    hybrid_type: HybridType
+) -> None:
+    """
+    Draw placeholder silhouettes based on shape families and hybrid type.
+    
+    Rules:
+    - SIDE_BY_SIDE: Two separate shapes (left/right) with clear gap
+    - HYBRID: One merged shape (center) or significant overlap
+    - Shapes drawn in center area, avoiding headline zone
+    - No text labels or metadata on image
+    
+    Args:
+        draw: PIL ImageDraw object
+        width: Image width
+        height: Image height
+        shape_family_a: Shape family for object A
+        shape_family_b: Shape family for object B
+        hybrid_type: HYBRID or SIDE_BY_SIDE mode
+    """
+    # Safe margins: headline is at height // 8, so silhouette starts below
+    silhouette_top = height // 4  # Start below headline area
+    silhouette_bottom = height * 3 // 4  # End before bottom
+    silhouette_height = silhouette_bottom - silhouette_top
+    silhouette_center_y = (silhouette_top + silhouette_bottom) // 2
+    
+    # Helper function to draw shape based on shape_family
+    def draw_shape_by_family(x_center: int, y_center: int, size: int, shape: str, fill_color: str = "gray"):
+        """Draw a shape at given center coordinates"""
+        half_size = size // 2
+        
+        if shape in ["circle", "oval"]:
+            # Ellipse
+            bbox = [x_center - half_size, y_center - half_size // 2, 
+                   x_center + half_size, y_center + half_size // 2]
+            draw.ellipse(bbox, fill=fill_color, outline="black", width=2)
+        
+        elif shape in ["rectangle", "square", "box"]:
+            # Rectangle
+            bbox = [x_center - half_size, y_center - half_size,
+                   x_center + half_size, y_center + half_size]
+            draw.rectangle(bbox, fill=fill_color, outline="black", width=2)
+        
+        elif shape in ["triangle"]:
+            # Triangle
+            points = [
+                (x_center, y_center - half_size),  # Top
+                (x_center - half_size, y_center + half_size),  # Bottom left
+                (x_center + half_size, y_center + half_size)   # Bottom right
+            ]
+            draw.polygon(points, fill=fill_color, outline="black", width=2)
+        
+        elif shape in ["teardrop", "drop"]:
+            # Teardrop (ellipse + triangle)
+            bbox = [x_center - half_size // 2, y_center - half_size // 2,
+                   x_center + half_size // 2, y_center + half_size // 2]
+            draw.ellipse(bbox, fill=fill_color, outline="black", width=2)
+            # Add triangle point at bottom
+            points = [
+                (x_center, y_center + half_size // 2),
+                (x_center - half_size // 2, y_center + half_size),
+                (x_center + half_size // 2, y_center + half_size)
+            ]
+            draw.polygon(points, fill=fill_color, outline="black", width=2)
+        
+        elif shape in ["leaf", "blade", "wing"]:
+            # Leaf shape (elongated ellipse)
+            bbox = [x_center - half_size, y_center - half_size // 3,
+                   x_center + half_size, y_center + half_size // 3]
+            draw.ellipse(bbox, fill=fill_color, outline="black", width=2)
+        
+        elif shape in ["bottle", "cylinder"]:
+            # Bottle/cylinder (rectangle with narrow top)
+            # Main body
+            bbox = [x_center - half_size // 2, y_center - half_size // 2,
+                   x_center + half_size // 2, y_center + half_size]
+            draw.rectangle(bbox, fill=fill_color, outline="black", width=2)
+            # Narrow neck
+            neck_bbox = [x_center - half_size // 4, y_center - half_size,
+                        x_center + half_size // 4, y_center - half_size // 2]
+            draw.rectangle(neck_bbox, fill=fill_color, outline="black", width=2)
+        
+        else:
+            # Default: circle for unknown shapes
+            bbox = [x_center - half_size, y_center - half_size,
+                   x_center + half_size, y_center + half_size]
+            draw.ellipse(bbox, fill=fill_color, outline="black", width=2)
+    
+    # Determine shape size based on mode
+    if hybrid_type == HybridType.SIDE_BY_SIDE:
+        # Two separate shapes with gap
+        shape_size = min(width, silhouette_height) // 4
+        gap = width // 8
+        
+        # Left shape (object A)
+        left_x = width // 4
+        draw_shape_by_family(left_x, silhouette_center_y, shape_size, shape_family_a, "lightblue")
+        
+        # Right shape (object B)
+        right_x = width * 3 // 4
+        draw_shape_by_family(right_x, silhouette_center_y, shape_size, shape_family_b, "lightcoral")
+    
+    else:
+        # HYBRID: One merged shape in center
+        shape_size = min(width, silhouette_height) // 3
+        
+        # Draw merged shape (use shape_family_a as base, with hint of shape_family_b)
+        center_x = width // 2
+        draw_shape_by_family(center_x, silhouette_center_y, shape_size, shape_family_a, "lightgray")
+        
+        # Overlay hint of shape_b (smaller, slightly offset) to show fusion
+        if shape_family_b != shape_family_a:
+            offset_x = center_x + shape_size // 4
+            offset_y = silhouette_center_y - shape_size // 4
+            draw_shape_by_family(offset_x, offset_y, shape_size // 2, shape_family_b, "lightsteelblue")
 
 
 # ============================================================================
@@ -611,6 +1057,90 @@ def generate_associations(goal: str) -> List[str]:
     return associations
 
 
+def determine_shape_family(object_name: str) -> str:
+    """
+    Determine shape family for an object based on its name (deterministic keyword matching).
+    
+    Args:
+        object_name: Name of the object
+    
+    Returns:
+        Shape family string (e.g., "circle", "rectangle", "bottle", etc.) or "unknown"
+    """
+    name_lower = object_name.lower()
+    
+    # Circle family
+    if any(kw in name_lower for kw in ["ball", "sphere", "orb", "globe", "bead", "pearl", "bubble", "circle", "round"]):
+        return "circle"
+    
+    # Oval family
+    if any(kw in name_lower for kw in ["oval", "ellipse", "egg", "almond", "teardrop"]):
+        return "oval"
+    
+    # Rectangle family
+    if any(kw in name_lower for kw in ["rectangle", "rectangular", "block", "brick", "slab", "plank", "board"]):
+        return "rectangle"
+    
+    # Square family
+    if any(kw in name_lower for kw in ["square", "cube", "box", "crate", "package"]):
+        return "square"
+    
+    # Triangle family
+    if any(kw in name_lower for kw in ["triangle", "triangular", "pyramid", "cone", "arrowhead"]):
+        return "triangle"
+    
+    # Leaf family
+    if any(kw in name_lower for kw in ["leaf", "petal", "blade", "wing", "feather"]):
+        return "leaf"
+    
+    # Teardrop family
+    if any(kw in name_lower for kw in ["teardrop", "drop", "raindrop", "waterdrop"]):
+        return "teardrop"
+    
+    # Bottle family
+    if any(kw in name_lower for kw in ["bottle", "flask", "vial", "jar", "container"]):
+        return "bottle"
+    
+    # Cylinder family
+    if any(kw in name_lower for kw in ["cylinder", "tube", "pipe", "rod", "pole", "column", "pillar"]):
+        return "cylinder"
+    
+    # Box family (separate from square for compatibility)
+    if any(kw in name_lower for kw in ["box", "crate", "case", "chest", "container"]):
+        return "box"
+    
+    # Book family
+    if any(kw in name_lower for kw in ["book", "notebook", "journal", "tome", "volume"]):
+        return "book"
+    
+    # Fish family
+    if any(kw in name_lower for kw in ["fish", "shark", "dolphin", "whale"]):
+        return "fish"
+    
+    # Wing family
+    if any(kw in name_lower for kw in ["wing", "airfoil", "sail"]):
+        return "wing"
+    
+    # Blade family
+    if any(kw in name_lower for kw in ["blade", "knife", "sword", "razor", "cutting"]):
+        return "blade"
+    
+    # Bolt family
+    if any(kw in name_lower for kw in ["bolt", "lightning", "flash", "zigzag"]):
+        return "bolt"
+    
+    # Helmet family
+    if any(kw in name_lower for kw in ["helmet", "cap", "hat", "crown"]):
+        return "helmet"
+    
+    # Shield family
+    if any(kw in name_lower for kw in ["shield", "plate", "disc", "discus"]):
+        return "shield"
+    
+    # Default: unknown
+    return "unknown"
+
+
 def map_association_to_objects(association: str, association_rank: int) -> List[ObjectCandidate]:
     """
     Map an association to 1-3 ObjectCandidate instances (deterministic).
@@ -668,6 +1198,8 @@ def map_association_to_objects(association: str, association_rank: int) -> List[
     # Convert to ObjectCandidate instances
     candidates = []
     for obj_data in objects_data:
+        # Determine shape_family deterministically from object name
+        shape_family = determine_shape_family(obj_data["name"])
         candidate = ObjectCandidate(
             name=obj_data["name"],
             association_rank=association_rank,
@@ -677,7 +1209,8 @@ def map_association_to_objects(association: str, association_rank: int) -> List[
             has_label_or_packaging_text=obj_data["has_label_or_packaging_text"],
             has_communicative_graphics=obj_data["has_communicative_graphics"],
             has_structural_graphics_only=obj_data["has_structural_graphics_only"],
-            is_symbolic_only=obj_data["is_symbolic_only"]
+            is_symbolic_only=obj_data["is_symbolic_only"],
+            shape_family=shape_family
         )
         candidates.append(candidate)
     
@@ -826,38 +1359,74 @@ def calculate_geometric_overlap(object_a_silhouette: Any, object_b_silhouette: A
     """
     Calculate geometric overlap percentage between two object silhouettes.
     
+    Deterministic implementation based on shape_family compatibility:
+    - Same shape family -> 0.80 (high overlap)
+    - Compatible families (circle~oval, rectangle~square, bottle~cylinder, leaf~teardrop, blade~bolt) -> 0.55 (medium)
+    - Different families -> 0.40 (low)
+    - Unknown shape -> 0.40 (low)
+    
     Args:
-        object_a_silhouette: Dominant silhouette of object A (max-projection view)
-        object_b_silhouette: Dominant silhouette of object B (max-projection view)
+        object_a_silhouette: ObjectCandidate A (or its shape_family)
+        object_b_silhouette: ObjectCandidate B (or its shape_family)
     
     Returns:
-        Overlap percentage (0.0 to 1.0) when aligned in natural orientation
-    
-    Note: This is a placeholder. Actual implementation will compute outer-contour overlap
-    from silhouette data structures.
+        Overlap percentage (0.0 to 1.0)
     """
-    # TODO: Implement actual silhouette overlap calculation
-    # For now, this is a placeholder that will be called by the decision logic
-    # The actual calculation will use silhouette area intersection / union
-    raise NotImplementedError("Silhouette overlap calculation will be implemented with actual object data")
+    # Extract shape_family from objects
+    if hasattr(object_a_silhouette, 'shape_family'):
+        shape_a = object_a_silhouette.shape_family
+    else:
+        shape_a = str(object_a_silhouette) if isinstance(object_a_silhouette, str) else "unknown"
+    
+    if hasattr(object_b_silhouette, 'shape_family'):
+        shape_b = object_b_silhouette.shape_family
+    else:
+        shape_b = str(object_b_silhouette) if isinstance(object_b_silhouette, str) else "unknown"
+    
+    # If either is unknown, return low overlap
+    if shape_a == "unknown" or shape_b == "unknown":
+        return 0.40
+    
+    # Same shape family -> high overlap
+    if shape_a == shape_b:
+        return 0.80
+    
+    # Compatible families (deterministic compatibility table)
+    compatible_pairs = [
+        ("circle", "oval"),
+        ("oval", "circle"),
+        ("rectangle", "square"),
+        ("square", "rectangle"),
+        ("bottle", "cylinder"),
+        ("cylinder", "bottle"),
+        ("leaf", "teardrop"),
+        ("teardrop", "leaf"),
+        ("blade", "bolt"),
+        ("bolt", "blade")
+    ]
+    
+    if (shape_a, shape_b) in compatible_pairs:
+        return 0.55
+    
+    # Different families -> low overlap
+    return 0.40
 
 
 def select_max_projection_view(object: Any) -> Any:
     """
     Select the view with maximum projected silhouette area for an object.
     
+    Deterministic implementation: returns the object itself (or its shape_family)
+    since shape_family already represents the dominant silhouette characteristic.
+    
     Args:
-        object: Object to evaluate
+        object: ObjectCandidate to evaluate
     
     Returns:
-        The projection/view with maximum silhouette area
-    
-    Note: This is a placeholder. Actual implementation will evaluate discrete viewpoints
-    and select the one with maximum projected silhouette area.
+        The object itself (for overlap calculation using shape_family)
     """
-    # TODO: Implement actual max-projection view selection
-    # For now, this is a placeholder
-    raise NotImplementedError("Max-projection view selection will be implemented with actual object data")
+    # Return object as-is (shape_family is already determined from max-projection characteristics)
+    return object
 
 
 def evaluate_geometric_overlap_threshold(overlap_percentage: float) -> Tuple[bool, bool]:
@@ -1002,19 +1571,11 @@ def evaluate_ab_pair(
         - error_message: None if valid, error description if invalid
     """
     # Step 1: Select max-projection views (maximum silhouette area)
-    try:
-        view_a = select_max_projection_view(object_a)
-        view_b = select_max_projection_view(object_b)
-    except NotImplementedError:
-        # Placeholder: will be implemented with actual object data
-        return (False, HybridType.SIDE_BY_SIDE, "Max-projection view selection not yet implemented")
+    view_a = select_max_projection_view(object_a)
+    view_b = select_max_projection_view(object_b)
     
-    # Step 2: Calculate geometric overlap
-    try:
-        overlap_percentage = calculate_geometric_overlap(view_a, view_b)
-    except NotImplementedError:
-        # Placeholder: will be implemented with actual silhouette data
-        return (False, HybridType.SIDE_BY_SIDE, "Geometric overlap calculation not yet implemented")
+    # Step 2: Calculate geometric overlap (deterministic based on shape_family)
+    overlap_percentage = calculate_geometric_overlap(view_a, view_b)
     
     # Step 3: Evaluate geometric overlap threshold (HARD GATE)
     hybrid_allowed, side_by_side_forced = evaluate_geometric_overlap_threshold(overlap_percentage)
@@ -1101,7 +1662,8 @@ def generate_ad(
     product_name: str,
     product_description: str,
     size: str,
-    quota_state: Optional[BatchQuotaState] = None
+    quota_state: Optional[BatchQuotaState] = None,
+    ad_index: int = 0
 ) -> Dict[str, Any]:
     """
     Generate a single ad based on product information.
@@ -1115,6 +1677,7 @@ def generate_ad(
         product_description: Description of the product (non-empty string)
         size: Image size, must be one of: "1024x1024", "1536x1024", "1024x1536"
         quota_state: Optional batch quota state (for 3-ad batch quotas)
+        ad_index: Index of ad in batch (0, 1, or 2) for variation in marketing text
     
     Returns:
         Dictionary with:
@@ -1165,15 +1728,20 @@ def generate_ad(
         ranked_objs
     )
     
-    # Temporary bridge: if geometry is not implemented, use first pair deterministically
+    # If no valid pair found after evaluation, fail explicitly
     if object_a is None or object_b is None:
-        # Geometry evaluation not yet implemented - use first pair as bridge
-        object_a, object_b = candidate_pairs[0]
-        hybrid_type = HybridType.SIDE_BY_SIDE
-        # Note: This is temporary until overlap/max-projection is implemented
+        raise ValueError(f"No valid A/B pair found: {error_msg}")
     
     # ========================================================================
-    # Placeholder implementation continues (image generation, etc.)
+    # STEP 6 & 7: GOAL DERIVATION (once) + HEADLINE & MARKETING TEXT GENERATION
+    # ========================================================================
+    # Derive goal once and use for both headline and marketing text
+    goal = derive_advertising_goal(product_name, product_description)
+    headline = generate_headline(product_name, goal, ad_index)
+    marketing_text = generate_marketing_text(product_name, product_description, goal, ad_index)
+    
+    # ========================================================================
+    # STEP 8: IMAGE GENERATION (Placeholder implementation)
     # ========================================================================
     # Parse size
     try:
@@ -1205,35 +1773,31 @@ def generate_ad(
             font_large = ImageFont.load_default()
             font_small = ImageFont.load_default()
     
-    # Draw text: "ACE DEMO – <SIZE>" at top center
-    demo_text = f"ACE DEMO – {size}"
-    text_bbox = draw.textbbox((0, 0), demo_text, font=font_large)
-    text_width = text_bbox[2] - text_bbox[0]
-    text_x = (width - text_width) // 2
-    text_y = height // 4
-    draw.text((text_x, text_y), demo_text, fill='black', font=font_large)
+    # ========================================================================
+    # STEP 8: SILHOUETTE PLACEHOLDER GENERATION
+    # ========================================================================
+    # Draw headline at top center with safe margins
+    headline_bbox = draw.textbbox((0, 0), headline, font=font_large)
+    headline_width = headline_bbox[2] - headline_bbox[0]
+    headline_x = (width - headline_width) // 2
+    headline_y = height // 12  # Top area with padding, leaving space for silhouette below
+    draw.text((headline_x, headline_y), headline, fill='black', font=font_large)
     
-    # Draw product name below (centered)
-    product_text = product_name
-    product_bbox = draw.textbbox((0, 0), product_text, font=font_small)
-    product_width = product_bbox[2] - product_bbox[0]
-    product_x = (width - product_width) // 2
-    product_y = height // 2
-    draw.text((product_x, product_y), product_text, fill='darkblue', font=font_small)
+    # Draw silhouette placeholder in center area (reflects HYBRID or SIDE_BY_SIDE)
+    draw_silhouette_placeholder(
+        draw,
+        width,
+        height,
+        object_a.shape_family,
+        object_b.shape_family,
+        hybrid_type
+    )
     
     # Convert to JPEG bytes
     jpeg_buffer = io.BytesIO()
     img.save(jpeg_buffer, format='JPEG', quality=95)
     image_bytes_jpg = jpeg_buffer.getvalue()
     jpeg_buffer.close()
-    
-    # ========================================================================
-    # STEP 6: MARKETING TEXT GENERATION
-    # ========================================================================
-    # Generate marketing text that supports the advertising goal
-    # Goal is derived from product info (hidden, not returned to frontend)
-    goal = derive_advertising_goal(product_name, product_description)
-    marketing_text = generate_marketing_text(product_name, product_description, goal)
     
     # Return result with updated batch state
     return {
