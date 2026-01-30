@@ -17,6 +17,7 @@ import base64
 import logging
 from enum import Enum
 from dataclasses import dataclass
+from collections import Counter
 from openai import OpenAI
 
 # Logger for engine operations
@@ -1088,6 +1089,76 @@ ASSOCIATIONS_LIBRARY = {
 }
 
 
+def validate_associations_library():
+    """
+    Validate ASSOCIATIONS_LIBRARY for correctness at startup.
+    
+    Checks for each goal:
+    - Exactly 80 items
+    - No duplicates (exact string match)
+    
+    Raises:
+        ValueError: If any goal has incorrect count or duplicates, with detailed report
+    """
+    all_issues = []
+    
+    for goal, associations in ASSOCIATIONS_LIBRARY.items():
+        issues = []
+        
+        # Check total count
+        total_items = len(associations)
+        if total_items != 80:
+            issues.append(f"  total_items: {total_items} (expected 80)")
+        
+        # Check for duplicates (exact string match, case-sensitive)
+        item_counts = Counter(associations)
+        duplicates = {item: count for item, count in item_counts.items() if count > 1}
+        
+        if duplicates:
+            dup_list = [f"    '{item}' -> {count}" for item, count in sorted(duplicates.items())]
+            issues.append(f"  duplicates:\n" + "\n".join(dup_list))
+        
+        # If issues found, add to report
+        if issues:
+            all_issues.append({
+                'goal': goal,
+                'total_items': total_items,
+                'duplicates': duplicates,
+                'issues': issues
+            })
+    
+    # If any issues found, build report and raise exception
+    if all_issues:
+        report_lines = ["ASSOCIATIONS_LIBRARY validation failed:"]
+        for issue_info in all_issues:
+            report_lines.append(f"  goal: {issue_info['goal']}")
+            for issue_line in issue_info['issues']:
+                report_lines.append(issue_line)
+            report_lines.append("")  # Empty line between goals
+        
+        report = "\n".join(report_lines)
+        logger.error(report)
+        
+        # Build error message for exception
+        error_parts = []
+        for issue_info in all_issues:
+            goal = issue_info['goal']
+            total = issue_info['total_items']
+            dup_count = len(issue_info['duplicates'])
+            
+            parts = [f"{goal}: "]
+            if total != 80:
+                parts.append(f"count={total} (expected 80)")
+            if dup_count > 0:
+                if total != 80:
+                    parts.append(", ")
+                parts.append(f"{dup_count} duplicate(s)")
+            error_parts.append("".join(parts))
+        
+        error_msg = "ASSOCIATIONS_LIBRARY validation failed for: " + "; ".join(error_parts)
+        raise ValueError(error_msg)
+
+
 def derive_advertising_goal(product_name: str, product_description: str) -> str:
     """
     Derive exactly ONE advertising goal from product information (deterministic).
@@ -1951,4 +2022,13 @@ def generate_ad(
         "marketing_text": marketing_text,
         "batch_state": quota_state_to_dict(quota_state)
     }
+
+
+# ============================================================================
+# STARTUP VALIDATION
+# ============================================================================
+# Validate ASSOCIATIONS_LIBRARY at module import time to catch errors early
+# ============================================================================
+
+validate_associations_library()
 
