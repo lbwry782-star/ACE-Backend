@@ -34,6 +34,8 @@ def generate():
         "productName": string,
         "productDescription": string,
         "imageSize": "1024x1024" | "1536x1024" | "1024x1536",
+        "adIndex": int (optional, default 0),
+        "sessionSeed": string (optional, for deterministic window selection),
         "batchState": {  // optional
             "material_analogy_used": boolean,
             "structural_morphology_used": boolean,
@@ -62,6 +64,7 @@ def generate():
         product_description = data.get('productDescription', '').strip()
         image_size = data.get('imageSize', '').strip()
         ad_index = data.get('adIndex', 0)  # Get ad_index from request, default 0
+        session_seed = data.get('sessionSeed')  # Optional session seed for deterministic window selection
         batch_state_dict = data.get('batchState')  # Optional
         
         # Load quota_state from X-ACE-Batch-State header if present, otherwise from request JSON
@@ -114,14 +117,15 @@ def generate():
                 'batchState': current_batch_state
             }), 400
         
-        # Call engine (isolated from route logic) with quota state and ad_index
+        # Call engine (isolated from route logic) with quota state, ad_index, and session_seed
         try:
             engine_result = generate_ad(
                 product_name,
                 product_description,
                 image_size,
                 quota_state=quota_state,
-                ad_index=ad_index
+                ad_index=ad_index,
+                session_seed=session_seed
             )
         except NotImplementedError:
             logger.error(f"Request {request_id}: Engine not yet implemented")
@@ -246,6 +250,7 @@ def preview():
         "productDescription": string,
         "imageSize": "1024x1024" | "1536x1024" | "1024x1536",
         "adIndex": int (optional, default 0),
+        "sessionSeed": string (optional, for deterministic window selection),
         "batchState": {  // optional
             "material_analogy_used": boolean,
             "structural_morphology_used": boolean,
@@ -274,6 +279,7 @@ def preview():
         product_description = data.get('productDescription', '').strip()
         image_size = data.get('imageSize', '').strip()
         ad_index = data.get('adIndex', 0)  # Get ad_index from request, default 0
+        session_seed = data.get('sessionSeed')  # Optional session seed for deterministic window selection
         batch_state_dict = data.get('batchState')  # Optional
         
         # Load quota_state from X-ACE-Batch-State header if present, otherwise from request JSON
@@ -326,14 +332,15 @@ def preview():
                 'batchState': current_batch_state
             }), 400
         
-        # Call engine (isolated from route logic) with quota state and ad_index
+        # Call engine (isolated from route logic) with quota state, ad_index, and session_seed
         try:
             engine_result = generate_ad(
                 product_name,
                 product_description,
                 image_size,
                 quota_state=quota_state,
-                ad_index=ad_index
+                ad_index=ad_index,
+                session_seed=session_seed
             )
         except NotImplementedError:
             logger.error(f"Request {request_id}: Engine not yet implemented")

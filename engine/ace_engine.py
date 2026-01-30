@@ -1749,7 +1749,12 @@ def build_ranked_object_list(objs: List[ObjectCandidate]) -> List[ObjectCandidat
     return sorted(objs, key=lambda obj: obj.association_rank)
 
 
-def generate_candidate_pairs(objs: List[ObjectCandidate], max_pairs: int = 300) -> List[Tuple[ObjectCandidate, ObjectCandidate]]:
+def generate_candidate_pairs(
+    objs: List[ObjectCandidate],
+    max_pairs: int = 300,
+    ad_index: int = 0,
+    session_seed: Optional[str] = None
+) -> List[Tuple[ObjectCandidate, ObjectCandidate]]:
     """
     Generate candidate A/B pairs deterministically without using geometry as ranking.
     
@@ -1763,12 +1768,15 @@ def generate_candidate_pairs(objs: List[ObjectCandidate], max_pairs: int = 300) 
     - Keep the list size bounded (max_pairs)
     
     Strategy:
-    - Take the top N objects (N=40) by association_rank
+    - Use a sliding window approach to ensure variation between ad_index values
+    - Window position is determined by ad_index and optional session_seed
     - Create pairs in nested order i<j until max_pairs reached
     
     Args:
         objs: List of ObjectCandidate objects (should be ranked)
         max_pairs: Maximum number of pairs to generate (default 300)
+        ad_index: Index of ad in batch (0, 1, or 2) to select different window
+        session_seed: Optional session seed string to vary windows between sessions
     
     Returns:
         List of (object_a, object_b) tuples, deterministically ordered
@@ -1776,19 +1784,36 @@ def generate_candidate_pairs(objs: List[ObjectCandidate], max_pairs: int = 300) 
     if len(objs) < 2:
         return []
     
-    # Take top N objects (N=40) by association_rank for pairing
-    # This ensures we prioritize higher-ranked associations
-    top_n = min(40, len(objs))
-    top_objects = objs[:top_n]
+    # Build deterministic window for candidate selection
+    window_size = 80
+    base_offset = ad_index * 40
+    
+    # If session_seed provided, add deterministic offset based on hash
+    if session_seed is not None:
+        seed_hash = hashlib.sha256(session_seed.encode('utf-8')).hexdigest()
+        seed_int = int(seed_hash[:8], 16)
+        base_offset += (seed_int % 60)  # Small offset to vary between sessions
+    
+    # Calculate window bounds, ensuring we don't go out of range
+    start = min(base_offset, max(0, len(objs) - window_size))
+    end = min(start + window_size, len(objs))
+    
+    # Select candidate pool from window
+    candidate_pool = objs[start:end]
+    
+    logger.info(f"PAIR_WINDOW ad_index={ad_index} start={start} end={end} total_objs={len(objs)} window_size={len(candidate_pool)}")
+    
+    if len(candidate_pool) < 2:
+        return []
     
     # Generate pairs in nested order: i < j to avoid (A,B) and (B,A) duplicates
     # Also ensures no object pairs with itself
     pairs = []
-    for i in range(len(top_objects)):
-        for j in range(i + 1, len(top_objects)):
+    for i in range(len(candidate_pool)):
+        for j in range(i + 1, len(candidate_pool)):
             if len(pairs) >= max_pairs:
                 break
-            pairs.append((top_objects[i], top_objects[j]))
+            pairs.append((candidate_pool[i], candidate_pool[j]))
         if len(pairs) >= max_pairs:
             break
     
@@ -2260,7 +2285,8 @@ def generate_ad(
     product_description: str,
     size: str,
     quota_state: Optional[BatchQuotaState] = None,
-    ad_index: int = 0
+    ad_index: int = 0,
+    session_seed: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Generate a single ad based on product information.
@@ -2334,8 +2360,9 @@ def generate_ad(
             # Build ranked object list and generate candidate pairs
             # Pairing is deterministic, prioritizes higher-ranked objects
             # No geometry calculations used for ranking
+            # Window selection varies by ad_index and session_seed for diversity
             ranked_objs = build_ranked_object_list(sanitized_pool)
-            candidate_pairs = generate_candidate_pairs(ranked_objs, max_pairs=300)
+            candidate_pairs = generate_candidate_pairs(ranked_objs, max_pairs=300, ad_index=ad_index, session_seed=session_seed)
             
             if len(candidate_pairs) == 0:
                 # No candidate pairs, try next size
