@@ -991,7 +991,7 @@ def derive_advertising_goal(product_name: str, product_description: str) -> str:
         Single concrete advertising goal string from ALLOWED_GOALS
     
     Raises:
-        ValueError: If goal derivation fails (no matching keywords found)
+        ValueError: (removed) If no keywords match, deterministic fallback selects goal from ALLOWED_GOALS
     """
     # Combine product name and description for keyword matching
     text = (product_name + " " + product_description).lower()
@@ -1003,9 +1003,15 @@ def derive_advertising_goal(product_name: str, product_description: str) -> str:
         if score > 0:
             goal_scores[goal] = score
     
-    # If no matches found, FAIL
+    # If no matches found, use deterministic fallback to prevent hard-fail
     if not goal_scores:
-        raise ValueError(f"Failed to derive advertising goal: no matching keywords found in product name/description")
+        # Deterministic fallback: hash product_name + product_description to select goal
+        # This ensures consistent goal selection even when no keywords match
+        fallback_text = product_name + " " + product_description
+        fallback_hash = hashlib.sha256(fallback_text.encode('utf-8')).hexdigest()
+        fallback_int = int(fallback_hash[:8], 16)  # Use first 8 hex chars as integer
+        fallback_goal_idx = fallback_int % len(ALLOWED_GOALS)
+        return ALLOWED_GOALS[fallback_goal_idx]
     
     # Return goal with highest score
     # Tie-break: if multiple goals have same highest score, choose first in ALLOWED_GOALS order
