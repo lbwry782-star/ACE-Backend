@@ -1811,20 +1811,22 @@ def evaluate_ab_pair(
 def find_valid_ab_pair(
     candidate_pairs: List[Tuple[ObjectCandidate, ObjectCandidate]],
     quota_state: BatchQuotaState,
-    ranked_associations: List[ObjectCandidate]
+    ranked_associations: List[ObjectCandidate],
+    ad_index: int = 0
 ) -> Tuple[Optional[ObjectCandidate], Optional[ObjectCandidate], HybridType, Optional[str]]:
     """
-    Find the first valid A/B pair from candidates that passes all rules.
+    Find a valid A/B pair from candidates that passes all rules.
     
     Candidate Resolution Principle:
     - Geometry is a pass/fail gate, not a ranking tool
-    - If multiple candidates pass geometry, higher-ranked association wins
+    - If multiple candidates pass geometry, select based on ad_index for variation
     - NEVER use geometric overlap to choose between candidates
     
     Args:
         candidate_pairs: List of (object_a, object_b) candidate pairs (already sanitized)
         quota_state: Batch quota state
         ranked_associations: Ranked list of associations (size 80) for resolution
+        ad_index: Index of ad in batch (0, 1, or 2) to select different valid pair
     
     Returns:
         Tuple of (object_a, object_b, hybrid_type, error_message):
@@ -1832,8 +1834,9 @@ def find_valid_ab_pair(
         - hybrid_type: Classification of the valid pair
         - error_message: None if valid pair found, error if none found
     """
-    # Evaluate candidates in ranked order (geometry is pass/fail gate)
+    # Collect all valid pairs (geometry is pass/fail gate)
     # Note: All candidates in candidate_pairs have already passed hard sanitation filters
+    valid_pairs = []
     for object_a, object_b in candidate_pairs:
         # For now, assume geometric similarity (will be determined from actual data)
         is_valid, hybrid_type, error_msg = evaluate_ab_pair(
@@ -1844,11 +1847,23 @@ def find_valid_ab_pair(
         )
         
         if is_valid:
-            # First valid pair found (highest ranked that passes)
-            return (object_a, object_b, hybrid_type, None)
+            valid_pairs.append((object_a, object_b, hybrid_type))
     
-    # No valid configuration found - FAIL generation
-    return (None, None, HybridType.SIDE_BY_SIDE, "No valid A/B pair found that passes all core decision rules")
+    # If no valid pairs found - FAIL generation
+    if len(valid_pairs) == 0:
+        return (None, None, HybridType.SIDE_BY_SIDE, "No valid A/B pair found that passes all core decision rules")
+    
+    # Select the (ad_index+1)-th valid pair (0-indexed: ad_index=0 -> 1st, ad_index=1 -> 2nd, etc.)
+    target_rank = ad_index
+    if target_rank >= len(valid_pairs):
+        # Fallback to first pair if not enough valid pairs
+        logger.warning(f"find_valid_ab_pair: ad_index={ad_index} but only {len(valid_pairs)} valid pairs, using first pair")
+        target_rank = 0
+    
+    object_a, object_b, hybrid_type = valid_pairs[target_rank]
+    logger.info(f"SELECTED_PAIR ad_index={ad_index} pair_rank={target_rank} A={object_a.name} B={object_b.name} hybrid={hybrid_type.value}")
+    
+    return (object_a, object_b, hybrid_type, None)
 
 
 def generate_ad(
@@ -1914,11 +1929,12 @@ def generate_ad(
     # STEP 5: Find valid A/B pair using core decision logic
     # ========================================================================
     # Try to find valid pair using geometry and quota rules
-    # If geometry is not implemented yet, use temporary bridge
+    # Select different pair based on ad_index for variation
     object_a, object_b, hybrid_type, error_msg = find_valid_ab_pair(
         candidate_pairs,
         quota_state,
-        ranked_objs
+        ranked_objs,
+        ad_index=ad_index
     )
     
     # If no valid pair found after evaluation, fail explicitly
