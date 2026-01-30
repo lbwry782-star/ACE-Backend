@@ -733,6 +733,67 @@ def generate_headline(product_name: str, goal: str, ad_index: int = 0) -> str:
 # Headline is added via PIL overlay after image generation.
 # ============================================================================
 
+def derive_environment_for_object(obj_name: str) -> str:
+    """
+    Derive minimal environment for an object (deterministic mapping).
+    
+    Object Environment Rule:
+    - Maps common objects to minimal environments
+    - Returns "neutral studio surface" if no match found
+    - Environment must not include text, signage, symbols, or narrative contexts
+    
+    Args:
+        obj_name: Name of the object
+    
+    Returns:
+        Environment string (minimal, non-narrative)
+    """
+    obj_lower = obj_name.lower()
+    
+    # Water/liquid objects
+    if any(kw in obj_lower for kw in ["water", "dew", "rain", "snow", "ice", "frost", "mist", "fog", "ocean", "sea", "lake", "river", "stream", "pond", "pool", "fountain", "spring"]):
+        return "water surface"
+    
+    # Bedding/comfort objects
+    if any(kw in obj_lower for kw in ["pillow", "cushion", "mattress", "blanket", "quilt", "comforter", "duvet", "sheet", "bed", "hammock"]):
+        return "bedding"
+    
+    # Desk/table objects
+    if any(kw in obj_lower for kw in ["desk", "table", "workbench", "bench", "counter", "surface"]):
+        return "desk"
+    
+    # Tool/mechanical objects
+    if any(kw in obj_lower for kw in ["tool", "gear", "cog", "wheel", "pulley", "lever", "mechanism", "machine", "engine", "motor", "turbine", "generator", "wrench", "screwdriver", "hammer"]):
+        return "tabletop"
+    
+    # Writing/paper objects
+    if any(kw in obj_lower for kw in ["book", "notebook", "journal", "paper", "document", "letter", "pen", "pencil"]):
+        return "desk"
+    
+    # Food objects
+    if any(kw in obj_lower for kw in ["fruit", "vegetable", "herb", "spice", "grain", "seed", "nut", "berry", "food"]):
+        return "tabletop"
+    
+    # Nature/plant objects
+    if any(kw in obj_lower for kw in ["leaf", "flower", "bud", "sprout", "seedling", "sapling", "blossom", "bloom", "tree", "plant"]):
+        return "tabletop"
+    
+    # Glass/crystal objects
+    if any(kw in obj_lower for kw in ["glass", "crystal", "lens", "mirror", "prism", "diamond", "gem", "pearl"]):
+        return "tabletop"
+    
+    # Metal/stone objects
+    if any(kw in obj_lower for kw in ["steel", "iron", "metal", "stone", "rock", "brick", "marble", "granite", "diamond", "titanium"]):
+        return "tabletop"
+    
+    # Fabric/textile objects
+    if any(kw in obj_lower for kw in ["fabric", "cloth", "textile", "robe", "pajamas", "sweater", "cardigan", "hoodie", "jacket", "socks", "slippers"]):
+        return "bedding"
+    
+    # Default: neutral studio surface
+    return "neutral studio surface"
+
+
 def generate_real_image_bytes(
     product_name: str,
     product_description: str,
@@ -768,16 +829,40 @@ def generate_real_image_bytes(
     # Initialize OpenAI client
     client = OpenAI(api_key=api_key)
     
+    # Determine dominant and secondary objects based on association_rank (lower rank = dominant)
+    if object_a.association_rank <= object_b.association_rank:
+        dominant_obj = object_a
+        secondary_obj = object_b
+    else:
+        dominant_obj = object_b
+        secondary_obj = object_a
+    
     # Build image prompt based on hybrid type
     if hybrid_type == HybridType.SIDE_BY_SIDE:
         composition_desc = f"two separate objects side by side: {object_a.name} and {object_b.name}"
     else:  # HYBRID (CORE_GEOMETRIC or other hybrid types)
         composition_desc = f"single seamless hybrid object combining {object_a.name} and {object_b.name}"
     
+    # Determine environment according to Object Environment Rule and Post-Hybrid Environment Rule
+    if hybrid_type != HybridType.SIDE_BY_SIDE:
+        # HYBRID: Post-Hybrid Environment Rule - environment derived from secondary object only
+        environment = derive_environment_for_object(secondary_obj.name)
+    else:
+        # SIDE_BY_SIDE: can use neutral studio surface or something suitable for both, but not narrative
+        env_a = derive_environment_for_object(object_a.name)
+        env_b = derive_environment_for_object(object_b.name)
+        
+        # If both objects suggest same environment, use it; otherwise use neutral
+        if env_a == env_b and env_a != "neutral studio surface":
+            environment = env_a
+        else:
+            environment = "neutral studio surface"
+    
     # Build photorealistic commercial ad prompt (exact requirements)
     prompt = (
         f"Photorealistic commercial ad photo. "
         f"Show {composition_desc}. "
+        f"Environment: {environment}. "
         f"Professional product photography, realistic lighting, natural shadows. "
         f"Empty space at TOP for headline overlay (at least 15% of image height). "
         f"NO TEXT, NO LOGOS, NO LABELS anywhere in the image. "
@@ -1373,6 +1458,40 @@ def determine_shape_family(object_name: str) -> str:
     if any(kw in name_lower for kw in ["shield", "plate", "disc", "discus"]):
         return "shield"
     
+    # Super-families (expanded keyword matching for better overlap detection)
+    
+    # Soft rectangle family (pillow, cushion, mattress, blanket, duvet, sheet, sofa, armchair, recliner)
+    if any(kw in name_lower for kw in ["pillow", "cushion", "mattress", "blanket", "quilt", "comforter", "duvet", "sheet", "sofa", "armchair", "recliner"]):
+        return "soft_rectangle"
+    
+    # Long rectangle family (plank, board, beam, ruler, ruler-like, knife, blade, sword, razor, scalpel)
+    if any(kw in name_lower for kw in ["plank", "board", "beam", "ruler", "knife", "blade", "sword", "razor", "scalpel", "chisel", "awl"]):
+        return "long_rectangle"
+    
+    # Round soft family (balloon, bubble, orb, pearl, bead, donut, bagel, wheel, tire)
+    if any(kw in name_lower for kw in ["balloon", "bubble", "orb", "pearl", "bead", "donut", "bagel", "wheel", "tire", "ring", "hoop"]):
+        return "round_soft"
+    
+    # Container family (bottle, jar, can, tube, vial, flask)
+    if any(kw in name_lower for kw in ["bottle", "jar", "can", "tube", "vial", "flask", "container", "vessel", "pot", "jug"]):
+        return "container"
+    
+    # Shield-like family (shield, helmet, mask, goggles) - general, not text
+    if any(kw in name_lower for kw in ["helmet", "mask", "goggles", "visor", "faceplate"]):
+        return "shield_like"
+    
+    # Disk family (coin, plate, disc, discus)
+    if any(kw in name_lower for kw in ["coin", "plate", "disc", "discus", "frisbee", "puck"]):
+        return "disk"
+    
+    # Spring-like family (spring, coil)
+    if any(kw in name_lower for kw in ["spring", "coil", "spiral", "helix", "corkscrew"]):
+        return "spring_like"
+    
+    # Wire-like family (cable, rope, chain, cord, thread)
+    if any(kw in name_lower for kw in ["cable", "rope", "chain", "cord", "thread", "wire", "string", "line", "fiber", "strand"]):
+        return "wire_like"
+    
     # Default: unknown
     return "unknown"
 
@@ -1599,6 +1718,7 @@ def calculate_geometric_overlap(object_a_silhouette: Any, object_b_silhouette: A
     
     Deterministic implementation based on shape_family compatibility:
     - Same shape family -> 0.80 (high overlap)
+    - Same super-family -> 0.80 (high overlap)
     - Compatible families (circle~oval, rectangle~square, bottle~cylinder, leaf~teardrop, blade~bolt) -> 0.55 (medium)
     - Different families -> 0.40 (low)
     - Unknown shape -> 0.40 (low)
@@ -1623,11 +1743,24 @@ def calculate_geometric_overlap(object_a_silhouette: Any, object_b_silhouette: A
     
     # If either is unknown, return low overlap
     if shape_a == "unknown" or shape_b == "unknown":
-        return 0.40
+        overlap = 0.40
+        logger.info(f"OVERLAP_DEBUG shape_a={shape_a} shape_b={shape_b} overlap={overlap:.2f}")
+        return overlap
     
     # Same shape family -> high overlap
     if shape_a == shape_b:
-        return 0.80
+        overlap = 0.80
+        logger.info(f"OVERLAP_DEBUG shape_a={shape_a} shape_b={shape_b} overlap={overlap:.2f}")
+        return overlap
+    
+    # Super-family compatibility table (same super-family -> 0.80)
+    # If both shapes are the same super-family, return 0.80
+    super_families = ["soft_rectangle", "long_rectangle", "round_soft", "container", "wire_like", "disk", "shield_like", "spring_like"]
+    
+    if shape_a in super_families and shape_b in super_families and shape_a == shape_b:
+        overlap = 0.80
+        logger.info(f"OVERLAP_DEBUG shape_a={shape_a} shape_b={shape_b} overlap={overlap:.2f} (super-family match)")
+        return overlap
     
     # Compatible families (deterministic compatibility table)
     compatible_pairs = [
@@ -1644,10 +1777,14 @@ def calculate_geometric_overlap(object_a_silhouette: Any, object_b_silhouette: A
     ]
     
     if (shape_a, shape_b) in compatible_pairs:
-        return 0.55
+        overlap = 0.55
+        logger.info(f"OVERLAP_DEBUG shape_a={shape_a} shape_b={shape_b} overlap={overlap:.2f}")
+        return overlap
     
     # Different families -> low overlap
-    return 0.40
+    overlap = 0.40
+    logger.info(f"OVERLAP_DEBUG shape_a={shape_a} shape_b={shape_b} overlap={overlap:.2f}")
+    return overlap
 
 
 def select_max_projection_view(object: Any) -> Any:
