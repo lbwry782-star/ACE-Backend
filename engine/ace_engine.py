@@ -1453,12 +1453,12 @@ def map_association_to_objects(association: str, association_rank: int) -> List[
     return candidates
 
 
-def build_object_pool(product_name: str, product_description: str) -> List[ObjectCandidate]:
+def build_object_pool(product_name: str, product_description: str, goal: Optional[str] = None) -> List[ObjectCandidate]:
     """
     Build sanitized object pool from product information.
     
     Pipeline:
-    1) goal = derive_advertising_goal(...)
+    1) goal = derive_advertising_goal(...) or use provided goal
     2) associations = generate_associations(goal)  # exactly 80
     3) For each association (rank 1..80):
        - objects = map_association_to_objects(...)
@@ -1469,6 +1469,7 @@ def build_object_pool(product_name: str, product_description: str) -> List[Objec
     Args:
         product_name: Name of the product
         product_description: Description of the product
+        goal: Optional advertising goal (if None, will be derived from product info)
     
     Returns:
         Sanitized list of ObjectCandidate instances
@@ -1476,11 +1477,12 @@ def build_object_pool(product_name: str, product_description: str) -> List[Objec
     Raises:
         ValueError: If any step fails or sanitized pool is empty
     """
-    # Step 1: Derive advertising goal (hidden, not returned to frontend)
-    try:
-        goal = derive_advertising_goal(product_name, product_description)
-    except Exception as e:
-        raise ValueError(f"Failed to derive advertising goal: {str(e)}") from e
+    # Step 1: Derive advertising goal (hidden, not returned to frontend) or use provided goal
+    if goal is None:
+        try:
+            goal = derive_advertising_goal(product_name, product_description)
+        except Exception as e:
+            raise ValueError(f"Failed to derive advertising goal: {str(e)}") from e
     
     # Step 2: Generate exactly 80 associations
     try:
@@ -1904,7 +1906,7 @@ def find_valid_ab_pair(
         target_rank = 0
     
     object_a, object_b, hybrid_type = valid_pairs[target_rank]
-    logger.info(f"SELECTED_PAIR ad_index={ad_index} pair_rank={target_rank} A={object_a.name} B={object_b.name} hybrid={hybrid_type.value}")
+    logger.info(f"SELECTED_PAIR ad_index={ad_index} k={target_rank} A={object_a.name} B={object_b.name} hybrid={hybrid_type.value}")
     
     return (object_a, object_b, hybrid_type, None)
 
@@ -1944,14 +1946,22 @@ def generate_ad(
         quota_state = BatchQuotaState()
     
     # ========================================================================
+    # STEP 2.5: BUILD GOALS FOR BATCH (3 different goals for 3-ad batch)
+    # ========================================================================
+    # Build goals_for_batch: 3 different goals for 3-ad batch
+    # Each ad_index will use a different goal for object pool, headline, and marketing text
+    goals_for_batch = build_goals_for_batch(product_name, product_description)
+    goal = goals_for_batch[ad_index] if ad_index < len(goals_for_batch) else goals_for_batch[0]
+    
+    # ========================================================================
     # STEP 3: GOAL → 80 ASSOCIATIONS → OBJECT POOL
     # ========================================================================
-    # Build object pool from product information
+    # Build object pool from product information using goal based on ad_index
     # Goal is hidden (not returned to frontend)
     # Associations are internal only (exactly 80)
     # Only physical, non-symbolic objects enter the pool
     try:
-        sanitized_pool = build_object_pool(product_name, product_description)
+        sanitized_pool = build_object_pool(product_name, product_description, goal=goal)
     except ValueError as e:
         # No valid object pool - FAIL explicitly
         raise ValueError(f"Failed to build object pool: {str(e)}") from e
@@ -1985,12 +1995,9 @@ def generate_ad(
         raise ValueError(f"No valid A/B pair found: {error_msg}")
     
     # ========================================================================
-    # STEP 6 & 7: GOAL DERIVATION (batch of 3) + HEADLINE & MARKETING TEXT GENERATION
+    # STEP 6 & 7: HEADLINE & MARKETING TEXT GENERATION
     # ========================================================================
-    # Build goals_for_batch: 3 different goals for 3-ad batch
-    # Use goal based on ad_index for headline, marketing text, and image generation
-    goals_for_batch = build_goals_for_batch(product_name, product_description)
-    goal = goals_for_batch[ad_index] if ad_index < len(goals_for_batch) else goals_for_batch[0]
+    # Use goal based on ad_index (already calculated above) for headline and marketing text
     headline = generate_headline(product_name, goal, ad_index)
     marketing_text = generate_marketing_text(product_name, product_description, goal, ad_index)
     
@@ -2046,22 +2053,55 @@ def generate_ad(
     # Create drawing context
     draw = ImageDraw.Draw(img)
     
+    # Safe margins
+    margin_x = int(img_width * 0.06)
+    margin_y = int(img_height * 0.04)
+    
     # Try to load a font, fallback to default
+    # Start with large font size, will be reduced if needed
+    font_size = 72
+    font_large = None
     try:
         # Try common font paths
-        font_large = ImageFont.truetype("arial.ttf", 72)
+        font_large = ImageFont.truetype("arial.ttf", font_size)
     except (OSError, IOError):
         try:
-            font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 72)
+            font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
         except (OSError, IOError):
             # Fallback to default font
             font_large = ImageFont.load_default()
     
-    # Add headline at top center with safe margins (avoid overlapping objects)
+    # Measure text width and adjust font size if needed
+    max_text_width = img_width - 2 * margin_x
+    min_font_size = 18
+    
+    while True:
+        headline_bbox = draw.textbbox((0, 0), headline, font=font_large)
+        text_width = headline_bbox[2] - headline_bbox[0]
+        
+        if text_width <= max_text_width or font_size <= min_font_size:
+            break
+        
+        # Reduce font size
+        font_size = max(min_font_size, font_size - 4)
+        try:
+            font_large = ImageFont.truetype("arial.ttf", font_size)
+        except (OSError, IOError):
+            try:
+                font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
+            except (OSError, IOError):
+                # If font loading fails, use default and break
+                font_large = ImageFont.load_default()
+                break
+    
+    # Re-measure with final font size
     headline_bbox = draw.textbbox((0, 0), headline, font=font_large)
-    headline_width = headline_bbox[2] - headline_bbox[0]
-    headline_x = (img_width - headline_width) // 2
-    headline_y = img_height // 12  # Top area with padding (safe margin)
+    text_width = headline_bbox[2] - headline_bbox[0]
+    
+    # Position headline with safe margins (clamp to avoid cutting)
+    headline_x = (img_width - text_width) // 2
+    headline_x = max(margin_x, min(headline_x, img_width - margin_x - text_width))
+    headline_y = margin_y
     
     # Draw headline with white outline for visibility
     # Draw outline first (thicker)
