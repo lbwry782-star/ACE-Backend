@@ -786,8 +786,7 @@ def generate_real_image_bytes(
             model=model,
             prompt=prompt,
             size=size,
-            quality="medium",
-            response_format="b64_json"
+            quality="medium"
         )
     except Exception as e:
         # Fallback to gpt-image-1 if 1.5 fails
@@ -798,29 +797,40 @@ def generate_real_image_bytes(
                     model=model,
                     prompt=prompt,
                     size=size,
-                    quality="medium",
-                    response_format="b64_json"
+                    quality="medium"
                 )
             except Exception as fallback_error:
                 raise ValueError(f"OpenAI image generation failed: {str(fallback_error)}") from fallback_error
         else:
             raise ValueError(f"OpenAI image generation failed: {str(e)}") from e
     
-    # Extract base64 image data
+    # Extract image data
     if not response.data or len(response.data) == 0:
         raise ValueError("OpenAI returned empty image data")
     
-    image_b64 = response.data[0].b64_json
-    if not image_b64:
-        raise ValueError("OpenAI returned invalid base64 image data")
+    # Try to get base64 from response (if available)
+    image_b64 = getattr(response.data[0], 'b64_json', None)
+    if image_b64:
+        # Decode base64 to bytes
+        try:
+            image_bytes = base64.b64decode(image_b64)
+        except Exception as e:
+            raise ValueError(f"Failed to decode base64 image: {str(e)}") from e
+        return image_bytes
     
-    # Decode base64 to bytes
-    try:
-        image_bytes = base64.b64decode(image_b64)
-    except Exception as e:
-        raise ValueError(f"Failed to decode base64 image: {str(e)}") from e
+    # If no base64, try to get URL and download
+    image_url = getattr(response.data[0], 'url', None)
+    if image_url:
+        import requests
+        try:
+            img_response = requests.get(image_url)
+            img_response.raise_for_status()
+            image_bytes = img_response.content
+            return image_bytes
+        except Exception as e:
+            raise ValueError(f"Failed to download image from URL: {str(e)}") from e
     
-    return image_bytes
+    raise ValueError("OpenAI returned invalid image data (no base64 or URL)")
 
 
 # ============================================================================
