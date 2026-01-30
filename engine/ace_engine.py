@@ -1214,6 +1214,49 @@ def derive_advertising_goal(product_name: str, product_description: str) -> str:
     return tied_goals[0]
 
 
+def build_goals_for_batch(product_name: str, product_description: str) -> List[str]:
+    """
+    Build a list of 3 different advertising goals for a 3-ad batch.
+    
+    Rules:
+    - goals_for_batch[0] = primary_goal (derived from product info)
+    - goals_for_batch[1], goals_for_batch[2] = different goals from ALLOWED_GOALS
+    - All 3 goals must be different from each other
+    - Selection is deterministic based on hash of (productName + productDescription + "goal" + index)
+    
+    Args:
+        product_name: Name of the product
+        product_description: Description of the product
+    
+    Returns:
+        List of 3 goal strings from ALLOWED_GOALS
+    """
+    # Step 1: Calculate primary goal
+    primary_goal = derive_advertising_goal(product_name, product_description)
+    
+    # Step 2: Build list of available goals (excluding primary_goal)
+    available_goals = [g for g in ALLOWED_GOALS if g != primary_goal]
+    
+    # Step 3: Select goals_for_batch[1] and goals_for_batch[2] deterministically
+    goals_for_batch = [primary_goal]
+    
+    for index in [1, 2]:
+        # Create deterministic hash for this index
+        hash_text = product_name + product_description + "goal" + str(index)
+        hash_value = hashlib.sha256(hash_text.encode('utf-8')).hexdigest()
+        hash_int = int(hash_value[:8], 16)  # Use first 8 hex chars as integer
+        
+        # Select goal from available goals (excluding already selected ones)
+        goal_idx = hash_int % len(available_goals)
+        selected_goal = available_goals[goal_idx]
+        goals_for_batch.append(selected_goal)
+        
+        # Remove selected goal from available list to ensure uniqueness
+        available_goals.remove(selected_goal)
+    
+    return goals_for_batch
+
+
 def generate_associations(goal: str) -> List[str]:
     """
     Generate EXACTLY 80 associations from the advertising goal (deterministic).
@@ -1942,10 +1985,12 @@ def generate_ad(
         raise ValueError(f"No valid A/B pair found: {error_msg}")
     
     # ========================================================================
-    # STEP 6 & 7: GOAL DERIVATION (once) + HEADLINE & MARKETING TEXT GENERATION
+    # STEP 6 & 7: GOAL DERIVATION (batch of 3) + HEADLINE & MARKETING TEXT GENERATION
     # ========================================================================
-    # Derive goal once and use for both headline and marketing text
-    goal = derive_advertising_goal(product_name, product_description)
+    # Build goals_for_batch: 3 different goals for 3-ad batch
+    # Use goal based on ad_index for headline, marketing text, and image generation
+    goals_for_batch = build_goals_for_batch(product_name, product_description)
+    goal = goals_for_batch[ad_index] if ad_index < len(goals_for_batch) else goals_for_batch[0]
     headline = generate_headline(product_name, goal, ad_index)
     marketing_text = generate_marketing_text(product_name, product_description, goal, ad_index)
     
