@@ -852,28 +852,88 @@ def generate_real_image_bytes(
         else:
             environment = "neutral studio surface"
     
-    # Build composition description based on hybrid type (exclusive composition)
+    # Build photorealistic commercial ad prompt (exact requirements)
+    # ENVIRONMENT RULES — CRITICAL: The environment is NOT decorative.
+    # It must visually justify the hybrid or side-by-side logic.
     if hybrid_type == HybridType.SIDE_BY_SIDE:
         # SIDE_BY_SIDE: two objects only, touching edges, no gap, no overlap
-        composition_desc = f"two objects only: {object_a.name} and {object_b.name}, touching edges, no gap, no overlap"
+        prompt = (
+            f"Photorealistic commercial advertising photograph. "
+            f"Show two objects only: {object_a.name} and {object_b.name}, touching edges, no gap, no overlap. "
+            f"ENVIRONMENT RULES — CRITICAL: "
+            f"The environment is NOT decorative. "
+            f"The environment must visually justify WHY these two objects belong together. "
+            f"The environment must visually FORCE proximity. "
+            f"The objects must TOUCH directly. "
+            f"The environment should imply that separation would be unnatural. "
+            f"The environment must support the FUNCTIONAL MEANING of the pairing. "
+            f"The environment must NOT introduce additional objects that compete with or distract from the objects. "
+            f"The environment must reinforce the SHARED SILHOUETTE: background contrast must clearly separate the outlines, no busy textures behind the silhouettes, no visual noise intersecting the contours. "
+            f"The environment must make the pairing feel INTENTIONAL, not accidental, not assembled, not improvised. "
+            f"The objects must appear as if they were DESIGNED FOR this environment, not placed into it afterward. "
+            f"Environment: {environment} (realistic physical context where these objects would naturally exist together). "
+            f"CAMERA & SPATIAL RULES: "
+            f"Straight frontal camera angle only. "
+            f"The environment plane must be perpendicular to the viewer. "
+            f"No perspective skew, no diagonal surfaces, no dramatic depth of field. "
+            f"Horizon line stable and horizontal. "
+            f"MATERIAL & LIGHTING RULES: "
+            f"Realistic material interaction between objects and environment. "
+            f"Soft, neutral, commercial lighting. "
+            f"No harsh shadows, no silhouette blackouts. "
+            f"The objects must retain visible surface detail. "
+            f"Composition: Objects centered, empty clean space at TOP (minimum 15%) for headline. "
+            f"No text, no logos, no labels, no symbols anywhere in the image. "
+            f"ABSOLUTE PROHIBITIONS: "
+            f"No abstract environments, no studio voids unless physically justified, no floating objects, no symbolic or metaphorical backgrounds, no surreal or conceptual scenery. "
+            f"Style: Professional product photography, real materials, real textures. "
+            f"No illustration, no CGI, no 3D render, no vector look."
+        )
     else:
-        # HYBRID: single fused object only; outline follows dominant; surface/material cues from secondary
-        composition_desc = f"single fused object only; outline follows {dominant_obj.name}; surface/material cues from {secondary_obj.name}"
-    
-    # Build photorealistic commercial ad prompt (exact requirements)
-    # Max-Projection View Selection Rule: front-facing, orthographic-like, clear outer contour
-    # Hard constraint: Do NOT render as black silhouette/cutout - show real materials, texture, highlights, shadows
-    prompt = (
-        f"Photorealistic commercial product photo. "
-        f"Front-facing maximum-projection view (orthographic-like), clear outer contour. "
-        f"Do NOT render as black silhouette/cutout. Show real materials, texture, highlights, shadows. "
-        f"Show {composition_desc}. "
-        f"Both objects (or the hybrid) must be front-facing, same orientation, no conflicting perspectives. "
-        f"Environment: {environment} (minimal, plausible, non-narrative). "
-        f"Empty top space for headline (>=15% of image height). "
-        f"NO TEXT, NO LOGOS, NO LABELS, NO WATERMARKS anywhere in the image. "
-        f"Product photography style, not illustration, not 3D, not CGI, not vector art."
-    )
+        # HYBRID: single seamless hybrid object created by morphologically merging silhouette projections
+        prompt = (
+            f"Photorealistic commercial advertising photograph. "
+            f"Show ONE single seamless hybrid object created by morphologically merging "
+            f"the silhouette projection of {object_a.name} (Object A) and {object_b.name} (Object B) into a shared outline. "
+            f"IMPORTANT: "
+            f"This is NOT two objects placed together. "
+            f"This is NOT side by side. "
+            f"This is NOT assembly or collage. "
+            f"The hybrid must read as ONE believable physical object. "
+            f"The hybrid shape is based on the shared frontal silhouette projection "
+            f"where both objects align in outline when facing the viewer. "
+            f"Object A ({object_a.name}) and Object B ({object_b.name}) belong to DIFFERENT functional families, "
+            f"but share a similar silhouette profile. "
+            f"ENVIRONMENT RULES — CRITICAL: "
+            f"The environment is NOT decorative. "
+            f"The environment must visually justify WHY these two objects belong together in a hybrid form. "
+            f"The environment must support the FUNCTIONAL MEANING of the hybrid. "
+            f"The environment must support the hybrid as a SINGLE object. "
+            f"Do NOT show seams, joints, or construction logic. "
+            f"Do NOT suggest mechanical assembly. "
+            f"The hybrid must appear naturally formed within this context. "
+            f"The environment must NOT introduce additional objects that compete with or distract from the hybrid form. "
+            f"The environment must reinforce the SHARED SILHOUETTE: background contrast must clearly separate the hybrid outline, no busy textures behind the silhouette, no visual noise intersecting the contour. "
+            f"The environment must make the hybrid feel INTENTIONAL, not accidental, not assembled, not improvised. "
+            f"The hybrid must appear as if it was DESIGNED FOR this environment, not placed into it afterward. "
+            f"Environment: {environment} (realistic physical context where this hybrid object would naturally exist). "
+            f"CAMERA & SPATIAL RULES: "
+            f"Straight frontal camera angle only. "
+            f"The environment plane must be perpendicular to the viewer. "
+            f"No perspective skew, no diagonal surfaces, no dramatic depth of field. "
+            f"Horizon line stable and horizontal. "
+            f"MATERIAL & LIGHTING RULES: "
+            f"Realistic material interaction between hybrid object and environment. "
+            f"Soft, neutral, commercial lighting. "
+            f"No harsh shadows, no silhouette blackouts. "
+            f"The hybrid object must retain visible surface detail. "
+            f"Composition: Hybrid centered, empty clean space at TOP (minimum 15%) for headline. "
+            f"No text, no logos, no labels, no symbols anywhere in the image. "
+            f"ABSOLUTE PROHIBITIONS: "
+            f"No abstract environments, no studio voids unless physically justified, no floating objects, no symbolic or metaphorical backgrounds, no surreal or conceptual scenery. "
+            f"Style: Professional product photography, real materials, real textures. "
+            f"No illustration, no CGI, no 3D render, no vector look."
+        )
     
     # Use gpt-image-1.5 model (NO FALLBACK - fail if it doesn't work)
     model = "gpt-image-1.5"
