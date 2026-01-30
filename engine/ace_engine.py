@@ -1053,7 +1053,7 @@ ASSOCIATIONS_LIBRARY = {
     "efficiency": [
         "gear", "cog", "wheel", "pulley", "lever", "fulcrum", "mechanism", "machine",
         "engine", "motor", "turbine", "generator", "transformer", "converter", "adapter", "connector",
-        "pipeline", "conduit", "channel", "duct", "tube", "pipe", "hose", "conduit",
+        "pipeline", "conduit", "channel", "duct", "tube", "pipe", "hose", "valve",
         "circuit", "pathway", "route", "course", "track", "trail", "way", "direction",
         "system", "network", "grid", "matrix", "array", "pattern", "structure", "organization",
         "tool", "instrument", "device", "apparatus", "equipment", "machinery", "implement", "utensil",
@@ -1071,7 +1071,7 @@ ASSOCIATIONS_LIBRARY = {
         "relaxation", "rest", "repose", "ease", "leisure", "peace", "tranquility", "serenity",
         "support", "assistance", "help", "aid", "relief", "solace", "consolation", "comfort",
         "safety", "security", "protection", "shelter", "refuge", "sanctuary", "haven", "retreat",
-        "familiarity", "home", "hearth", "fireplace", "warmth", "light", "glow", "radiance",
+        "familiarity", "home", "hearth", "fireplace", "carpet", "light", "glow", "radiance",
         "contentment", "satisfaction", "happiness", "joy", "pleasure", "delight", "enjoyment", "bliss"
     ],
     "precision": [
@@ -1083,7 +1083,7 @@ ASSOCIATIONS_LIBRARY = {
         "knife", "blade", "razor", "scalpel", "chisel", "awl", "drill", "bit",
         "arrow", "dart", "projectile", "missile", "bullet", "pellet", "shot", "slug",
         "lens", "focus", "magnification", "zoom", "clarity", "sharpness", "definition", "resolution",
-        "calibration", "adjustment", "alignment", "positioning", "placement", "location", "placement", "setting",
+        "calibration", "adjustment", "alignment", "positioning", "placement", "location", "dial indicator", "setting",
         "accuracy", "exactness", "correctness", "rightness", "truth", "veracity", "validity", "authenticity"
     ]
 }
