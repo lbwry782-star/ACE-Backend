@@ -904,10 +904,10 @@ ASSOCIATIONS_LIBRARY = {
         "bridge", "dam", "tunnel", "viaduct", "aqueduct", "arch", "column", "pillar",
         "mountain", "rock", "boulder", "cliff", "ridge", "peak", "summit", "plateau",
         "foundation", "base", "footing", "support", "frame", "structure", "skeleton", "framework",
-        "armor", "shield", "protection", "barrier", "defense", "fortification", "rampart", "bulwark",
-        "endurance", "stamina", "resilience", "toughness", "strength", "hardness", "rigidity", "solidity",
-        "permanence", "stability", "constancy", "persistence", "continuity", "longevity", "endurance", "lasting",
-        "reinforcement", "strengthening", "fortification", "consolidation", "solidification", "hardening", "tempering", "annealing"
+        "armor", "shield", "barrier", "rampart", "bulwark", "anvil", "workbench", "steel cable",
+        "chain link", "truck tire", "welding seam", "reinforced hinge", "protective case", "hardhat", "steel rivet", "carbon fiber sheet",
+        "rebar", "toolbox", "shock absorber", "industrial clamp", "steel plate", "concrete pillar", "iron girder", "steel anchor",
+        "reinforced concrete", "steel frame", "iron chain", "steel bolt", "welding joint", "steel bracket", "heavy-duty latch", "steel rod"
     ],
     "freshness": [
         "morning dew", "spring water", "rain", "snow", "ice", "frost", "mist", "fog",
