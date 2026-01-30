@@ -15,6 +15,7 @@ import re
 import os
 import base64
 import logging
+import random
 from enum import Enum
 from dataclasses import dataclass
 from collections import Counter
@@ -853,18 +854,24 @@ def generate_real_image_bytes(
             environment = "neutral studio surface"
     
     # Build photorealistic commercial ad prompt (exact requirements)
-    # ENVIRONMENT RULES — CRITICAL: The environment is NOT decorative.
-    # It must visually justify the hybrid or side-by-side logic.
+    # ENVIRONMENT LAW — MANDATORY: Environment always overrides aesthetics.
+    # If environment logic fails, the image is invalid.
     if hybrid_type == HybridType.SIDE_BY_SIDE:
         # SIDE_BY_SIDE: two objects only, touching edges, no gap, no overlap
         prompt = (
             f"Photorealistic commercial advertising photograph. "
             f"Show two objects only: {object_a.name} and {object_b.name}, touching edges, no gap, no overlap. "
-            f"ENVIRONMENT RULES — CRITICAL: "
-            f"The environment is NOT decorative. "
+            f"ENVIRONMENT LAW — MANDATORY: "
+            f"Every image MUST be placed in a realistic, coherent physical environment. "
+            f"No white studio, no abstract background, no generic gradient, no empty void. "
+            f"The environment must logically explain why the objects exist together. "
+            f"Objects A ({object_a.name}) and B ({object_b.name}) belong to DIFFERENT physical families. "
+            f"SIDE-BY-SIDE RULES: "
+            f"Objects must physically touch. "
+            f"Objects must face the SAME direction toward the viewer. "
+            f"No gaps, no separation, no floating. "
             f"The environment must visually justify WHY these two objects belong together. "
             f"The environment must visually FORCE proximity. "
-            f"The objects must TOUCH directly. "
             f"The environment should imply that separation would be unnatural. "
             f"The environment must support the FUNCTIONAL MEANING of the pairing. "
             f"The environment must NOT introduce additional objects that compete with or distract from the objects. "
@@ -887,7 +894,8 @@ def generate_real_image_bytes(
             f"ABSOLUTE PROHIBITIONS: "
             f"No abstract environments, no studio voids unless physically justified, no floating objects, no symbolic or metaphorical backgrounds, no surreal or conceptual scenery. "
             f"Style: Professional product photography, real materials, real textures. "
-            f"No illustration, no CGI, no 3D render, no vector look."
+            f"No illustration, no CGI, no 3D render, no vector look. "
+            f"Environment always overrides aesthetics. If environment logic fails, the image is invalid."
         )
     else:
         # HYBRID: single seamless hybrid object created by morphologically merging silhouette projections
@@ -904,8 +912,15 @@ def generate_real_image_bytes(
             f"where both objects align in outline when facing the viewer. "
             f"Object A ({object_a.name}) and Object B ({object_b.name}) belong to DIFFERENT functional families, "
             f"but share a similar silhouette profile. "
-            f"ENVIRONMENT RULES — CRITICAL: "
-            f"The environment is NOT decorative. "
+            f"ENVIRONMENT LAW — MANDATORY: "
+            f"Every image MUST be placed in a realistic, coherent physical environment. "
+            f"No white studio, no abstract background, no generic gradient, no empty void. "
+            f"The environment must logically explain why the objects exist together. "
+            f"Objects A ({object_a.name}) and B ({object_b.name}) belong to DIFFERENT physical families. "
+            f"HYBRID RULES: "
+            f"Hybrid must appear as a natural outcome of the environment. "
+            f"NOT a glued object, NOT a merged sculpture, NOT an artificial mashup. "
+            f"The hybrid form should feel inevitable given the environment. "
             f"The environment must visually justify WHY these two objects belong together in a hybrid form. "
             f"The environment must support the FUNCTIONAL MEANING of the hybrid. "
             f"The environment must support the hybrid as a SINGLE object. "
@@ -932,7 +947,8 @@ def generate_real_image_bytes(
             f"ABSOLUTE PROHIBITIONS: "
             f"No abstract environments, no studio voids unless physically justified, no floating objects, no symbolic or metaphorical backgrounds, no surreal or conceptual scenery. "
             f"Style: Professional product photography, real materials, real textures. "
-            f"No illustration, no CGI, no 3D render, no vector look."
+            f"No illustration, no CGI, no 3D render, no vector look. "
+            f"Environment always overrides aesthetics. If environment logic fails, the image is invalid."
         )
     
     # Use gpt-image-1.5 model (NO FALLBACK - fail if it doesn't work)
@@ -1365,7 +1381,7 @@ def derive_advertising_goal(product_name: str, product_description: str) -> str:
     return tied_goals[0]
 
 
-def ai_plan(product_name: str, product_description: str, ad_index: int, session_seed: Optional[str] = None) -> Dict[str, Any]:
+def ai_plan(product_name: str, product_description: str, ad_index: int) -> Dict[str, Any]:
     """
     AI Planner: Generate goals, associations, and object candidates using OpenAI text model.
     
@@ -1375,7 +1391,6 @@ def ai_plan(product_name: str, product_description: str, ad_index: int, session_
         product_name: Name of the product
         product_description: Description of the product
         ad_index: Index of ad in batch (0, 1, or 2)
-        session_seed: Optional session seed for deterministic generation
     
     Returns:
         Dictionary with:
@@ -1395,13 +1410,9 @@ def ai_plan(product_name: str, product_description: str, ad_index: int, session_
     # Initialize OpenAI client
     client = OpenAI(api_key=api_key)
     
-    # Calculate deterministic seed: sha256(product+desc+session_seed+ad_index)
-    seed_text = product_name + product_description
-    if session_seed:
-        seed_text += session_seed
-    seed_text += str(ad_index)
-    seed_hash = hashlib.sha256(seed_text.encode('utf-8')).hexdigest()
-    seed_int = int(seed_hash[:16], 16)  # Use first 16 hex chars as integer for seed
+    # Use random seed for AI generation (no deterministic reuse between sessions)
+    # Seed is only for validation/consistency of AI response, not for selection
+    seed_int = random.randint(0, 2**31 - 1)
     
     # Build JSON schema for response
     json_schema = {
@@ -1930,66 +1941,48 @@ def generate_candidate_pairs(
     session_seed: Optional[str] = None
 ) -> List[Tuple[ObjectCandidate, ObjectCandidate]]:
     """
-    Generate candidate A/B pairs deterministically without using geometry as ranking.
+    Generate candidate A/B pairs without deterministic selection.
     
     Rules:
-    - Pairing must be deterministic
-    - Pair candidates primarily from higher-ranked objects first
-    - Do NOT use any geometric overlap calculations
+    - No deterministic reuse between sessions
+    - Pair candidates from all objects (no windowing)
+    - Do NOT use any geometric overlap calculations for ranking
     - Avoid trivial duplicates:
       - No (A,B) and (B,A) duplication
       - Do not pair an object with itself
     - Keep the list size bounded (max_pairs)
     
     Strategy:
-    - Use a sliding window approach to ensure variation between ad_index values
-    - Window position is determined by ad_index and optional session_seed
+    - Generate pairs from all objects (no windowing, no deterministic selection)
+    - Shuffle pairs randomly to avoid repetition between sessions
     - Create pairs in nested order i<j until max_pairs reached
     
     Args:
         objs: List of ObjectCandidate objects (should be ranked)
         max_pairs: Maximum number of pairs to generate (default 300)
-        ad_index: Index of ad in batch (0, 1, or 2) to select different window
-        session_seed: Optional session seed string to vary windows between sessions
+        ad_index: Index of ad in batch (0, 1, or 2) - not used for selection
+        session_seed: Optional session seed - not used for selection
     
     Returns:
-        List of (object_a, object_b) tuples, deterministically ordered
+        List of (object_a, object_b) tuples, randomly shuffled
     """
     if len(objs) < 2:
         return []
     
-    # Build deterministic window for candidate selection
-    window_size = 80
-    base_offset = ad_index * 40
-    
-    # If session_seed provided, add deterministic offset based on hash
-    if session_seed is not None:
-        seed_hash = hashlib.sha256(session_seed.encode('utf-8')).hexdigest()
-        seed_int = int(seed_hash[:8], 16)
-        base_offset += (seed_int % 60)  # Small offset to vary between sessions
-    
-    # Calculate window bounds, ensuring we don't go out of range
-    start = min(base_offset, max(0, len(objs) - window_size))
-    end = min(start + window_size, len(objs))
-    
-    # Select candidate pool from window
-    candidate_pool = objs[start:end]
-    
-    logger.info(f"PAIR_WINDOW ad_index={ad_index} start={start} end={end} total_objs={len(objs)} window_size={len(candidate_pool)}")
-    
-    if len(candidate_pool) < 2:
-        return []
-    
-    # Generate pairs in nested order: i < j to avoid (A,B) and (B,A) duplicates
-    # Also ensures no object pairs with itself
+    # Generate pairs from all objects (no windowing, no deterministic selection)
     pairs = []
-    for i in range(len(candidate_pool)):
-        for j in range(i + 1, len(candidate_pool)):
+    for i in range(len(objs)):
+        for j in range(i + 1, len(objs)):
             if len(pairs) >= max_pairs:
                 break
-            pairs.append((candidate_pool[i], candidate_pool[j]))
+            pairs.append((objs[i], objs[j]))
         if len(pairs) >= max_pairs:
             break
+    
+    # Shuffle pairs randomly to avoid repetition between sessions
+    random.shuffle(pairs)
+    
+    logger.info(f"PAIR_GENERATION total_objs={len(objs)} pairs={len(pairs)} (randomized, no deterministic selection)")
     
     return pairs
 
@@ -2365,14 +2358,9 @@ def find_valid_ab_pair(
     
     # Step 2: Prefer HYBRID candidates with different families
     if len(hybrid_candidates_different_family) > 0:
-        # Select the (ad_index+1)-th HYBRID candidate with different families (0-indexed)
-        target_rank = ad_index
-        if target_rank >= len(hybrid_candidates_different_family):
-            # Fallback to first HYBRID candidate if not enough
-            logger.warning(f"find_valid_ab_pair: ad_index={ad_index} but only {len(hybrid_candidates_different_family)} HYBRID candidates with different families, using first")
-            target_rank = 0
-        
-        object_a, object_b, hybrid_type, overlap = hybrid_candidates_different_family[target_rank]
+        # Select randomly from HYBRID candidates (no deterministic selection)
+        selected_pair = random.choice(hybrid_candidates_different_family)
+        object_a, object_b, hybrid_type, overlap = selected_pair
         
         # Re-evaluate the selected pair to update quota_state correctly
         quota_state.material_analogy_used = original_quota_dict['material_analogy_used']
@@ -2391,7 +2379,9 @@ def find_valid_ab_pair(
     
     # Step 3: If no HYBRID candidates, prefer SIDE_BY_SIDE with different families
     if len(side_by_side_candidates_different_family) > 0:
-        object_a, object_b, hybrid_type, overlap = side_by_side_candidates_different_family[0]
+        # Select randomly from SIDE_BY_SIDE candidates (no deterministic selection)
+        selected_pair = random.choice(side_by_side_candidates_different_family)
+        object_a, object_b, hybrid_type, overlap = selected_pair
         
         # Re-evaluate the selected pair to update quota_state correctly
         quota_state.material_analogy_used = original_quota_dict['material_analogy_used']
@@ -2414,7 +2404,9 @@ def find_valid_ab_pair(
     if len(hybrid_candidates_different_family) == 0 and len(side_by_side_candidates_different_family) == 0:
         # Try HYBRID same_family first (prefer HYBRID over SIDE_BY_SIDE)
         if len(hybrid_candidates_same_family) > 0:
-            object_a, object_b, hybrid_type, overlap = hybrid_candidates_same_family[0]
+            # Select randomly from same_family candidates (no deterministic selection)
+            selected_pair = random.choice(hybrid_candidates_same_family)
+            object_a, object_b, hybrid_type, overlap = selected_pair
             
             # Re-evaluate the selected pair to update quota_state correctly
             quota_state.material_analogy_used = original_quota_dict['material_analogy_used']
@@ -2433,7 +2425,9 @@ def find_valid_ab_pair(
         
         # Last resort - SIDE_BY_SIDE same_family
         if len(side_by_side_candidates_same_family) > 0:
-            object_a, object_b, hybrid_type, overlap = side_by_side_candidates_same_family[0]
+            # Select randomly from same_family candidates (no deterministic selection)
+            selected_pair = random.choice(side_by_side_candidates_same_family)
+            object_a, object_b, hybrid_type, overlap = selected_pair
             
             # Re-evaluate the selected pair to update quota_state correctly
             quota_state.material_analogy_used = original_quota_dict['material_analogy_used']
@@ -2493,9 +2487,9 @@ def generate_ad(
     # STEP 3: AI PLANNER (replaces old Goal + Associations Library)
     # ========================================================================
     # Use AI planner to generate goals, associations, and object candidates
-    # This is deterministic based on product info, ad_index, and session_seed
+    # No deterministic reuse - each session generates fresh results
     try:
-        ai_plan_result = ai_plan(product_name, product_description, ad_index, session_seed=session_seed)
+        ai_plan_result = ai_plan(product_name, product_description, ad_index)
     except Exception as e:
         logger.error(f"AI planner failed: {str(e)}")
         raise ValueError(f"AI planner failed: {str(e)}") from e
@@ -2541,11 +2535,10 @@ def generate_ad(
     # STEP 4: CANDIDATE PAIR GENERATION (A/B pairs from sanitized pool)
     # ========================================================================
     # Build ranked object list and generate candidate pairs
-    # Pairing is deterministic, prioritizes higher-ranked objects
+    # No deterministic selection - pairs are randomly shuffled to avoid repetition
     # No geometry calculations used for ranking
-    # Window selection varies by ad_index and session_seed for diversity
     ranked_objs = build_ranked_object_list(sanitized_pool)
-    candidate_pairs = generate_candidate_pairs(ranked_objs, max_pairs=300, ad_index=ad_index, session_seed=session_seed)
+    candidate_pairs = generate_candidate_pairs(ranked_objs, max_pairs=300, ad_index=ad_index, session_seed=None)
     
     if len(candidate_pairs) == 0:
         raise ValueError("No candidate pairs generated from object pool")
