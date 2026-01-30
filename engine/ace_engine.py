@@ -1861,11 +1861,13 @@ def find_valid_ab_pair(
 ) -> Tuple[Optional[ObjectCandidate], Optional[ObjectCandidate], HybridType, Optional[str]]:
     """
     Find a valid A/B pair from candidates that passes all rules.
+    Prefers HYBRID over SIDE_BY_SIDE when available.
     
     Candidate Resolution Principle:
     - Geometry is a pass/fail gate, not a ranking tool
-    - If multiple candidates pass geometry, select based on ad_index for variation
-    - NEVER use geometric overlap to choose between candidates
+    - Prefer HYBRID-eligible pairs (overlap >= 0.70, hybrid_type != SIDE_BY_SIDE) over SIDE_BY_SIDE
+    - If multiple HYBRID candidates, select based on ad_index for variation
+    - NEVER use geometric overlap to choose between candidates (only pass/fail)
     
     Args:
         candidate_pairs: List of (object_a, object_b) candidate pairs (already sanitized)
@@ -1879,36 +1881,93 @@ def find_valid_ab_pair(
         - hybrid_type: Classification of the valid pair
         - error_message: None if valid pair found, error if none found
     """
-    # Collect all valid pairs (geometry is pass/fail gate)
     # Note: All candidates in candidate_pairs have already passed hard sanitation filters
-    valid_pairs = []
+    
+    # Save original quota_state to restore after evaluation (evaluate_ab_pair modifies it)
+    original_quota_dict = quota_state_to_dict(quota_state)
+    
+    # Step 1: Collect HYBRID-eligible pairs first (overlap >= 0.70, hybrid_type != SIDE_BY_SIDE)
+    hybrid_candidates = []
+    side_by_side_candidates = []
+    
     for object_a, object_b in candidate_pairs:
-        # For now, assume geometric similarity (will be determined from actual data)
+        # Restore quota_state before each evaluation (evaluate_ab_pair modifies it)
+        quota_state.material_analogy_used = original_quota_dict['material_analogy_used']
+        quota_state.structural_morphology_used = original_quota_dict['structural_morphology_used']
+        quota_state.structural_exception_used = original_quota_dict['structural_exception_used']
+        
+        # Calculate overlap to check if HYBRID is allowed
+        view_a = select_max_projection_view(object_a)
+        view_b = select_max_projection_view(object_b)
+        overlap_percentage = calculate_geometric_overlap(view_a, view_b)
+        
+        # Evaluate pair to get hybrid_type and check quota (only once per pair)
         is_valid, hybrid_type, error_msg = evaluate_ab_pair(
             object_a,
             object_b,
             quota_state,
-            similarity_basis="geometric"  # Will be determined from actual analysis
+            similarity_basis="geometric"
         )
         
-        if is_valid:
-            valid_pairs.append((object_a, object_b, hybrid_type))
+        if not is_valid:
+            # Skip invalid pairs
+            continue
+        
+        # Check if this is HYBRID-eligible (overlap >= 0.70 and hybrid_type != SIDE_BY_SIDE)
+        hybrid_allowed = overlap_percentage >= GEOMETRIC_OVERLAP_THRESHOLD_HYBRID
+        
+        if hybrid_allowed and hybrid_type != HybridType.SIDE_BY_SIDE:
+            # This is a valid HYBRID-eligible pair
+            hybrid_candidates.append((object_a, object_b, hybrid_type, overlap_percentage))
+        else:
+            # SIDE_BY_SIDE candidate (overlap < 0.70 or hybrid_type == SIDE_BY_SIDE)
+            side_by_side_candidates.append((object_a, object_b, hybrid_type, overlap_percentage))
     
-    # If no valid pairs found - FAIL generation
-    if len(valid_pairs) == 0:
-        return (None, None, HybridType.SIDE_BY_SIDE, "No valid A/B pair found that passes all core decision rules")
+    # Step 2: Prefer HYBRID candidates
+    if len(hybrid_candidates) > 0:
+        # Select the (ad_index+1)-th HYBRID candidate (0-indexed)
+        target_rank = ad_index
+        if target_rank >= len(hybrid_candidates):
+            # Fallback to first HYBRID candidate if not enough
+            logger.warning(f"find_valid_ab_pair: ad_index={ad_index} but only {len(hybrid_candidates)} HYBRID candidates, using first")
+            target_rank = 0
+        
+        object_a, object_b, hybrid_type, overlap = hybrid_candidates[target_rank]
+        
+        # Re-evaluate the selected pair to update quota_state correctly
+        quota_state.material_analogy_used = original_quota_dict['material_analogy_used']
+        quota_state.structural_morphology_used = original_quota_dict['structural_morphology_used']
+        quota_state.structural_exception_used = original_quota_dict['structural_exception_used']
+        is_valid, final_hybrid_type, error_msg = evaluate_ab_pair(
+            object_a,
+            object_b,
+            quota_state,
+            similarity_basis="geometric"
+        )
+        
+        logger.info(f"HYBRID_CANDIDATES_FOUND={len(hybrid_candidates)} SELECTED={object_a.name},{object_b.name},{final_hybrid_type.value},{overlap:.2f}")
+        return (object_a, object_b, final_hybrid_type, None)
     
-    # Select the (ad_index+1)-th valid pair (0-indexed: ad_index=0 -> 1st, ad_index=1 -> 2nd, etc.)
-    target_rank = ad_index
-    if target_rank >= len(valid_pairs):
-        # Fallback to first pair if not enough valid pairs
-        logger.warning(f"find_valid_ab_pair: ad_index={ad_index} but only {len(valid_pairs)} valid pairs, using first pair")
-        target_rank = 0
+    # Step 3: If no HYBRID candidates, use first SIDE_BY_SIDE candidate
+    if len(side_by_side_candidates) > 0:
+        object_a, object_b, hybrid_type, overlap = side_by_side_candidates[0]
+        
+        # Re-evaluate the selected pair to update quota_state correctly
+        quota_state.material_analogy_used = original_quota_dict['material_analogy_used']
+        quota_state.structural_morphology_used = original_quota_dict['structural_morphology_used']
+        quota_state.structural_exception_used = original_quota_dict['structural_exception_used']
+        is_valid, final_hybrid_type, error_msg = evaluate_ab_pair(
+            object_a,
+            object_b,
+            quota_state,
+            similarity_basis="geometric"
+        )
+        
+        logger.info(f"HYBRID_CANDIDATES_FOUND=0 SELECTED={object_a.name},{object_b.name},{final_hybrid_type.value},{overlap:.2f}")
+        return (object_a, object_b, final_hybrid_type, None)
     
-    object_a, object_b, hybrid_type = valid_pairs[target_rank]
-    logger.info(f"SELECTED_PAIR ad_index={ad_index} k={target_rank} A={object_a.name} B={object_b.name} hybrid={hybrid_type.value}")
-    
-    return (object_a, object_b, hybrid_type, None)
+    # No valid pairs found - FAIL generation
+    return (None, None, HybridType.SIDE_BY_SIDE, "No valid A/B pair found that passes all core decision rules")
 
 
 def generate_ad(
