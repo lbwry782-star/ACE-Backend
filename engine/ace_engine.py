@@ -837,12 +837,6 @@ def generate_real_image_bytes(
         dominant_obj = object_b
         secondary_obj = object_a
     
-    # Build image prompt based on hybrid type (using silhouette projections, not literal objects)
-    if hybrid_type == HybridType.SIDE_BY_SIDE:
-        composition_desc = f"dominant silhouette projections of {object_a.name} and {object_b.name}, side by side, facing the viewer"
-    else:  # HYBRID (CORE_GEOMETRIC or other hybrid types)
-        composition_desc = f"single seamless hybrid silhouette projection combining {object_a.name} and {object_b.name}, facing the viewer"
-    
     # Determine environment according to Object Environment Rule and Post-Hybrid Environment Rule
     if hybrid_type != HybridType.SIDE_BY_SIDE:
         # HYBRID: Post-Hybrid Environment Rule - environment derived from secondary object only
@@ -858,20 +852,26 @@ def generate_real_image_bytes(
         else:
             environment = "neutral studio surface"
     
+    # Build composition description based on hybrid type (exclusive composition)
+    if hybrid_type == HybridType.SIDE_BY_SIDE:
+        # SIDE_BY_SIDE: two objects only, touching edges, no gap, no overlap
+        composition_desc = f"two objects only: {object_a.name} and {object_b.name}, touching edges, no gap, no overlap"
+    else:
+        # HYBRID: single fused object only; outline follows dominant; surface/material cues from secondary
+        composition_desc = f"single fused object only; outline follows {dominant_obj.name}; surface/material cues from {secondary_obj.name}"
+    
     # Build photorealistic commercial ad prompt (exact requirements)
-    # Max-Projection View Selection Rule: show silhouette projections, not literal objects
+    # Max-Projection View Selection Rule: front-facing, orthographic-like, clear outer contour
+    # Hard constraint: Do NOT render as black silhouette/cutout - show real materials, texture, highlights, shadows
     prompt = (
-        f"Photorealistic commercial ad photo. "
+        f"Photorealistic commercial product photo. "
+        f"Front-facing maximum-projection view (orthographic-like), clear outer contour. "
+        f"Do NOT render as black silhouette/cutout. Show real materials, texture, highlights, shadows. "
         f"Show {composition_desc}. "
-        f"Show only the dominant silhouette projection of each object, aligned to face the viewer directly, with maximal projected surface area. "
-        f"Do not show full literal objects or angled perspectives. "
-        f"Both silhouettes are front-facing to the camera, same orientation and alignment, no perspective divergence. "
-        f"Outline clarity is critical. "
-        f"Shapes must read instantly as a shared contour (HYBRID) or comparable outlines (SIDE-BY-SIDE). "
-        f"Environment: {environment}. "
-        f"Professional product photography, realistic lighting, natural shadows. "
-        f"Empty space at TOP for headline overlay (at least 15% of image height). "
-        f"NO TEXT, NO LOGOS, NO LABELS anywhere in the image. "
+        f"Both objects (or the hybrid) must be front-facing, same orientation, no conflicting perspectives. "
+        f"Environment: {environment} (minimal, plausible, non-narrative). "
+        f"Empty top space for headline (>=15% of image height). "
+        f"NO TEXT, NO LOGOS, NO LABELS, NO WATERMARKS anywhere in the image. "
         f"Product photography style, not illustration, not 3D, not CGI, not vector art."
     )
     
@@ -2051,10 +2051,13 @@ def find_valid_ab_pair(
     # Save original quota_state to restore after evaluation (evaluate_ab_pair modifies it)
     original_quota_dict = quota_state_to_dict(quota_state)
     
-    # Step 1: Collect valid pairs, separating by HYBRID/SIDE_BY_SIDE and different/same family
+    # Step 1: Collect valid pairs, separating by HYBRID/SIDE_BY_SIDE
+    # Hard rule: Reject same_family pairs initially (only allow as fallback if no different_family pairs exist)
     hybrid_candidates_different_family = []
-    hybrid_candidates_same_family = []
     side_by_side_candidates_different_family = []
+    
+    # Fallback lists (only used if no different_family pairs found)
+    hybrid_candidates_same_family = []
     side_by_side_candidates_same_family = []
     
     for object_a, object_b in candidate_pairs:
@@ -2063,7 +2066,7 @@ def find_valid_ab_pair(
         quota_state.structural_morphology_used = original_quota_dict['structural_morphology_used']
         quota_state.structural_exception_used = original_quota_dict['structural_exception_used']
         
-        # Check if objects have same shape_family
+        # Check if objects have same shape_family (reject initially, allow only as fallback)
         same_family = (object_a.shape_family == object_b.shape_family)
         
         # Calculate overlap to check if HYBRID is allowed
@@ -2089,12 +2092,14 @@ def find_valid_ab_pair(
         if hybrid_allowed and hybrid_type != HybridType.SIDE_BY_SIDE:
             # This is a valid HYBRID-eligible pair
             if same_family:
+                # Store for fallback only (not used in primary selection)
                 hybrid_candidates_same_family.append((object_a, object_b, hybrid_type, overlap_percentage))
             else:
                 hybrid_candidates_different_family.append((object_a, object_b, hybrid_type, overlap_percentage))
         else:
             # SIDE_BY_SIDE candidate (overlap < 0.70 or hybrid_type == SIDE_BY_SIDE)
             if same_family:
+                # Store for fallback only (not used in primary selection)
                 side_by_side_candidates_same_family.append((object_a, object_b, hybrid_type, overlap_percentage))
             else:
                 side_by_side_candidates_different_family.append((object_a, object_b, hybrid_type, overlap_percentage))
@@ -2125,26 +2130,7 @@ def find_valid_ab_pair(
         logger.info(f"HYBRID_CANDIDATES_FOUND={len(hybrid_candidates_different_family)} SELECTED={object_a.name},{object_b.name},{final_hybrid_type.value},{overlap:.2f}")
         return (object_a, object_b, final_hybrid_type, None)
     
-    # Step 3: Fallback to HYBRID candidates with same family (only if no different-family candidates)
-    if len(hybrid_candidates_same_family) > 0:
-        object_a, object_b, hybrid_type, overlap = hybrid_candidates_same_family[0]
-        
-        # Re-evaluate the selected pair to update quota_state correctly
-        quota_state.material_analogy_used = original_quota_dict['material_analogy_used']
-        quota_state.structural_morphology_used = original_quota_dict['structural_morphology_used']
-        quota_state.structural_exception_used = original_quota_dict['structural_exception_used']
-        is_valid, final_hybrid_type, error_msg = evaluate_ab_pair(
-            object_a,
-            object_b,
-            quota_state,
-            similarity_basis="geometric"
-        )
-        
-        logger.warning(f"AB_SELECTION family_relation=SAME_FALLBACK A={object_a.name} B={object_b.name} (no different-family HYBRID candidates found)")
-        logger.info(f"HYBRID_CANDIDATES_FOUND={len(hybrid_candidates_same_family)} SELECTED={object_a.name},{object_b.name},{final_hybrid_type.value},{overlap:.2f}")
-        return (object_a, object_b, final_hybrid_type, None)
-    
-    # Step 4: If no HYBRID candidates, prefer SIDE_BY_SIDE with different families
+    # Step 3: If no HYBRID candidates, prefer SIDE_BY_SIDE with different families
     if len(side_by_side_candidates_different_family) > 0:
         object_a, object_b, hybrid_type, overlap = side_by_side_candidates_different_family[0]
         
@@ -2163,24 +2149,47 @@ def find_valid_ab_pair(
         logger.info(f"HYBRID_CANDIDATES_FOUND=0 SELECTED={object_a.name},{object_b.name},{final_hybrid_type.value},{overlap:.2f}")
         return (object_a, object_b, final_hybrid_type, None)
     
-    # Step 5: Last resort - SIDE_BY_SIDE with same family
-    if len(side_by_side_candidates_same_family) > 0:
-        object_a, object_b, hybrid_type, overlap = side_by_side_candidates_same_family[0]
+    # Step 4: Last resort - Fallback to same_family pairs (only if no different-family candidates exist at all)
+    # This is a last resort - same_family pairs are rejected by default
+    # Hard rule: Only allow same_family if absolutely no different_family pairs exist
+    if len(hybrid_candidates_different_family) == 0 and len(side_by_side_candidates_different_family) == 0:
+        # Try HYBRID same_family first (prefer HYBRID over SIDE_BY_SIDE)
+        if len(hybrid_candidates_same_family) > 0:
+            object_a, object_b, hybrid_type, overlap = hybrid_candidates_same_family[0]
+            
+            # Re-evaluate the selected pair to update quota_state correctly
+            quota_state.material_analogy_used = original_quota_dict['material_analogy_used']
+            quota_state.structural_morphology_used = original_quota_dict['structural_morphology_used']
+            quota_state.structural_exception_used = original_quota_dict['structural_exception_used']
+            is_valid, final_hybrid_type, error_msg = evaluate_ab_pair(
+                object_a,
+                object_b,
+                quota_state,
+                similarity_basis="geometric"
+            )
+            
+            logger.warning(f"AB_SELECTION family_relation=SAME_FAMILY_FALLBACK=true A={object_a.name} B={object_b.name} (no different-family candidates found)")
+            logger.info(f"HYBRID_CANDIDATES_FOUND={len(hybrid_candidates_same_family)} SELECTED={object_a.name},{object_b.name},{final_hybrid_type.value},{overlap:.2f}")
+            return (object_a, object_b, final_hybrid_type, None)
         
-        # Re-evaluate the selected pair to update quota_state correctly
-        quota_state.material_analogy_used = original_quota_dict['material_analogy_used']
-        quota_state.structural_morphology_used = original_quota_dict['structural_morphology_used']
-        quota_state.structural_exception_used = original_quota_dict['structural_exception_used']
-        is_valid, final_hybrid_type, error_msg = evaluate_ab_pair(
-            object_a,
-            object_b,
-            quota_state,
-            similarity_basis="geometric"
-        )
-        
-        logger.warning(f"AB_SELECTION family_relation=SAME_FALLBACK A={object_a.name} B={object_b.name} (no different-family candidates found)")
-        logger.info(f"HYBRID_CANDIDATES_FOUND=0 SELECTED={object_a.name},{object_b.name},{final_hybrid_type.value},{overlap:.2f}")
-        return (object_a, object_b, final_hybrid_type, None)
+        # Last resort - SIDE_BY_SIDE same_family
+        if len(side_by_side_candidates_same_family) > 0:
+            object_a, object_b, hybrid_type, overlap = side_by_side_candidates_same_family[0]
+            
+            # Re-evaluate the selected pair to update quota_state correctly
+            quota_state.material_analogy_used = original_quota_dict['material_analogy_used']
+            quota_state.structural_morphology_used = original_quota_dict['structural_morphology_used']
+            quota_state.structural_exception_used = original_quota_dict['structural_exception_used']
+            is_valid, final_hybrid_type, error_msg = evaluate_ab_pair(
+                object_a,
+                object_b,
+                quota_state,
+                similarity_basis="geometric"
+            )
+            
+            logger.warning(f"AB_SELECTION family_relation=SAME_FAMILY_FALLBACK=true A={object_a.name} B={object_b.name} (no different-family candidates found)")
+            logger.info(f"HYBRID_CANDIDATES_FOUND=0 SELECTED={object_a.name},{object_b.name},{final_hybrid_type.value},{overlap:.2f}")
+            return (object_a, object_b, final_hybrid_type, None)
     
     # No valid pairs found - FAIL generation
     return (None, None, HybridType.SIDE_BY_SIDE, "No valid A/B pair found that passes all core decision rules")
