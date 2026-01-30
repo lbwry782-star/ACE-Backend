@@ -12,8 +12,11 @@ from PIL import Image, ImageDraw, ImageFont
 import io
 import hashlib
 import re
+import os
+import base64
 from enum import Enum
 from dataclasses import dataclass
+from openai import OpenAI
 
 
 # ============================================================================
@@ -716,6 +719,108 @@ def generate_headline(product_name: str, goal: str, ad_index: int = 0) -> str:
             headline = f"{product_name} brings excellence forward now."
     
     return headline.strip()
+
+
+# ============================================================================
+# STEP 8: REAL IMAGE GENERATION (OpenAI GPT Image)
+# ============================================================================
+# Generate real photorealistic ad images via OpenAI Images API.
+# Headline is added via PIL overlay after image generation.
+# ============================================================================
+
+def generate_real_image_bytes(
+    product_name: str,
+    product_description: str,
+    size: str,
+    object_a: ObjectCandidate,
+    object_b: ObjectCandidate,
+    hybrid_type: HybridType,
+    goal: str
+) -> bytes:
+    """
+    Generate real photorealistic ad image via OpenAI Images API.
+    
+    Args:
+        product_name: Name of the product
+        product_description: Description of the product
+        size: Image size ("1024x1024", "1536x1024", or "1024x1536")
+        object_a: ObjectCandidate for object A
+        object_b: ObjectCandidate for object B
+        hybrid_type: HybridType (CORE_GEOMETRIC or SIDE_BY_SIDE)
+        goal: Advertising goal (hidden, for context)
+    
+    Returns:
+        bytes: JPEG image data
+    
+    Raises:
+        ValueError: If OpenAI API call fails or returns invalid data
+    """
+    # Get OpenAI API key from environment
+    api_key = os.environ.get('OPENAI_API_KEY')
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY environment variable is not set")
+    
+    # Initialize OpenAI client
+    client = OpenAI(api_key=api_key)
+    
+    # Build image prompt based on hybrid type
+    if hybrid_type == HybridType.CORE_GEOMETRIC:
+        composition_desc = f"single perfect hybrid object where {object_b.name} geometrically replaces {object_a.name} in the same footprint"
+    else:  # SIDE_BY_SIDE
+        composition_desc = f"two separate objects side by side: {object_a.name} and {object_b.name} in the same scene"
+    
+    # Build photorealistic ad prompt
+    prompt = (
+        f"Photorealistic product advertisement photography. "
+        f"Show {composition_desc}. "
+        f"Professional DSLR camera, realistic lighting, natural shadows. "
+        f"Clean blank space at top for headline (at least 15% of image height). "
+        f"NO TEXT, NO LETTERS, NO LOGOS, NO LABELS, NO WATERMARKS anywhere in the image. "
+        f"Product photography style, not illustration, not 3D, not CGI, not vector art."
+    )
+    
+    # Try gpt-image-1.5 first, fallback to gpt-image-1
+    model = "gpt-image-1.5"
+    try:
+        response = client.images.generate(
+            model=model,
+            prompt=prompt,
+            size=size,
+            quality="medium",
+            response_format="b64_json"
+        )
+    except Exception as e:
+        # Fallback to gpt-image-1 if 1.5 fails
+        if "gpt-image-1.5" in str(e) or "model" in str(e).lower():
+            model = "gpt-image-1"
+            try:
+                response = client.images.generate(
+                    model=model,
+                    prompt=prompt,
+                    size=size,
+                    quality="medium",
+                    response_format="b64_json"
+                )
+            except Exception as fallback_error:
+                raise ValueError(f"OpenAI image generation failed: {str(fallback_error)}") from fallback_error
+        else:
+            raise ValueError(f"OpenAI image generation failed: {str(e)}") from e
+    
+    # Extract base64 image data
+    if not response.data or len(response.data) == 0:
+        raise ValueError("OpenAI returned empty image data")
+    
+    image_b64 = response.data[0].b64_json
+    if not image_b64:
+        raise ValueError("OpenAI returned invalid base64 image data")
+    
+    # Decode base64 to bytes
+    try:
+        image_bytes = base64.b64decode(image_b64)
+    except Exception as e:
+        raise ValueError(f"Failed to decode base64 image: {str(e)}") from e
+    
+    return image_bytes
 
 
 # ============================================================================
@@ -1747,7 +1852,7 @@ def generate_ad(
     marketing_text = generate_marketing_text(product_name, product_description, goal, ad_index)
     
     # ========================================================================
-    # STEP 8: IMAGE GENERATION (Placeholder implementation)
+    # STEP 8: REAL IMAGE GENERATION (OpenAI GPT Image + Headline Overlay)
     # ========================================================================
     # Parse size
     try:
@@ -1760,44 +1865,63 @@ def generate_ad(
     if size not in allowed_sizes:
         raise ValueError(f"Size must be one of: {', '.join(allowed_sizes)}")
     
-    # Create placeholder image with Pillow
-    # White background
-    img = Image.new('RGB', (width, height), color='white')
+    # Generate real image via OpenAI
+    try:
+        image_bytes = generate_real_image_bytes(
+            product_name,
+            product_description,
+            size,
+            object_a,
+            object_b,
+            hybrid_type,
+            goal
+        )
+    except ValueError as e:
+        # Re-raise ValueError with clear message
+        raise ValueError(f"Image generation failed: {str(e)}") from e
+    except Exception as e:
+        # Wrap any other exception as ValueError
+        raise ValueError(f"Image generation failed: {str(e)}") from e
+    
+    # Open image with PIL
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        # Convert to RGB if needed (handles PNG/WebP from OpenAI)
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+    except Exception as e:
+        raise ValueError(f"Failed to open generated image: {str(e)}") from e
+    
+    # Get image dimensions
+    img_width, img_height = img.size
+    
+    # Create drawing context
     draw = ImageDraw.Draw(img)
     
     # Try to load a font, fallback to default
     try:
         # Try common font paths
         font_large = ImageFont.truetype("arial.ttf", 72)
-        font_small = ImageFont.truetype("arial.ttf", 48)
     except (OSError, IOError):
         try:
             font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 72)
-            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 48)
         except (OSError, IOError):
             # Fallback to default font
             font_large = ImageFont.load_default()
-            font_small = ImageFont.load_default()
     
-    # ========================================================================
-    # STEP 8: SILHOUETTE PLACEHOLDER GENERATION
-    # ========================================================================
-    # Draw headline at top center with safe margins
+    # Add headline at top center with safe margins (avoid overlapping objects)
     headline_bbox = draw.textbbox((0, 0), headline, font=font_large)
     headline_width = headline_bbox[2] - headline_bbox[0]
-    headline_x = (width - headline_width) // 2
-    headline_y = height // 12  # Top area with padding, leaving space for silhouette below
-    draw.text((headline_x, headline_y), headline, fill='black', font=font_large)
+    headline_x = (img_width - headline_width) // 2
+    headline_y = img_height // 12  # Top area with padding (safe margin)
     
-    # Draw silhouette placeholder in center area (reflects HYBRID or SIDE_BY_SIDE)
-    draw_silhouette_placeholder(
-        draw,
-        width,
-        height,
-        object_a.shape_family,
-        object_b.shape_family,
-        hybrid_type
-    )
+    # Draw headline with white outline for visibility
+    # Draw outline first (thicker)
+    for adj in range(-2, 3):
+        for adj2 in range(-2, 3):
+            draw.text((headline_x + adj, headline_y + adj2), headline, fill='white', font=font_large)
+    # Then draw main text
+    draw.text((headline_x, headline_y), headline, fill='black', font=font_large)
     
     # Convert to JPEG bytes
     jpeg_buffer = io.BytesIO()
