@@ -14,9 +14,13 @@ import hashlib
 import re
 import os
 import base64
+import logging
 from enum import Enum
 from dataclasses import dataclass
 from openai import OpenAI
+
+# Logger for engine operations
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -764,23 +768,25 @@ def generate_real_image_bytes(
     client = OpenAI(api_key=api_key)
     
     # Build image prompt based on hybrid type
-    if hybrid_type == HybridType.CORE_GEOMETRIC:
-        composition_desc = f"single perfect hybrid object where {object_b.name} geometrically replaces {object_a.name} in the same footprint"
-    else:  # SIDE_BY_SIDE
-        composition_desc = f"two separate objects side by side: {object_a.name} and {object_b.name} in the same scene"
+    if hybrid_type == HybridType.SIDE_BY_SIDE:
+        composition_desc = f"two separate objects side by side: {object_a.name} and {object_b.name}"
+    else:  # HYBRID (CORE_GEOMETRIC or other hybrid types)
+        composition_desc = f"single seamless hybrid object combining {object_a.name} and {object_b.name}"
     
-    # Build photorealistic ad prompt
+    # Build photorealistic commercial ad prompt (exact requirements)
     prompt = (
-        f"Photorealistic product advertisement photography. "
+        f"Photorealistic commercial ad photo. "
         f"Show {composition_desc}. "
-        f"Professional DSLR camera, realistic lighting, natural shadows. "
-        f"Clean blank space at top for headline (at least 15% of image height). "
-        f"NO TEXT, NO LETTERS, NO LOGOS, NO LABELS, NO WATERMARKS anywhere in the image. "
+        f"Professional product photography, realistic lighting, natural shadows. "
+        f"Empty space at TOP for headline overlay (at least 15% of image height). "
+        f"NO TEXT, NO LOGOS, NO LABELS anywhere in the image. "
         f"Product photography style, not illustration, not 3D, not CGI, not vector art."
     )
     
-    # Try gpt-image-1.5 first, fallback to gpt-image-1
+    # Use gpt-image-1.5 model (NO FALLBACK - fail if it doesn't work)
     model = "gpt-image-1.5"
+    logger.info(f"IMAGE_GEN_START model={model} size={size} object_a={object_a.name} object_b={object_b.name} hybrid_type={hybrid_type.value}")
+    
     try:
         response = client.images.generate(
             model=model,
@@ -789,23 +795,13 @@ def generate_real_image_bytes(
             quality="medium"
         )
     except Exception as e:
-        # Fallback to gpt-image-1 if 1.5 fails
-        if "gpt-image-1.5" in str(e) or "model" in str(e).lower():
-            model = "gpt-image-1"
-            try:
-                response = client.images.generate(
-                    model=model,
-                    prompt=prompt,
-                    size=size,
-                    quality="medium"
-                )
-            except Exception as fallback_error:
-                raise ValueError(f"OpenAI image generation failed: {str(fallback_error)}") from fallback_error
-        else:
-            raise ValueError(f"OpenAI image generation failed: {str(e)}") from e
+        # NO FALLBACK - fail immediately with clear error
+        logger.error(f"IMAGE_GEN_FAIL error={str(e)}")
+        raise ValueError(f"OpenAI image generation failed: {str(e)}") from e
     
     # Extract image data
     if not response.data or len(response.data) == 0:
+        logger.error("IMAGE_GEN_FAIL error=OpenAI returned empty image data")
         raise ValueError("OpenAI returned empty image data")
     
     # Try to get base64 from response (if available)
@@ -814,9 +810,11 @@ def generate_real_image_bytes(
         # Decode base64 to bytes
         try:
             image_bytes = base64.b64decode(image_b64)
+            logger.info(f"IMAGE_GEN_OK bytes={len(image_bytes)}")
+            return image_bytes
         except Exception as e:
+            logger.error(f"IMAGE_GEN_FAIL error=Failed to decode base64: {str(e)}")
             raise ValueError(f"Failed to decode base64 image: {str(e)}") from e
-        return image_bytes
     
     # If no base64, try to get URL and download
     image_url = getattr(response.data[0], 'url', None)
@@ -826,10 +824,13 @@ def generate_real_image_bytes(
             img_response = requests.get(image_url)
             img_response.raise_for_status()
             image_bytes = img_response.content
+            logger.info(f"IMAGE_GEN_OK bytes={len(image_bytes)} (from URL)")
             return image_bytes
         except Exception as e:
+            logger.error(f"IMAGE_GEN_FAIL error=Failed to download from URL: {str(e)}")
             raise ValueError(f"Failed to download image from URL: {str(e)}") from e
     
+    logger.error("IMAGE_GEN_FAIL error=OpenAI returned invalid image data (no base64 or URL)")
     raise ValueError("OpenAI returned invalid image data (no base64 or URL)")
 
 
@@ -1875,7 +1876,8 @@ def generate_ad(
     if size not in allowed_sizes:
         raise ValueError(f"Size must be one of: {', '.join(allowed_sizes)}")
     
-    # Generate real image via OpenAI
+    # Generate real image via OpenAI (NO PLACEHOLDER FALLBACK)
+    # If OpenAI fails, raise ValueError - no fallback to placeholder
     try:
         image_bytes = generate_real_image_bytes(
             product_name,
@@ -1887,19 +1889,23 @@ def generate_ad(
             goal
         )
     except ValueError as e:
-        # Re-raise ValueError with clear message
+        # Re-raise ValueError with clear message (NO PLACEHOLDER FALLBACK)
+        logger.error(f"IMAGE_GEN_FAIL in generate_ad: {str(e)}")
         raise ValueError(f"Image generation failed: {str(e)}") from e
     except Exception as e:
-        # Wrap any other exception as ValueError
+        # Wrap any other exception as ValueError (NO PLACEHOLDER FALLBACK)
+        logger.error(f"IMAGE_GEN_FAIL in generate_ad: {str(e)}")
         raise ValueError(f"Image generation failed: {str(e)}") from e
     
-    # Open image with PIL
+    # Open image with PIL (from real OpenAI image, NOT placeholder)
     try:
         img = Image.open(io.BytesIO(image_bytes))
         # Convert to RGB if needed (handles PNG/WebP from OpenAI)
         if img.mode != 'RGB':
             img = img.convert('RGB')
+        logger.info(f"IMAGE_OPENED size={img.size} mode={img.mode} bytes={len(image_bytes)}")
     except Exception as e:
+        logger.error(f"IMAGE_OPEN_FAIL error={str(e)}")
         raise ValueError(f"Failed to open generated image: {str(e)}") from e
     
     # Get image dimensions
