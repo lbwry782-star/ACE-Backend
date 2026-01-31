@@ -1547,16 +1547,24 @@ def determine_shape_family(object_name: str) -> str:
     """
     name_lower = object_name.lower()
     
-    # Circle family
-    if any(kw in name_lower for kw in ["ball", "sphere", "orb", "globe", "bead", "pearl", "bubble", "circle", "round"]):
+    # Circle family (expanded keywords)
+    if any(kw in name_lower for kw in ["ball", "sphere", "orb", "globe", "bead", "pearl", "bubble", "circle", "round", "wheel", "tire", "rim", "rotor"]):
         return "circle"
+    
+    # Disk family (must come before circle to catch specific disk items)
+    if any(kw in name_lower for kw in ["disc", "disk", "plate", "coin", "frisbee", "puck"]):
+        return "disk"
+    
+    # Gear disk family (gears, cogs, sprockets)
+    if any(kw in name_lower for kw in ["gear", "cog", "sprocket"]):
+        return "gear_disk"
     
     # Oval family
     if any(kw in name_lower for kw in ["oval", "ellipse", "egg", "almond", "teardrop"]):
         return "oval"
     
-    # Rectangle family
-    if any(kw in name_lower for kw in ["rectangle", "rectangular", "block", "brick", "slab", "plank", "board"]):
+    # Rectangle family (expanded keywords)
+    if any(kw in name_lower for kw in ["rectangle", "rectangular", "block", "brick", "slab", "tile", "book", "notebook"]):
         return "rectangle"
     
     # Square family
@@ -1567,19 +1575,19 @@ def determine_shape_family(object_name: str) -> str:
     if any(kw in name_lower for kw in ["triangle", "triangular", "pyramid", "cone", "arrowhead"]):
         return "triangle"
     
-    # Leaf family
-    if any(kw in name_lower for kw in ["leaf", "petal", "blade", "wing", "feather"]):
+    # Leaf family (expanded keywords, must come before blade/bolt)
+    if any(kw in name_lower for kw in ["leaf", "petal", "feather", "wing"]):
         return "leaf"
     
     # Teardrop family
     if any(kw in name_lower for kw in ["teardrop", "drop", "raindrop", "waterdrop"]):
         return "teardrop"
     
-    # Bottle family
-    if any(kw in name_lower for kw in ["bottle", "flask", "vial", "jar", "container"]):
+    # Bottle family (expanded keywords)
+    if any(kw in name_lower for kw in ["bottle", "jar", "flask", "vial"]):
         return "bottle"
     
-    # Cylinder family
+    # Cylinder family (expanded keywords)
     if any(kw in name_lower for kw in ["cylinder", "tube", "pipe", "rod", "pole", "column", "pillar"]):
         return "cylinder"
     
@@ -1587,46 +1595,47 @@ def determine_shape_family(object_name: str) -> str:
     if any(kw in name_lower for kw in ["box", "crate", "case", "chest", "container"]):
         return "box"
     
-    # Book family
+    # Book family (handled by rectangle above, but keep for compatibility)
     if any(kw in name_lower for kw in ["book", "notebook", "journal", "tome", "volume"]):
-        return "book"
+        return "rectangle"  # Books are rectangles
     
     # Fish family
     if any(kw in name_lower for kw in ["fish", "shark", "dolphin", "whale"]):
         return "fish"
     
-    # Wing family
+    # Wing family (handled by leaf above, but keep for compatibility)
     if any(kw in name_lower for kw in ["wing", "airfoil", "sail"]):
-        return "wing"
+        return "leaf"  # Wings are leaf-like
     
-    # Blade family
+    # Blade family (must come after leaf to avoid conflicts)
     if any(kw in name_lower for kw in ["blade", "knife", "sword", "razor", "cutting"]):
         return "blade"
     
-    # Bolt family
-    if any(kw in name_lower for kw in ["bolt", "lightning", "flash", "zigzag"]):
+    # Bolt family (expanded keywords)
+    if any(kw in name_lower for kw in ["bolt", "lightning", "flash", "zigzag", "arrow"]):
         return "bolt"
     
     # Helmet family
     if any(kw in name_lower for kw in ["helmet", "cap", "hat", "crown"]):
         return "helmet"
     
-    # Shield family
-    if any(kw in name_lower for kw in ["shield", "plate", "disc", "discus"]):
+    # Shield family (must come after disk to avoid conflicts)
+    if any(kw in name_lower for kw in ["shield", "discus"]):
         return "shield"
     
     # Super-families (expanded keyword matching for better overlap detection)
     
-    # Soft rectangle family (pillow, cushion, mattress, blanket, duvet, sheet, sofa, armchair, recliner)
-    if any(kw in name_lower for kw in ["pillow", "cushion", "mattress", "blanket", "quilt", "comforter", "duvet", "sheet", "sofa", "armchair", "recliner"]):
+    # Soft rectangle family (expanded keywords, must come before rectangle)
+    if any(kw in name_lower for kw in ["pillow", "cushion", "mattress", "blanket", "quilt", "comforter", "duvet", "sheet"]):
         return "soft_rectangle"
     
     # Long rectangle family (plank, board, beam, ruler, ruler-like, knife, blade, sword, razor, scalpel)
     if any(kw in name_lower for kw in ["plank", "board", "beam", "ruler", "knife", "blade", "sword", "razor", "scalpel", "chisel", "awl"]):
         return "long_rectangle"
     
-    # Round soft family (balloon, bubble, orb, pearl, bead, donut, bagel, wheel, tire)
-    if any(kw in name_lower for kw in ["balloon", "bubble", "orb", "pearl", "bead", "donut", "bagel", "wheel", "tire", "ring", "hoop"]):
+    # Round soft family (balloon, bubble, orb, pearl, bead, donut, bagel, ring, hoop)
+    # Note: wheel/tire are handled by circle above, orb/pearl/bubble are handled by circle above
+    if any(kw in name_lower for kw in ["balloon", "donut", "bagel", "ring", "hoop"]):
         return "round_soft"
     
     # Container family (bottle, jar, can, tube, vial, flask)
@@ -1932,16 +1941,38 @@ def calculate_geometric_overlap(object_a_silhouette: Any, object_b_silhouette: A
     else:
         shape_b = str(object_b_silhouette) if isinstance(object_b_silhouette, str) else "unknown"
     
-    # If either is unknown, return low overlap
+    # If either is unknown, return 0.55 (improved from 0.40)
     if shape_a == "unknown" or shape_b == "unknown":
-        overlap = 0.40
-        logger.info(f"OVERLAP_DEBUG shape_a={shape_a} shape_b={shape_b} overlap={overlap:.2f}")
+        overlap = 0.55
+        logger.info(f"OVERLAP_DEBUG A={object_a_silhouette.name if hasattr(object_a_silhouette, 'name') else shape_a}(shape={shape_a}) B={object_b_silhouette.name if hasattr(object_b_silhouette, 'name') else shape_b}(shape={shape_b}) overlap={overlap:.2f}")
         return overlap
     
     # Same shape family -> high overlap
     if shape_a == shape_b:
         overlap = 0.80
-        logger.info(f"OVERLAP_DEBUG shape_a={shape_a} shape_b={shape_b} overlap={overlap:.2f}")
+        logger.info(f"OVERLAP_DEBUG A={object_a_silhouette.name if hasattr(object_a_silhouette, 'name') else shape_a}(shape={shape_a}) B={object_b_silhouette.name if hasattr(object_b_silhouette, 'name') else shape_b}(shape={shape_b}) overlap={overlap:.2f}")
+        return overlap
+    
+    # Compatible super-families -> 0.70 (for HYBRID eligibility at threshold >= 0.6)
+    # Circle/disk/gear_disk together
+    circle_disk_family = {"circle", "disk", "gear_disk"}
+    if shape_a in circle_disk_family and shape_b in circle_disk_family:
+        overlap = 0.70
+        logger.info(f"OVERLAP_DEBUG A={object_a_silhouette.name if hasattr(object_a_silhouette, 'name') else shape_a}(shape={shape_a}) B={object_b_silhouette.name if hasattr(object_b_silhouette, 'name') else shape_b}(shape={shape_b}) overlap={overlap:.2f} (circle/disk/gear_disk compatible)")
+        return overlap
+    
+    # Rectangle/soft_rectangle together
+    rectangle_family = {"rectangle", "soft_rectangle"}
+    if shape_a in rectangle_family and shape_b in rectangle_family:
+        overlap = 0.70
+        logger.info(f"OVERLAP_DEBUG A={object_a_silhouette.name if hasattr(object_a_silhouette, 'name') else shape_a}(shape={shape_a}) B={object_b_silhouette.name if hasattr(object_b_silhouette, 'name') else shape_b}(shape={shape_b}) overlap={overlap:.2f} (rectangle/soft_rectangle compatible)")
+        return overlap
+    
+    # Bottle/cylinder together
+    bottle_cylinder_family = {"bottle", "cylinder"}
+    if shape_a in bottle_cylinder_family and shape_b in bottle_cylinder_family:
+        overlap = 0.70
+        logger.info(f"OVERLAP_DEBUG A={object_a_silhouette.name if hasattr(object_a_silhouette, 'name') else shape_a}(shape={shape_a}) B={object_b_silhouette.name if hasattr(object_b_silhouette, 'name') else shape_b}(shape={shape_b}) overlap={overlap:.2f} (bottle/cylinder compatible)")
         return overlap
     
     # Super-family compatibility table (same super-family -> 0.80)
@@ -1950,7 +1981,7 @@ def calculate_geometric_overlap(object_a_silhouette: Any, object_b_silhouette: A
     
     if shape_a in super_families and shape_b in super_families and shape_a == shape_b:
         overlap = 0.80
-        logger.info(f"OVERLAP_DEBUG shape_a={shape_a} shape_b={shape_b} overlap={overlap:.2f} (super-family match)")
+        logger.info(f"OVERLAP_DEBUG A={object_a_silhouette.name if hasattr(object_a_silhouette, 'name') else shape_a}(shape={shape_a}) B={object_b_silhouette.name if hasattr(object_b_silhouette, 'name') else shape_b}(shape={shape_b}) overlap={overlap:.2f} (super-family match)")
         return overlap
     
     # Compatible families (deterministic compatibility table)
@@ -1969,12 +2000,12 @@ def calculate_geometric_overlap(object_a_silhouette: Any, object_b_silhouette: A
     
     if (shape_a, shape_b) in compatible_pairs:
         overlap = 0.55
-        logger.info(f"OVERLAP_DEBUG shape_a={shape_a} shape_b={shape_b} overlap={overlap:.2f}")
+        logger.info(f"OVERLAP_DEBUG A={object_a_silhouette.name if hasattr(object_a_silhouette, 'name') else shape_a}(shape={shape_a}) B={object_b_silhouette.name if hasattr(object_b_silhouette, 'name') else shape_b}(shape={shape_b}) overlap={overlap:.2f}")
         return overlap
     
     # Different families -> low overlap
     overlap = 0.40
-    logger.info(f"OVERLAP_DEBUG shape_a={shape_a} shape_b={shape_b} overlap={overlap:.2f}")
+    logger.info(f"OVERLAP_DEBUG A={object_a_silhouette.name if hasattr(object_a_silhouette, 'name') else shape_a}(shape={shape_a}) B={object_b_silhouette.name if hasattr(object_b_silhouette, 'name') else shape_b}(shape={shape_b}) overlap={overlap:.2f}")
     return overlap
 
 
@@ -2409,6 +2440,11 @@ def generate_ad(
     
     if len(sanitized_pool) == 0:
         raise ValueError("No valid object candidates after sanitation")
+    
+    # Log shape family statistics
+    unknown_count = sum(1 for obj in sanitized_pool if obj.shape_family == "unknown")
+    total_count = len(sanitized_pool)
+    logger.info(f"SHAPE_FAMILY_STATS unknown_count={unknown_count} total={total_count}")
     
     # Build ranked object list
     ranked_objs = build_ranked_object_list(sanitized_pool)
