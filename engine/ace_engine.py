@@ -1452,6 +1452,128 @@ def build_goals_for_batch(product_name: str, product_description: str) -> List[s
     return goals_for_batch
 
 
+def map_association_to_world(association: str) -> str:
+    """
+    Map an association to its conceptual world/domain.
+    
+    Each association belongs to ONE world. Only ONE association per world is allowed.
+    
+    Worlds:
+    - mechanical: gears, engines, machines, mechanisms
+    - industrial: factories, tools, manufacturing, construction
+    - biological: animals, plants, living organisms
+    - geological: rocks, minerals, earth, natural formations
+    - architectural: buildings, structures, construction elements
+    - domestic: household items, furniture, home objects (MAX ONE)
+    - natural: natural phenomena, weather, elements
+    - scientific: instruments, lab equipment, measurement tools
+    - human_body: physical body parts (physical only)
+    - transportation: vehicles, movement devices
+    - protective: safety equipment, barriers, shields
+    - fluid: liquids, water, fluids, containers
+    - optical: light, vision, transparency, lenses
+    - abstract: concepts that don't fit other categories (minimize)
+    
+    Args:
+        association: Association string
+    
+    Returns:
+        World name string
+    """
+    assoc_lower = association.lower()
+    
+    # Mechanical world
+    if any(kw in assoc_lower for kw in ["gear", "cog", "wheel", "pulley", "lever", "mechanism", "machine", "engine", "motor", "turbine", "rotor", "sprocket", "chain", "cable"]):
+        return "mechanical"
+    
+    # Industrial world
+    if any(kw in assoc_lower for kw in ["factory", "tool", "workshop", "construction", "steel", "concrete", "beam", "girder", "rivet", "welding", "clamp", "bracket", "anchor", "rebar"]):
+        return "industrial"
+    
+    # Transportation world
+    if any(kw in assoc_lower for kw in ["car", "vehicle", "train", "plane", "airplane", "helicopter", "boat", "ship", "submarine", "rocket", "satellite", "drone", "bicycle", "motorcycle", "skateboard", "roller"]):
+        return "transportation"
+    
+    # Biological world
+    if any(kw in assoc_lower for kw in ["animal", "bird", "fish", "cheetah", "falcon", "deer", "rabbit", "squirrel", "plant", "leaf", "flower", "tree", "seed", "sprout", "blossom", "fruit", "vegetable", "herb"]):
+        return "biological"
+    
+    # Geological world
+    if any(kw in assoc_lower for kw in ["rock", "stone", "boulder", "mountain", "cliff", "mineral", "crystal", "diamond", "marble", "granite", "quartz", "gem", "pearl", "coral"]):
+        return "geological"
+    
+    # Architectural world
+    if any(kw in assoc_lower for kw in ["building", "bridge", "dam", "tunnel", "arch", "column", "pillar", "wall", "fortress", "castle", "structure", "frame", "foundation"]):
+        return "architectural"
+    
+    # Domestic world (MAX ONE allowed)
+    if any(kw in assoc_lower for kw in ["pillow", "cushion", "mattress", "blanket", "quilt", "comforter", "duvet", "sheet", "sofa", "armchair", "recliner", "bed", "furniture", "home", "hearth", "fireplace", "carpet", "slippers", "robe", "pajamas"]):
+        return "domestic"
+    
+    # Natural phenomena world
+    if any(kw in assoc_lower for kw in ["wind", "rain", "snow", "ice", "frost", "mist", "fog", "dew", "storm", "hurricane", "tornado", "lightning", "thunder", "wave", "current", "stream", "river", "ocean", "sea", "lake", "waterfall", "cascade"]):
+        return "natural"
+    
+    # Scientific/Measurement world
+    if any(kw in assoc_lower for kw in ["compass", "ruler", "scale", "caliper", "micrometer", "gauge", "meter", "measure", "clock", "watch", "timer", "laser", "telescope", "microscope", "magnifying", "lens", "calibration", "dial indicator"]):
+        return "scientific"
+    
+    # Human body world (physical only)
+    if any(kw in assoc_lower for kw in ["eye", "pupil", "iris", "retina", "vision", "sight", "body", "hand", "finger", "muscle", "bone"]):
+        return "human_body"
+    
+    # Protective world
+    if any(kw in assoc_lower for kw in ["helmet", "shield", "armor", "barrier", "fence", "guardrail", "safety", "protection", "guard", "sentry", "lock", "key", "safe", "vault"]):
+        return "protective"
+    
+    # Fluid/Container world
+    if any(kw in assoc_lower for kw in ["water", "liquid", "fluid", "bottle", "jar", "can", "container", "vessel", "tube", "pipe", "hose", "valve", "fountain", "pool", "pond"]):
+        return "fluid"
+    
+    # Optical world
+    if any(kw in assoc_lower for kw in ["light", "beam", "ray", "shine", "glow", "illumination", "brightness", "transparency", "glass", "mirror", "prism", "kaleidoscope", "spectroscope", "binoculars", "periscope"]):
+        return "optical"
+    
+    # Default: abstract (minimize these)
+    return "abstract"
+
+
+def filter_associations_for_diversity(associations: List[str], max_per_world: int = 1) -> List[str]:
+    """
+    Filter associations to ensure conceptual distance and world uniqueness.
+    
+    HARD LAW — CONCEPTUAL DISTANCE:
+    - Only ONE association per world is allowed (by default)
+    - If two associations could plausibly appear in the same photograph, reject one
+    - Prefer 20-40 radically different associations over 80 conceptually neighboring ones
+    
+    Args:
+        associations: List of association strings (ordered by strength)
+        max_per_world: Maximum associations per world (default 1 for strict diversity)
+    
+    Returns:
+        Filtered list of associations with maximum conceptual distance
+    """
+    world_to_associations = {}
+    filtered = []
+    
+    for assoc in associations:
+        world = map_association_to_world(assoc)
+        
+        # Track associations by world
+        if world not in world_to_associations:
+            world_to_associations[world] = []
+        
+        # Only add if world hasn't reached max_per_world limit
+        if len(world_to_associations[world]) < max_per_world:
+            world_to_associations[world].append(assoc)
+            filtered.append(assoc)
+    
+    logger.info(f"ASSOC_DIVERSITY_FILTER input_count={len(associations)} output_count={len(filtered)} worlds_represented={len(world_to_associations)}")
+    
+    return filtered
+
+
 def generate_associations(goal: str, size: int = 80) -> List[str]:
     """
     Generate associations from the advertising goal (deterministic).
@@ -1463,13 +1585,14 @@ def generate_associations(goal: str, size: int = 80) -> List[str]:
     - No symbols, metaphors, or emotions as standalone items
     - Ordered list: index 1 = strongest association
     - Associations are internal only (not returned to frontend)
+    - CONCEPTUAL DISTANCE LAW: Only ONE association per world (filtered for diversity)
     
     Args:
         goal: Advertising goal string
         size: Number of associations to generate (80, 120, 200, 300, 400, or 500)
     
     Returns:
-        List of association strings, ordered by strength
+        List of association strings, ordered by strength, filtered for conceptual distance
     
     Raises:
         ValueError: If goal not found in associations library or invalid size
@@ -1486,58 +1609,70 @@ def generate_associations(goal: str, size: int = 80) -> List[str]:
     if len(set(base_associations)) != len(base_associations):
         raise ValueError(f"Duplicate associations found for goal '{goal}'")
     
-    # Return base associations if size is 80
+    # Apply CONCEPTUAL DISTANCE filter: only ONE association per world
+    # This ensures maximum diversity and prevents "obvious" pairs
+    filtered_associations = filter_associations_for_diversity(base_associations, max_per_world=1)
+    
+    # If filtered list is too small (< 20), allow up to 2 per world for critical worlds
+    if len(filtered_associations) < 20:
+        logger.warning(f"ASSOC_DIVERSITY_FILTER result too small ({len(filtered_associations)}), allowing 2 per world for critical worlds")
+        filtered_associations = filter_associations_for_diversity(base_associations, max_per_world=2)
+    
+    # Return filtered associations if size is 80
     if size == 80:
-        return base_associations
+        return filtered_associations
     
     # Expand deterministically for larger sizes
-    expanded = list(base_associations)
+    # Use filtered associations as base to maintain diversity
+    expanded = list(filtered_associations)
     
     if size == 120:
-        # 80 base + 40 additional (repeat first 40)
-        expanded.extend(base_associations[:40])
+        # Filtered base + additional from original (filtered again)
+        additional = filter_associations_for_diversity(base_associations[len(filtered_associations):], max_per_world=1)
+        expanded.extend(additional[:min(40, len(additional))])
     elif size == 200:
-        # 80 base + 40 (first repeat) + 80 (full repeat)
-        expanded.extend(base_associations[:40])
-        expanded.extend(base_associations)
+        # Filtered base + more from original (filtered again)
+        remaining = base_associations[len(filtered_associations):]
+        additional = filter_associations_for_diversity(remaining, max_per_world=1)
+        expanded.extend(additional[:min(120, len(additional))])
     elif size == 300:
-        # 80 base + 40 (first repeat) + 80 (full repeat) + 100 (first 20 repeated 5 times)
-        expanded.extend(base_associations[:40])
-        expanded.extend(base_associations)
-        for _ in range(5):
-            expanded.extend(base_associations[:20])
+        # Filtered base + more from original (filtered again)
+        remaining = base_associations[len(filtered_associations):]
+        additional = filter_associations_for_diversity(remaining, max_per_world=1)
+        expanded.extend(additional[:min(220, len(additional))])
     elif size == 400:
-        # 80 base + 40 (first repeat) + 80 (full repeat) + 200 (full repeat 2.5 times)
-        expanded.extend(base_associations[:40])
-        expanded.extend(base_associations)
-        expanded.extend(base_associations)
-        expanded.extend(base_associations[:80])
+        # Filtered base + more from original (filtered again)
+        remaining = base_associations[len(filtered_associations):]
+        additional = filter_associations_for_diversity(remaining, max_per_world=1)
+        expanded.extend(additional[:min(320, len(additional))])
     elif size == 500:
-        # 80 base + 40 (first repeat) + 80 (full repeat) + 300 (full repeat 3.75 times)
-        expanded.extend(base_associations[:40])
-        expanded.extend(base_associations)
-        expanded.extend(base_associations)
-        expanded.extend(base_associations)
-        expanded.extend(base_associations[:60])
+        # Filtered base + more from original (filtered again)
+        remaining = base_associations[len(filtered_associations):]
+        additional = filter_associations_for_diversity(remaining, max_per_world=1)
+        expanded.extend(additional[:min(420, len(additional))])
     elif size == 700:
-        # 80 base + 40 (first repeat) + 80 (full repeat) + 500 (full repeat 6.25 times)
-        expanded.extend(base_associations[:40])
-        expanded.extend(base_associations)
-        expanded.extend(base_associations)
-        expanded.extend(base_associations)
-        expanded.extend(base_associations)
-        expanded.extend(base_associations)
-        expanded.extend(base_associations[:20])
+        # Filtered base + more from original (filtered again)
+        remaining = base_associations[len(filtered_associations):]
+        additional = filter_associations_for_diversity(remaining, max_per_world=1)
+        expanded.extend(additional[:min(620, len(additional))])
     elif size == 1000:
-        # 80 base + 40 (first repeat) + 80 (full repeat) + 800 (full repeat 10 times)
-        expanded.extend(base_associations[:40])
-        expanded.extend(base_associations)
-        for _ in range(10):
-            expanded.extend(base_associations)
+        # Filtered base + more from original (filtered again)
+        remaining = base_associations[len(filtered_associations):]
+        additional = filter_associations_for_diversity(remaining, max_per_world=1)
+        expanded.extend(additional[:min(920, len(additional))])
     else:
         raise ValueError(f"Invalid association size: {size}. Must be 80, 120, 200, 300, 400, 500, 700, or 1000")
     
-    return expanded
+    # Apply final diversity filter to expanded list to ensure world uniqueness
+    # This ensures that even after expansion, we maintain conceptual distance
+    final_filtered = filter_associations_for_diversity(expanded, max_per_world=1)
+    
+    # If we need more, allow 2 per world for critical worlds
+    if len(final_filtered) < size:
+        final_filtered = filter_associations_for_diversity(expanded, max_per_world=2)
+    
+    # Trim to exact size if needed
+    return final_filtered[:size] if len(final_filtered) >= size else final_filtered
 
 
 def determine_shape_family(object_name: str) -> str:
