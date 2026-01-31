@@ -1514,8 +1514,23 @@ def generate_associations(goal: str, size: int = 80) -> List[str]:
         expanded.extend(base_associations)
         expanded.extend(base_associations)
         expanded.extend(base_associations[:60])
+    elif size == 700:
+        # 80 base + 40 (first repeat) + 80 (full repeat) + 500 (full repeat 6.25 times)
+        expanded.extend(base_associations[:40])
+        expanded.extend(base_associations)
+        expanded.extend(base_associations)
+        expanded.extend(base_associations)
+        expanded.extend(base_associations)
+        expanded.extend(base_associations)
+        expanded.extend(base_associations[:20])
+    elif size == 1000:
+        # 80 base + 40 (first repeat) + 80 (full repeat) + 800 (full repeat 10 times)
+        expanded.extend(base_associations[:40])
+        expanded.extend(base_associations)
+        for _ in range(10):
+            expanded.extend(base_associations)
     else:
-        raise ValueError(f"Invalid association size: {size}. Must be 80, 120, 200, 300, 400, or 500")
+        raise ValueError(f"Invalid association size: {size}. Must be 80, 120, 200, 300, 400, 500, 700, or 1000")
     
     return expanded
 
@@ -1808,7 +1823,9 @@ def generate_candidate_pairs(
     objs: List[ObjectCandidate],
     max_pairs: int = 300,
     ad_index: int = 0,
-    session_seed: Optional[str] = None
+    session_seed: Optional[str] = None,
+    assoc_count: int = 80,
+    top_n: int = 80
 ) -> List[Tuple[ObjectCandidate, ObjectCandidate]]:
     """
     Generate candidate A/B pairs deterministically without using geometry as ranking.
@@ -1821,17 +1838,20 @@ def generate_candidate_pairs(
       - No (A,B) and (B,A) duplication
       - Do not pair an object with itself
     - Keep the list size bounded (max_pairs)
+    - Window size scales with assoc_count (via top_n parameter)
     
     Strategy:
-    - Use a sliding window approach to ensure variation between ad_index values
+    - Use top_n objects (scaled with assoc_count, capped at 600)
     - Window position is determined by ad_index and optional session_seed
     - Create pairs in nested order i<j until max_pairs reached
     
     Args:
         objs: List of ObjectCandidate objects (should be ranked)
-        max_pairs: Maximum number of pairs to generate (default 300)
+        max_pairs: Maximum number of pairs to generate (scaled with assoc_count, capped at 3000)
         ad_index: Index of ad in batch (0, 1, or 2) to select different window
         session_seed: Optional session seed string to vary windows between sessions
+        assoc_count: Number of associations (used for scaling, passed for logging)
+        top_n: Number of top objects to use for pairing (scaled with assoc_count, capped at 600)
     
     Returns:
         List of (object_a, object_b) tuples, deterministically ordered
@@ -1839,8 +1859,9 @@ def generate_candidate_pairs(
     if len(objs) < 2:
         return []
     
-    # Build deterministic window for candidate selection
-    window_size = 80
+    # Use top_n objects (scaled with assoc_count)
+    # This ensures expansion actually increases search space
+    window_size = min(top_n, len(objs))
     base_offset = ad_index * 40
     
     # If session_seed provided, add deterministic offset based on hash
@@ -1850,13 +1871,15 @@ def generate_candidate_pairs(
         base_offset += (seed_int % 60)  # Small offset to vary between sessions
     
     # Calculate window bounds, ensuring we don't go out of range
-    start = min(base_offset, max(0, len(objs) - window_size))
-    end = min(start + window_size, len(objs))
-    
-    # Select candidate pool from window
-    candidate_pool = objs[start:end]
-    
-    logger.info(f"PAIR_WINDOW ad_index={ad_index} start={start} end={end} total_objs={len(objs)} window_size={len(candidate_pool)}")
+    # For large top_n, start from beginning (base_offset becomes less relevant)
+    if window_size >= len(objs):
+        # Use all objects if top_n >= total objects
+        candidate_pool = objs
+    else:
+        # Use sliding window approach for smaller windows
+        start = min(base_offset, max(0, len(objs) - window_size))
+        end = min(start + window_size, len(objs))
+        candidate_pool = objs[start:end]
     
     if len(candidate_pool) < 2:
         return []
@@ -2164,7 +2187,7 @@ def find_valid_hybrid_pair(
     quota_state: BatchQuotaState,
     ranked_associations: List[ObjectCandidate],
     ad_index: int = 0
-) -> Tuple[Optional[ObjectCandidate], Optional[ObjectCandidate], HybridType, Optional[str]]:
+) -> Tuple[Optional[ObjectCandidate], Optional[ObjectCandidate], HybridType, Optional[str], Dict[str, int]]:
     """
     Find a valid HYBRID pair from candidates that passes all rules.
     SIDE_BY_SIDE is PERMANENTLY DISABLED.
@@ -2182,10 +2205,11 @@ def find_valid_hybrid_pair(
         ad_index: Index of ad in batch (0, 1, or 2) to select different valid pair
     
     Returns:
-        Tuple of (object_a, object_b, hybrid_type, error_message):
+        Tuple of (object_a, object_b, hybrid_type, error_message, search_stats):
         - object_a, object_b: Selected HYBRID pair if valid, None if none found
         - hybrid_type: Classification of the valid pair (always HYBRID type, never SIDE_BY_SIDE)
         - error_message: None if valid pair found, error if none found
+        - search_stats: Dict with 'evaluated_pairs' and 'passed_overlap' counts
     """
     # Note: All candidates in candidate_pairs have already passed hard sanitation filters
     
@@ -2197,7 +2221,12 @@ def find_valid_hybrid_pair(
     hybrid_candidates_different_family = []
     hybrid_candidates_same_family = []  # Fallback only
     
+    # Track statistics
+    evaluated_pairs = 0
+    passed_overlap = 0
+    
     for object_a, object_b in candidate_pairs:
+        evaluated_pairs += 1
         # Restore quota_state before each evaluation (evaluate_ab_pair modifies it)
         quota_state.material_analogy_used = original_quota_dict['material_analogy_used']
         quota_state.structural_morphology_used = original_quota_dict['structural_morphology_used']
@@ -2214,6 +2243,8 @@ def find_valid_hybrid_pair(
         # Only consider pairs with overlap >= HYBRID threshold (SIDE_BY_SIDE is disabled)
         if overlap_percentage < GEOMETRIC_OVERLAP_THRESHOLD_HYBRID:
             continue  # Skip pairs that don't meet HYBRID threshold
+        
+        passed_overlap += 1
         
         # Evaluate pair to get hybrid_type and check quota
         is_valid, hybrid_type, error_msg = evaluate_ab_pair(
@@ -2260,7 +2291,8 @@ def find_valid_hybrid_pair(
             similarity_basis="geometric"
         )
         
-        return (object_a, object_b, final_hybrid_type, None)
+        search_stats = {'evaluated_pairs': evaluated_pairs, 'passed_overlap': passed_overlap}
+        return (object_a, object_b, final_hybrid_type, None, search_stats)
     
     # Step 3: Fallback to same_family HYBRID pairs (only if no different-family candidates exist)
     if len(hybrid_candidates_same_family) > 0:
@@ -2277,10 +2309,12 @@ def find_valid_hybrid_pair(
             similarity_basis="geometric"
         )
         
-        return (object_a, object_b, final_hybrid_type, None)
+        search_stats = {'evaluated_pairs': evaluated_pairs, 'passed_overlap': passed_overlap}
+        return (object_a, object_b, final_hybrid_type, None, search_stats)
     
     # No valid HYBRID pairs found
-    return (None, None, HybridType.CORE_GEOMETRIC, "No valid HYBRID pair found (overlap >= 0.70 required)")
+    search_stats = {'evaluated_pairs': evaluated_pairs, 'passed_overlap': passed_overlap}
+    return (None, None, HybridType.CORE_GEOMETRIC, "No valid HYBRID pair found (overlap >= 0.70 required)", search_stats)
 
 
 def generate_ad(
@@ -2326,20 +2360,23 @@ def generate_ad(
     goal = goals_for_batch[ad_index] if ad_index < len(goals_for_batch) else goals_for_batch[0]
     
     # ========================================================================
-    # HYBRID GUARANTEE SEARCH: Expansion ladder (80 → 120 → 200 → 300 → 400 → 500)
+    # HYBRID GUARANTEE SEARCH: Expansion ladder (80 → 120 → 200 → 300 → 400 → 500 → 700 → 1000)
     # ========================================================================
     # HARD ASSUMPTION: A valid PERFECT HYBRID ALWAYS EXISTS for any product.
     # Failure to find one means the search space is too small.
     # Side-by-side is PERMANENTLY DISABLED.
     # ========================================================================
-    expansion_levels = [80, 120, 200, 300, 400, 500]
+    expansion_levels = [80, 120, 200, 300, 400, 500, 700, 1000]
     object_a = None
     object_b = None
     hybrid_type = None
     
+    # Track previous step sizes for sanity checks
+    prev_pool_size = 0
+    prev_top_n = 0
+    total_evaluated_pairs = 0
+    
     for association_size in expansion_levels:
-        logger.info(f"HYBRID_SEARCH_START assoc_count={association_size}")
-        
         # Rebuild associations from scratch for this size
         try:
             associations = generate_associations(goal, size=association_size)
@@ -2371,9 +2408,41 @@ def generate_ad(
                 logger.info(f"ASSOCIATION_POOL_EXPANDED to={expansion_levels[expansion_levels.index(association_size) + 1]}")
             continue
         
-        # Build ranked object list and generate candidate pairs
+        # Build ranked object list
         ranked_objs = build_ranked_object_list(sanitized_pool)
-        candidate_pairs = generate_candidate_pairs(ranked_objs, max_pairs=300, ad_index=ad_index, session_seed=session_seed)
+        
+        # Sanity check: pool_size must increase when assoc_count increases
+        pool_size = len(sanitized_pool)
+        if association_size > expansion_levels[0] and pool_size <= prev_pool_size:
+            error_msg = f"EXPANSION_BROKEN: assoc_count increased from {expansion_levels[expansion_levels.index(association_size) - 1]} to {association_size} but pool_size did not expand (was {prev_pool_size}, now {pool_size})"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        # Calculate scalable search parameters
+        # top_n scales with assoc_count, capped at 600
+        top_n = min(len(ranked_objs), max(80, association_size), 600)
+        
+        # Sanity check: top_n must increase when assoc_count increases (unless already at cap)
+        if association_size > expansion_levels[0] and top_n <= prev_top_n and top_n < 600:
+            error_msg = f"EXPANSION_BROKEN: assoc_count increased from {expansion_levels[expansion_levels.index(association_size) - 1]} to {association_size} but top_n did not expand (was {prev_top_n}, now {top_n})"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        # max_pairs scales with assoc_count, capped at 3000
+        max_pairs = min(3000, max(300, association_size * 3))
+        
+        logger.info(f"HYBRID_SEARCH_START assoc_count={association_size} pool_size={pool_size} ranked_size={len(ranked_objs)}")
+        logger.info(f"PAIR_SEARCH_WINDOW assoc_count={association_size} top_n={top_n} max_pairs={max_pairs}")
+        
+        # Generate candidate pairs with scaled parameters
+        candidate_pairs = generate_candidate_pairs(
+            ranked_objs, 
+            max_pairs=max_pairs, 
+            ad_index=ad_index, 
+            session_seed=session_seed,
+            assoc_count=association_size,
+            top_n=top_n
+        )
         
         if len(candidate_pairs) == 0:
             logger.warning(f"HYBRID_NOT_FOUND assoc_count={association_size} error=No candidate pairs generated")
@@ -2382,12 +2451,17 @@ def generate_ad(
             continue
         
         # Search for HYBRID only (SIDE_BY_SIDE is permanently disabled)
-        object_a, object_b, hybrid_type, error_msg = find_valid_hybrid_pair(
+        object_a, object_b, hybrid_type, error_msg, search_stats = find_valid_hybrid_pair(
             candidate_pairs,
             quota_state,
             ranked_objs,
             ad_index=ad_index
         )
+        
+        total_evaluated_pairs += search_stats['evaluated_pairs']
+        
+        # Log search statistics
+        logger.info(f"HYBRID_SEARCH_STATS assoc_count={association_size} evaluated_pairs={search_stats['evaluated_pairs']} passed_overlap={search_stats['passed_overlap']}")
         
         # If valid HYBRID found, stop immediately
         if object_a is not None and object_b is not None:
@@ -2395,18 +2469,23 @@ def generate_ad(
             view_a = select_max_projection_view(object_a)
             view_b = select_max_projection_view(object_b)
             overlap_percentage = calculate_geometric_overlap(view_a, view_b)
-            logger.info(f"HYBRID_SELECTED assoc_count={association_size} A={object_a.name} B={object_b.name} overlap={overlap_percentage:.2f}")
+            logger.info(f"HYBRID_SELECTED assoc_count={association_size} A={object_a.name}(rank={object_a.association_rank},family={object_a.shape_family}) B={object_b.name}(rank={object_b.association_rank},family={object_b.shape_family}) overlap={overlap_percentage:.2f}")
             break
         
         # No HYBRID found at this level, log and continue to next level
         logger.warning(f"HYBRID_NOT_FOUND assoc_count={association_size}")
         if association_size < expansion_levels[-1]:
             logger.info(f"ASSOCIATION_POOL_EXPANDED to={expansion_levels[expansion_levels.index(association_size) + 1]}")
+        
+        # Update previous sizes for next iteration sanity check
+        prev_pool_size = pool_size
+        prev_top_n = top_n
     
-    # Final check: if no HYBRID found even at 500 associations, this is a CRITICAL ENGINE EVENT
+    # Final check: if no HYBRID found even at 1000 associations, this is a CRITICAL ENGINE EVENT
     if object_a is None or object_b is None:
-        logger.error("CRITICAL_ENGINE_EVENT: HYBRID not found even after 500 associations — engine limits reached.")
-        raise ValueError("HYBRID not found even after 500 associations — engine limits reached.")
+        logger.error(f"HYBRID_NOT_FOUND_FINAL assoc_count=1000 evaluated_pairs={total_evaluated_pairs} passed_overlap=0")
+        logger.error("CRITICAL_ENGINE_EVENT: HYBRID not found even after 1000 associations — engine limits reached.")
+        raise ValueError("HYBRID not found even after 1000 associations — engine limits reached.")
     
     # ========================================================================
     # STEP 6 & 7: HEADLINE & MARKETING TEXT GENERATION
