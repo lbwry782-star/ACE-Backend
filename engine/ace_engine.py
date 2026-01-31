@@ -1381,175 +1381,6 @@ def derive_advertising_goal(product_name: str, product_description: str) -> str:
     return tied_goals[0]
 
 
-def ai_plan(product_name: str, product_description: str, ad_index: int) -> Dict[str, Any]:
-    """
-    AI Planner: Generate goals, associations, and object candidates using OpenAI text model.
-    
-    This replaces the old Step 3 (Goal + Associations Library) with an AI-driven approach.
-    
-    Args:
-        product_name: Name of the product
-        product_description: Description of the product
-        ad_index: Index of ad in batch (0, 1, or 2)
-    
-    Returns:
-        Dictionary with:
-        - goals_for_batch: List of 3 unique goals from ALLOWED_GOALS
-        - associations: List of 300 association strings (physical only, no duplicates)
-        - object_candidates: List of dicts with {name, association_rank, shape_family, flags}
-        - environment: String (minimal, non-narrative, supports rule)
-    
-    Raises:
-        ValueError: If AI planner fails or returns invalid JSON
-    """
-    # Get OpenAI API key from environment
-    api_key = os.environ.get('OPENAI_API_KEY')
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY environment variable is not set")
-    
-    # Initialize OpenAI client
-    client = OpenAI(api_key=api_key)
-    
-    # Use random seed for AI generation (no deterministic reuse between sessions)
-    # Seed is only for validation/consistency of AI response, not for selection
-    seed_int = random.randint(0, 2**31 - 1)
-    
-    # Build JSON schema for response
-    json_schema = {
-        "type": "object",
-        "properties": {
-            "goals_for_batch": {
-                "type": "array",
-                "items": {"type": "string"},
-                "minItems": 3,
-                "maxItems": 3,
-                "description": "Exactly 3 unique advertising goals from ALLOWED_GOALS: speed, safety, durability, freshness, clarity, efficiency, comfort, precision"
-            },
-            "associations": {
-                "type": "array",
-                "items": {"type": "string"},
-                "minItems": 300,
-                "maxItems": 300,
-                "description": "Exactly 300 physical association strings, no duplicates, no abstract words, no symbols"
-            },
-            "object_candidates": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "association_rank": {"type": "integer", "minimum": 1},
-                        "shape_family": {"type": "string"},
-                        "flags": {
-                            "type": "object",
-                            "properties": {
-                                "contains_text": {"type": "boolean"},
-                                "contains_logo": {"type": "boolean"},
-                                "is_symbolic_only": {"type": "boolean"},
-                                "is_physical_object": {"type": "boolean"}
-                            },
-                            "required": ["contains_text", "contains_logo", "is_symbolic_only", "is_physical_object"]
-                        }
-                    },
-                    "required": ["name", "association_rank", "shape_family", "flags"]
-                },
-                "description": "Object candidates derived from associations, with shape_family and flags"
-            },
-            "environment": {
-                "type": "string",
-                "description": "Minimal, non-narrative environment that supports the hybrid/side-by-side rule"
-            }
-        },
-        "required": ["goals_for_batch", "associations", "object_candidates", "environment"]
-    }
-    
-    # Build prompt for AI planner
-    prompt = f"""You are an AI planner for generating advertising content.
-
-Product: {product_name}
-Description: {product_description}
-Ad Index: {ad_index}
-
-Generate:
-1. goals_for_batch: Exactly 3 unique advertising goals from: speed, safety, durability, freshness, clarity, efficiency, comfort, precision
-2. associations: Exactly 300 physical association strings (no duplicates, no abstract words, no symbols, no metaphors)
-3. object_candidates: Objects derived from associations, each with:
-   - name: Physical object name
-   - association_rank: Rank from 1 to 300 (1 = strongest association)
-   - shape_family: One of: circle, oval, rectangle, square, triangle, leaf, teardrop, bottle, cylinder, box, book, fish, wing, blade, bolt, helmet, shield, soft_rectangle, long_rectangle, round_soft, container, wire_like, disk, spring_like, unknown
-   - flags: Object flags
-     * contains_text: false (objects must not contain text)
-     * contains_logo: false (objects must not contain logos)
-     * is_symbolic_only: false (objects must be physical, not symbolic)
-     * is_physical_object: true (objects must be physical)
-4. environment: Minimal, non-narrative environment string (e.g., "desk", "tabletop", "water surface", "bedding", "neutral studio surface")
-
-Rules:
-- All associations must be physical objects or concepts that can map to physical objects
-- No duplicates in associations
-- Object candidates must be physical objects only
-- Shape families must be determined accurately based on object names
-- Environment must be minimal and support the hybrid/side-by-side composition rule
-"""
-    
-    logger.info(f"AI_PLAN_START product={product_name} ad_index={ad_index} seed={seed_int}")
-    
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-2024-08-06",  # Use a model that supports JSON schema
-            messages=[
-                {"role": "system", "content": "You are a deterministic AI planner for advertising content generation. Always return valid JSON matching the schema."},
-                {"role": "user", "content": prompt}
-            ],
-            response_format={"type": "json_schema", "json_schema": {"schema": json_schema, "strict": True}},
-            temperature=0,
-            seed=seed_int
-        )
-        
-        # Parse response JSON
-        import json as json_lib
-        response_content = response.choices[0].message.content
-        parsed_response = json_lib.loads(response_content)
-        
-        # Validate goals_for_batch
-        if not isinstance(parsed_response.get("goals_for_batch"), list) or len(parsed_response["goals_for_batch"]) != 3:
-            raise ValueError("goals_for_batch must be exactly 3 goals")
-        
-        goals = parsed_response["goals_for_batch"]
-        for goal in goals:
-            if goal not in ALLOWED_GOALS:
-                raise ValueError(f"Invalid goal '{goal}' not in ALLOWED_GOALS")
-        
-        if len(set(goals)) != 3:
-            raise ValueError("goals_for_batch must contain 3 unique goals")
-        
-        # Validate associations
-        if not isinstance(parsed_response.get("associations"), list) or len(parsed_response["associations"]) != 300:
-            raise ValueError("associations must be exactly 300 items")
-        
-        associations = parsed_response["associations"]
-        if len(set(associations)) != len(associations):
-            raise ValueError("associations must not contain duplicates")
-        
-        # Validate object_candidates
-        if not isinstance(parsed_response.get("object_candidates"), list):
-            raise ValueError("object_candidates must be a list")
-        
-        object_candidates = parsed_response["object_candidates"]
-        
-        # Validate environment
-        if not isinstance(parsed_response.get("environment"), str) or not parsed_response["environment"]:
-            raise ValueError("environment must be a non-empty string")
-        
-        logger.info(f"AI_PLAN_OK goals={goals} associations={len(associations)} objects={len(object_candidates)}")
-        
-        return parsed_response
-        
-    except Exception as e:
-        logger.error(f"AI_PLAN_FAIL error={str(e)}")
-        raise ValueError(f"AI planner failed: {str(e)}") from e
-
-
 def build_goals_for_batch(product_name: str, product_description: str) -> List[str]:
     """
     Build a list of 3 different advertising goals for a 3-ad batch.
@@ -1941,48 +1772,66 @@ def generate_candidate_pairs(
     session_seed: Optional[str] = None
 ) -> List[Tuple[ObjectCandidate, ObjectCandidate]]:
     """
-    Generate candidate A/B pairs without deterministic selection.
+    Generate candidate A/B pairs deterministically without using geometry as ranking.
     
     Rules:
-    - No deterministic reuse between sessions
-    - Pair candidates from all objects (no windowing)
-    - Do NOT use any geometric overlap calculations for ranking
+    - Pairing must be deterministic
+    - Pair candidates primarily from higher-ranked objects first
+    - Do NOT use any geometric overlap calculations
     - Avoid trivial duplicates:
       - No (A,B) and (B,A) duplication
       - Do not pair an object with itself
     - Keep the list size bounded (max_pairs)
     
     Strategy:
-    - Generate pairs from all objects (no windowing, no deterministic selection)
-    - Shuffle pairs randomly to avoid repetition between sessions
+    - Use a sliding window approach to ensure variation between ad_index values
+    - Window position is determined by ad_index and optional session_seed
     - Create pairs in nested order i<j until max_pairs reached
     
     Args:
         objs: List of ObjectCandidate objects (should be ranked)
         max_pairs: Maximum number of pairs to generate (default 300)
-        ad_index: Index of ad in batch (0, 1, or 2) - not used for selection
-        session_seed: Optional session seed - not used for selection
+        ad_index: Index of ad in batch (0, 1, or 2) to select different window
+        session_seed: Optional session seed string to vary windows between sessions
     
     Returns:
-        List of (object_a, object_b) tuples, randomly shuffled
+        List of (object_a, object_b) tuples, deterministically ordered
     """
     if len(objs) < 2:
         return []
     
-    # Generate pairs from all objects (no windowing, no deterministic selection)
+    # Build deterministic window for candidate selection
+    window_size = 80
+    base_offset = ad_index * 40
+    
+    # If session_seed provided, add deterministic offset based on hash
+    if session_seed is not None:
+        seed_hash = hashlib.sha256(session_seed.encode('utf-8')).hexdigest()
+        seed_int = int(seed_hash[:8], 16)
+        base_offset += (seed_int % 60)  # Small offset to vary between sessions
+    
+    # Calculate window bounds, ensuring we don't go out of range
+    start = min(base_offset, max(0, len(objs) - window_size))
+    end = min(start + window_size, len(objs))
+    
+    # Select candidate pool from window
+    candidate_pool = objs[start:end]
+    
+    logger.info(f"PAIR_WINDOW ad_index={ad_index} start={start} end={end} total_objs={len(objs)} window_size={len(candidate_pool)}")
+    
+    if len(candidate_pool) < 2:
+        return []
+    
+    # Generate pairs in nested order: i < j to avoid (A,B) and (B,A) duplicates
+    # Also ensures no object pairs with itself
     pairs = []
-    for i in range(len(objs)):
-        for j in range(i + 1, len(objs)):
+    for i in range(len(candidate_pool)):
+        for j in range(i + 1, len(candidate_pool)):
             if len(pairs) >= max_pairs:
                 break
-            pairs.append((objs[i], objs[j]))
+            pairs.append((candidate_pool[i], candidate_pool[j]))
         if len(pairs) >= max_pairs:
             break
-    
-    # Shuffle pairs randomly to avoid repetition between sessions
-    random.shuffle(pairs)
-    
-    logger.info(f"PAIR_GENERATION total_objs={len(objs)} pairs={len(pairs)} (randomized, no deterministic selection)")
     
     return pairs
 
@@ -2358,9 +2207,14 @@ def find_valid_ab_pair(
     
     # Step 2: Prefer HYBRID candidates with different families
     if len(hybrid_candidates_different_family) > 0:
-        # Select randomly from HYBRID candidates (no deterministic selection)
-        selected_pair = random.choice(hybrid_candidates_different_family)
-        object_a, object_b, hybrid_type, overlap = selected_pair
+        # Select the (ad_index+1)-th HYBRID candidate with different families (0-indexed)
+        target_rank = ad_index
+        if target_rank >= len(hybrid_candidates_different_family):
+            # Fallback to first HYBRID candidate if not enough
+            logger.warning(f"find_valid_ab_pair: ad_index={ad_index} but only {len(hybrid_candidates_different_family)} HYBRID candidates with different families, using first")
+            target_rank = 0
+        
+        object_a, object_b, hybrid_type, overlap = hybrid_candidates_different_family[target_rank]
         
         # Re-evaluate the selected pair to update quota_state correctly
         quota_state.material_analogy_used = original_quota_dict['material_analogy_used']
@@ -2379,9 +2233,7 @@ def find_valid_ab_pair(
     
     # Step 3: If no HYBRID candidates, prefer SIDE_BY_SIDE with different families
     if len(side_by_side_candidates_different_family) > 0:
-        # Select randomly from SIDE_BY_SIDE candidates (no deterministic selection)
-        selected_pair = random.choice(side_by_side_candidates_different_family)
-        object_a, object_b, hybrid_type, overlap = selected_pair
+        object_a, object_b, hybrid_type, overlap = side_by_side_candidates_different_family[0]
         
         # Re-evaluate the selected pair to update quota_state correctly
         quota_state.material_analogy_used = original_quota_dict['material_analogy_used']
@@ -2404,9 +2256,7 @@ def find_valid_ab_pair(
     if len(hybrid_candidates_different_family) == 0 and len(side_by_side_candidates_different_family) == 0:
         # Try HYBRID same_family first (prefer HYBRID over SIDE_BY_SIDE)
         if len(hybrid_candidates_same_family) > 0:
-            # Select randomly from same_family candidates (no deterministic selection)
-            selected_pair = random.choice(hybrid_candidates_same_family)
-            object_a, object_b, hybrid_type, overlap = selected_pair
+            object_a, object_b, hybrid_type, overlap = hybrid_candidates_same_family[0]
             
             # Re-evaluate the selected pair to update quota_state correctly
             quota_state.material_analogy_used = original_quota_dict['material_analogy_used']
@@ -2425,9 +2275,7 @@ def find_valid_ab_pair(
         
         # Last resort - SIDE_BY_SIDE same_family
         if len(side_by_side_candidates_same_family) > 0:
-            # Select randomly from same_family candidates (no deterministic selection)
-            selected_pair = random.choice(side_by_side_candidates_same_family)
-            object_a, object_b, hybrid_type, overlap = selected_pair
+            object_a, object_b, hybrid_type, overlap = side_by_side_candidates_same_family[0]
             
             # Re-evaluate the selected pair to update quota_state correctly
             quota_state.material_analogy_used = original_quota_dict['material_analogy_used']
@@ -2484,43 +2332,33 @@ def generate_ad(
         quota_state = BatchQuotaState()
     
     # ========================================================================
-    # STEP 3: AI PLANNER (replaces old Goal + Associations Library)
+    # STEP 3: GOAL + ASSOCIATIONS → OBJECT POOL
     # ========================================================================
-    # Use AI planner to generate goals, associations, and object candidates
-    # No deterministic reuse - each session generates fresh results
-    try:
-        ai_plan_result = ai_plan(product_name, product_description, ad_index)
-    except Exception as e:
-        logger.error(f"AI planner failed: {str(e)}")
-        raise ValueError(f"AI planner failed: {str(e)}") from e
-    
-    # Extract results from AI planner
-    goals_for_batch = ai_plan_result["goals_for_batch"]
+    # Build goals for batch (3 different goals for 3-ad batch)
+    goals_for_batch = build_goals_for_batch(product_name, product_description)
     goal = goals_for_batch[ad_index] if ad_index < len(goals_for_batch) else goals_for_batch[0]
-    associations = ai_plan_result["associations"]
-    object_candidates_dicts = ai_plan_result["object_candidates"]
-    environment = ai_plan_result["environment"]
     
-    # Convert object_candidates dicts to ObjectCandidate objects
-    object_pool = []
-    for obj_dict in object_candidates_dicts:
+    # Generate associations for the selected goal (default: 80, can expand to 120 or 200)
+    association_size = 80
+    associations = generate_associations(goal, size=association_size)
+    
+    # Build object pool from associations
+    # Try with default size (80), expand to 120 or 200 if needed
+    try:
+        object_pool = build_object_pool(product_name, product_description, goal=goal, association_size=association_size)
+    except ValueError:
+        # Try expanding to 120
+        association_size = 120
+        associations = generate_associations(goal, size=association_size)
+        logger.info(f"ASSOCIATION_POOL_EXPANDED size=120")
         try:
-            obj = ObjectCandidate(
-                name=obj_dict["name"],
-                association_rank=obj_dict["association_rank"],
-                shape_family=obj_dict["shape_family"],
-                contains_text=obj_dict["flags"]["contains_text"],
-                contains_logo=obj_dict["flags"]["contains_logo"],
-                is_symbolic_only=obj_dict["flags"]["is_symbolic_only"],
-                is_physical_object=obj_dict["flags"]["is_physical_object"]
-            )
-            object_pool.append(obj)
-        except Exception as e:
-            logger.warning(f"Failed to create ObjectCandidate from dict: {obj_dict}, error: {str(e)}")
-            continue
-    
-    if len(object_pool) == 0:
-        raise ValueError("AI planner returned no valid object candidates")
+            object_pool = build_object_pool(product_name, product_description, goal=goal, association_size=association_size)
+        except ValueError:
+            # Try expanding to 200
+            association_size = 200
+            associations = generate_associations(goal, size=association_size)
+            logger.info(f"ASSOCIATION_POOL_EXPANDED size=200")
+            object_pool = build_object_pool(product_name, product_description, goal=goal, association_size=association_size)
     
     # Apply hard sanitation filters (STEP 2.5)
     try:
@@ -2535,10 +2373,11 @@ def generate_ad(
     # STEP 4: CANDIDATE PAIR GENERATION (A/B pairs from sanitized pool)
     # ========================================================================
     # Build ranked object list and generate candidate pairs
-    # No deterministic selection - pairs are randomly shuffled to avoid repetition
+    # Pairing is deterministic, prioritizes higher-ranked objects
     # No geometry calculations used for ranking
+    # Window selection varies by ad_index and session_seed for diversity
     ranked_objs = build_ranked_object_list(sanitized_pool)
-    candidate_pairs = generate_candidate_pairs(ranked_objs, max_pairs=300, ad_index=ad_index, session_seed=None)
+    candidate_pairs = generate_candidate_pairs(ranked_objs, max_pairs=300, ad_index=ad_index, session_seed=session_seed)
     
     if len(candidate_pairs) == 0:
         raise ValueError("No candidate pairs generated from object pool")
