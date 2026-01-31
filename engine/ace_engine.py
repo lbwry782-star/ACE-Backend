@@ -146,6 +146,7 @@ class ObjectCandidate:
     - is_symbolic_only: True if object is purely symbolic (e.g., graduation cap for "education") (prohibited)
     - association_rank: Rank in association list (1..80)
     - shape_family: Geometric shape family for overlap calculation (default "unknown")
+    - association_key: Original association string from which this object was derived
     """
     name: str
     is_physical_object: bool
@@ -157,6 +158,7 @@ class ObjectCandidate:
     is_symbolic_only: bool
     association_rank: int
     shape_family: str = "unknown"
+    association_key: str = ""
 
 
 def is_object_graphically_eligible(obj: ObjectCandidate) -> bool:
@@ -1734,7 +1736,8 @@ def map_association_to_objects(association: str, association_rank: int) -> List[
             has_communicative_graphics=obj_data["has_communicative_graphics"],
             has_structural_graphics_only=obj_data["has_structural_graphics_only"],
             is_symbolic_only=obj_data["is_symbolic_only"],
-            shape_family=shape_family
+            shape_family=shape_family,
+            association_key=association  # All objects from this association share the same key
         )
         candidates.append(candidate)
     
@@ -2220,6 +2223,99 @@ def evaluate_ab_pair(
     return (True, hybrid_type, None)
 
 
+def normalize_token_set(name: str) -> set:
+    """
+    Normalize object name to a set of tokens for conceptual comparison.
+    
+    Steps:
+    - lowercase
+    - split into words
+    - remove stopwords ("of", "the", "and", "a", "an")
+    - simple singularization (remove trailing 's')
+    - remove punctuation
+    
+    Args:
+        name: Object name string
+    
+    Returns:
+        Set of normalized tokens
+    """
+    # Basic stopwords
+    stopwords = {"of", "the", "and", "a", "an", "in", "on", "at", "to", "for", "with", "by"}
+    
+    # Lowercase and remove punctuation
+    name_clean = re.sub(r'[^\w\s]', ' ', name.lower())
+    
+    # Split into words
+    words = name_clean.split()
+    
+    # Remove stopwords and singularize (simple: remove trailing 's')
+    tokens = set()
+    for word in words:
+        if word not in stopwords and len(word) > 0:
+            # Simple singularization: remove trailing 's' if word is longer than 3 chars
+            if len(word) > 3 and word.endswith('s'):
+                word = word[:-1]
+            tokens.add(word)
+    
+    return tokens
+
+
+def is_conceptually_too_close(a_name: str, b_name: str) -> bool:
+    """
+    Check if two object names are conceptually too close (same idea or conceptual neighbors).
+    
+    Returns True if:
+    a) One name contains the other (substring) after normalization
+    b) They share significant tokens (intersection size >= 1)
+    c) They belong to the same conceptual cluster (bedding, water, machinery, etc.)
+    
+    Args:
+        a_name: First object name
+        b_name: Second object name
+    
+    Returns:
+        True if objects are conceptually too close, False otherwise
+    """
+    # Normalize both names
+    tokens_a = normalize_token_set(a_name)
+    tokens_b = normalize_token_set(b_name)
+    
+    # Check substring containment (after normalization)
+    a_normalized = ' '.join(sorted(tokens_a))
+    b_normalized = ' '.join(sorted(tokens_b))
+    
+    if a_normalized in b_normalized or b_normalized in a_normalized:
+        return True
+    
+    # Check token intersection
+    if len(tokens_a & tokens_b) >= 1:
+        return True
+    
+    # Check conceptual clusters (minimal set for known problematic areas)
+    bedding_cluster = {"pillow", "cushion", "mattress", "blanket", "duvet", "sheet", "bed", "sofa", "armchair", "recliner", "quilt", "comforter"}
+    water_cluster = {"water", "dew", "rain", "mist", "fog", "ice", "frost", "bottle", "river", "lake", "ocean", "sea", "stream", "pond", "pool", "wet", "moisture", "droplet"}
+    machinery_cluster = {"gear", "cog", "wheel", "turbine", "engine", "motor", "rotor", "pulley", "sprocket"}
+    
+    # Check if both names belong to the same cluster
+    a_in_bedding = any(token in bedding_cluster for token in tokens_a)
+    b_in_bedding = any(token in bedding_cluster for token in tokens_b)
+    if a_in_bedding and b_in_bedding:
+        return True
+    
+    a_in_water = any(token in water_cluster for token in tokens_a)
+    b_in_water = any(token in water_cluster for token in tokens_b)
+    if a_in_water and b_in_water:
+        return True
+    
+    a_in_machinery = any(token in machinery_cluster for token in tokens_a)
+    b_in_machinery = any(token in machinery_cluster for token in tokens_b)
+    if a_in_machinery and b_in_machinery:
+        return True
+    
+    return False
+
+
 def find_valid_hybrid_pair(
     candidate_pairs: List[Tuple[ObjectCandidate, ObjectCandidate]],
     quota_state: BatchQuotaState,
@@ -2302,6 +2398,8 @@ def find_valid_hybrid_pair(
     passed_overlap = 0  # Count of pairs where overlap >= threshold
     rejected_after_overlap = 0  # Count of pairs that passed overlap but were rejected by later gates
     rejected_too_close = 0  # Count of pairs rejected due to same_family or too-close names
+    rejected_same_association = 0  # Count of pairs rejected due to same association_key
+    rejected_conceptual_neighbors = 0  # Count of pairs rejected due to conceptual closeness
     selected_pair = None  # First pair that passes all gates
     
     for object_a, object_b in candidate_pairs:
@@ -2315,7 +2413,20 @@ def find_valid_hybrid_pair(
         quota_state.structural_morphology_used = original_quota_dict['structural_morphology_used']
         quota_state.structural_exception_used = original_quota_dict['structural_exception_used']
         
-        # FIX #2: HARD REJECT same_family pairs and too-close name pairs (no fallback)
+        # Gate 1: HARD REJECT same association_key (same association source)
+        if hasattr(object_a, 'association_key') and hasattr(object_b, 'association_key'):
+            if object_a.association_key == object_b.association_key and object_a.association_key:
+                rejected_same_association += 1
+                logger.info(f"ASSOC_REJECT reason=SAME_ASSOCIATION A={object_a.name} B={object_b.name} assoc={object_a.association_key}")
+                continue  # HARD REJECT - skip this pair
+        
+        # Gate 2: HARD REJECT conceptually too close (conceptual neighbors)
+        if is_conceptually_too_close(object_a.name, object_b.name):
+            rejected_conceptual_neighbors += 1
+            logger.info(f"ASSOC_REJECT reason=CONCEPTUAL_NEIGHBORS A={object_a.name} B={object_b.name}")
+            continue  # HARD REJECT - skip this pair
+        
+        # Gate 3: HARD REJECT same_family pairs and too-close name pairs (no fallback)
         same_family = (object_a.shape_family == object_b.shape_family)
         names_too_close = are_names_too_close(object_a.name, object_b.name)
         
@@ -2399,7 +2510,9 @@ def find_valid_hybrid_pair(
             'evaluated_pairs': evaluated_pairs, 
             'passed_overlap': passed_overlap,
             'rejected_after_overlap': rejected_after_overlap,
-            'rejected_too_close': rejected_too_close
+            'rejected_too_close': rejected_too_close,
+            'rejected_same_association': rejected_same_association,
+            'rejected_conceptual_neighbors': rejected_conceptual_neighbors
         }
         return (object_a, object_b, final_hybrid_type, None, search_stats)
     
@@ -2408,7 +2521,9 @@ def find_valid_hybrid_pair(
         'evaluated_pairs': evaluated_pairs, 
         'passed_overlap': passed_overlap,
         'rejected_after_overlap': rejected_after_overlap,
-        'rejected_too_close': rejected_too_close
+        'rejected_too_close': rejected_too_close,
+        'rejected_same_association': rejected_same_association,
+        'rejected_conceptual_neighbors': rejected_conceptual_neighbors
     }
     return (None, None, HybridType.CORE_GEOMETRIC, f"No valid HYBRID pair found (overlap >= {hybrid_threshold} required)", search_stats)
 
@@ -2544,7 +2659,9 @@ def generate_ad(
             # Log search statistics
             rejected_after_overlap = search_stats.get('rejected_after_overlap', 0)
             rejected_too_close = search_stats.get('rejected_too_close', 0)
-            logger.info(f"HYBRID_SEARCH_STATS threshold={hybrid_threshold} assoc_size={association_size} evaluated_pairs={search_stats['evaluated_pairs']} passed_overlap={search_stats['passed_overlap']} rejected_after_overlap={rejected_after_overlap} rejected_too_close={rejected_too_close}")
+            rejected_same_association = search_stats.get('rejected_same_association', 0)
+            rejected_conceptual_neighbors = search_stats.get('rejected_conceptual_neighbors', 0)
+            logger.info(f"HYBRID_SEARCH_STATS threshold={hybrid_threshold} assoc_size={association_size} evaluated_pairs={search_stats['evaluated_pairs']} passed_overlap={search_stats['passed_overlap']} rejected_after_overlap={rejected_after_overlap} rejected_too_close={rejected_too_close} rejected_same_association={rejected_same_association} rejected_conceptual_neighbors={rejected_conceptual_neighbors}")
             
             # If valid HYBRID found, use it
             if object_a is not None and object_b is not None:
