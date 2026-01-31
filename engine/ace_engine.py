@@ -795,6 +795,75 @@ def derive_environment_for_object(obj_name: str) -> str:
     return "neutral studio surface"
 
 
+def build_pre_intent_block(product_name: str, product_description: str) -> str:
+    """
+    Build PRE-INTENT block from product information (deterministic text, no API calls).
+    
+    Args:
+        product_name: Name of the product
+        product_description: Description of the product
+    
+    Returns:
+        PRE-INTENT text block (3-5 lines max)
+    """
+    # Combine product info for analysis
+    combined_text = (product_name + " " + product_description).lower()
+    
+    # CORE IDEA: Extract main concept from product name/description
+    # Simple keyword-based extraction (deterministic)
+    core_idea = product_name
+    if len(product_description) > 0:
+        # Use first meaningful phrase from description
+        desc_words = product_description.split()[:10]  # First 10 words
+        core_idea = f"{product_name} ({' '.join(desc_words)})"
+    
+    # CREATIVE TENSION: Identify one contrast (deterministic keyword matching)
+    tension = "innovation meets tradition"
+    if any(word in combined_text for word in ["fast", "speed", "quick", "rapid", "instant"]):
+        tension = "speed meets precision"
+    elif any(word in combined_text for word in ["safe", "secure", "protection", "shield"]):
+        tension = "strength meets elegance"
+    elif any(word in combined_text for word in ["fresh", "new", "clean", "pure"]):
+        tension = "purity meets power"
+    elif any(word in combined_text for word in ["comfort", "soft", "gentle", "cozy"]):
+        tension = "comfort meets durability"
+    elif any(word in combined_text for word in ["precise", "accurate", "exact", "detailed"]):
+        tension = "precision meets simplicity"
+    else:
+        tension = "form meets function"
+    
+    # VISUAL DIRECTION: What kind of visual logic we want
+    visual_direction = "clean, focused composition with strong silhouette definition"
+    if any(word in combined_text for word in ["hybrid", "merge", "combine", "fusion"]):
+        visual_direction = "seamless integration where boundaries dissolve into unified form"
+    elif any(word in combined_text for word in ["precise", "accurate", "exact"]):
+        visual_direction = "crisp, defined edges with clear geometric relationships"
+    elif any(word in combined_text for word in ["soft", "comfort", "gentle"]):
+        visual_direction = "organic flow with smooth transitions and natural curves"
+    
+    # ENVIRONMENT DIRECTION: Physical context cue (not decorative)
+    environment_direction = "realistic physical context that functionally justifies the composition"
+    if any(word in combined_text for word in ["desk", "office", "work", "professional"]):
+        environment_direction = "workspace or professional setting that explains functional purpose"
+    elif any(word in combined_text for word in ["home", "domestic", "household", "living"]):
+        environment_direction = "domestic environment that shows natural integration"
+    elif any(word in combined_text for word in ["outdoor", "nature", "natural", "environment"]):
+        environment_direction = "natural outdoor context that supports functional logic"
+    elif any(word in combined_text for word in ["water", "liquid", "fluid", "aquatic"]):
+        environment_direction = "aquatic or fluid environment that explains material interaction"
+    
+    # Build PRE-INTENT block
+    pre_intent = (
+        f"PRE-INTENT (interpretation before rendering):\n"
+        f"CORE IDEA: {core_idea}\n"
+        f"TENSION: {tension}\n"
+        f"VISUAL DIRECTION: {visual_direction}\n"
+        f"ENVIRONMENT DIRECTION: {environment_direction}"
+    )
+    
+    return pre_intent
+
+
 def generate_real_image_bytes(
     product_name: str,
     product_description: str,
@@ -853,12 +922,17 @@ def generate_real_image_bytes(
         else:
             environment = "neutral studio surface"
     
+    # Build PRE-INTENT block (deterministic, no API calls)
+    pre_intent = build_pre_intent_block(product_name, product_description)
+    
     # Build photorealistic commercial ad prompt (exact requirements)
     # ENVIRONMENT LAW — MANDATORY: Environment always overrides aesthetics.
     # If environment logic fails, the image is invalid.
     if hybrid_type == HybridType.SIDE_BY_SIDE:
         # SIDE_BY_SIDE: two objects only, touching edges, no gap, no overlap
         prompt = (
+            f"{pre_intent}\n\n"
+            f"Do not write any of the PRE-INTENT as text in the image.\n\n"
             f"Photorealistic commercial advertising photograph. "
             f"Show two objects only: {object_a.name} and {object_b.name}, touching edges, no gap, no overlap. "
             f"ENVIRONMENT LAW — MANDATORY: "
@@ -900,6 +974,8 @@ def generate_real_image_bytes(
     else:
         # HYBRID: single seamless hybrid object created by morphologically merging silhouette projections
         prompt = (
+            f"{pre_intent}\n\n"
+            f"Do not write any of the PRE-INTENT as text in the image.\n\n"
             f"Photorealistic commercial advertising photograph. "
             f"Show ONE single seamless hybrid object created by morphologically merging "
             f"the silhouette projection of {object_a.name} (Object A) and {object_b.name} (Object B) into a shared outline. "
