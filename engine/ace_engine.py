@@ -944,20 +944,26 @@ def generate_real_image_bytes(
             f"The environment must be clearly {object_a.name}'s domain (workspace / surface / setting / etc. depending on {object_a.name}), realistic and minimal. "
             f"Object B ({object_b.name}) must appear as if it naturally emerges from or exists within {object_a.name}'s environment. "
             f"The environment must logically explain why Object B exists in this context. "
-            f"HYBRID RULES: "
+            f"HYBRID RULES — ABSOLUTE LAWS: "
             f"Object B must appear as a natural outcome of Object A's environment. "
             f"NOT a glued object, NOT a merged sculpture, NOT an artificial mashup. "
-            f"The form should feel inevitable given the environment. "
+            f"NOT a mix of X and Y. NOT a clever combination. NOT a logical pairing. "
+            f"The form must feel INEVITABLE given the environment, not logical or clever. "
+            f"If the hybrid can be described as 'a mix of {object_a.name} and {object_b.name}' — it is WRONG. "
+            f"The hybrid must feel DISCOVERED, not designed. "
             f"The environment must visually justify WHY Object B exists in this form within Object A's world. "
+            f"The environment must CAUSE the object's existence, not merely host it. "
             f"The environment must support the FUNCTIONAL MEANING of the composition. "
             f"The environment must support the composition as a SINGLE unified entity. "
             f"Do NOT show seams, joints, or construction logic. "
             f"Do NOT suggest mechanical assembly. "
+            f"Do NOT suggest that two objects existed before the hybrid. "
             f"Object B must appear naturally formed within Object A's context. "
             f"The environment must NOT introduce additional objects that compete with or distract from the composition. "
             f"The environment must reinforce the SILHOUETTE: background contrast must clearly separate the outline, no busy textures behind the silhouette, no visual noise intersecting the contour. "
-            f"The environment must make the composition feel INTENTIONAL, not accidental, not assembled, not improvised. "
-            f"Object B must appear as if it was DESIGNED FOR Object A's environment, not placed into it afterward. "
+            f"The environment must make the composition feel INEVITABLE, not accidental, not assembled, not improvised, not clever. "
+            f"Object B must appear as if it was BORN FROM Object A's environment, not placed into it afterward. "
+            f"The connection must feel DISCOVERED, not designed. "
             f"Environment: {environment} (realistic physical context from {object_a.name}'s world where {object_b.name} would naturally exist embedded within). "
             f"CAMERA & SPATIAL RULES: "
             f"Straight frontal camera angle only. "
@@ -1409,35 +1415,82 @@ def derive_advertising_goal(product_name: str, product_description: str) -> str:
     return tied_goals[0]
 
 
-def build_goals_for_batch(product_name: str, product_description: str) -> List[str]:
+def build_goals_for_batch(product_name: str, product_description: str, session_seed: Optional[str] = None) -> List[str]:
     """
     Build a list of 3 different advertising goals for a 3-ad batch.
     
+    SESSION DIVERSITY RULE:
+    - Goals MUST vary across sessions for the same product
+    - session_seed ensures each session gets different goals
+    - Even if product strongly suggests one goal, it MUST NOT appear in every session
+    
     Rules:
-    - goals_for_batch[0] = primary_goal (derived from product info)
-    - goals_for_batch[1], goals_for_batch[2] = different goals from ALLOWED_GOALS
     - All 3 goals must be different from each other
-    - Selection is deterministic based on hash of (productName + productDescription + "goal" + index)
+    - Selection is deterministic based on hash of (productName + productDescription + session_seed + "goal" + index)
+    - If session_seed is None, use product hash as fallback (still varies by session context)
     
     Args:
         product_name: Name of the product
         product_description: Description of the product
+        session_seed: Optional session seed for diversity (if None, uses product hash)
     
     Returns:
-        List of 3 goal strings from ALLOWED_GOALS
+        List of 3 goal strings from ALLOWED_GOALS (different across sessions)
     """
-    # Step 1: Calculate primary goal
-    primary_goal = derive_advertising_goal(product_name, product_description)
+    # Step 1: Calculate session-aware primary goal
+    # Include session_seed to ensure different primary goal per session
+    if session_seed:
+        # Use session_seed to rotate primary goal selection
+        primary_hash_text = product_name + product_description + session_seed + "primary"
+        primary_hash = hashlib.sha256(primary_hash_text.encode('utf-8')).hexdigest()
+        primary_hash_int = int(primary_hash[:8], 16)
+        
+        # Get candidate goals (all goals that match product keywords, or all if none match)
+        text = (product_name + " " + product_description).lower()
+        goal_scores = {}
+        for goal, keywords in GOAL_KEYWORDS.items():
+            score = sum(1 for keyword in keywords if keyword in text)
+            if score > 0:
+                goal_scores[goal] = score
+        
+        # If no keyword matches, use all goals as candidates
+        if not goal_scores:
+            candidate_goals = list(ALLOWED_GOALS)
+        else:
+            # Use top-scoring goals as candidates (at least top 3, or all if < 3)
+            max_score = max(goal_scores.values())
+            candidate_goals = [goal for goal, score in goal_scores.items() if score == max_score]
+            # If only 1-2 candidates, add more from high-scoring goals
+            if len(candidate_goals) < 3:
+                sorted_goals = sorted(goal_scores.items(), key=lambda x: x[1], reverse=True)
+                for goal, score in sorted_goals:
+                    if goal not in candidate_goals:
+                        candidate_goals.append(goal)
+                        if len(candidate_goals) >= 4:  # Allow some diversity
+                            break
+            # If still too few, add all goals
+            if len(candidate_goals) < 3:
+                candidate_goals = list(ALLOWED_GOALS)
+        
+        # Select primary goal from candidates using session hash
+        primary_goal_idx = primary_hash_int % len(candidate_goals)
+        primary_goal = candidate_goals[primary_goal_idx]
+    else:
+        # Fallback: use original derivation (still deterministic per product)
+        primary_goal = derive_advertising_goal(product_name, product_description)
     
     # Step 2: Build list of available goals (excluding primary_goal)
     available_goals = [g for g in ALLOWED_GOALS if g != primary_goal]
     
-    # Step 3: Select goals_for_batch[1] and goals_for_batch[2] deterministically
+    # Step 3: Select goals_for_batch[1] and goals_for_batch[2] deterministically with session_seed
     goals_for_batch = [primary_goal]
     
+    # Use session_seed in hash to ensure different selection per session
+    seed_suffix = session_seed if session_seed else product_name + product_description
+    
     for index in [1, 2]:
-        # Create deterministic hash for this index
-        hash_text = product_name + product_description + "goal" + str(index)
+        # Create deterministic hash for this index (includes session_seed)
+        hash_text = product_name + product_description + seed_suffix + "goal" + str(index)
         hash_value = hashlib.sha256(hash_text.encode('utf-8')).hexdigest()
         hash_int = int(hash_value[:8], 16)  # Use first 8 hex chars as integer
         
@@ -1448,6 +1501,8 @@ def build_goals_for_batch(product_name: str, product_description: str) -> List[s
         
         # Remove selected goal from available list to ensure uniqueness
         available_goals.remove(selected_goal)
+    
+    logger.info(f"GOAL_SELECTION product={product_name[:30]} session_seed={session_seed[:8] if session_seed else 'none'} goals={goals_for_batch}")
     
     return goals_for_batch
 
@@ -1544,8 +1599,10 @@ def filter_associations_for_diversity(associations: List[str], max_per_world: in
     
     HARD LAW — CONCEPTUAL DISTANCE:
     - Only ONE association per world is allowed (by default)
-    - If two associations could plausibly appear in the same photograph, reject one
+    - If two associations could plausibly appear in the same photograph, share a supplier, store, room, or use case — reject one
     - Prefer 20-40 radically different associations over 80 conceptually neighboring ones
+    - Distance is more important than completeness
+    - Domestic world is penalized: if other worlds are available, prefer them over domestic
     
     Args:
         associations: List of association strings (ordered by strength)
@@ -1556,6 +1613,7 @@ def filter_associations_for_diversity(associations: List[str], max_per_world: in
     """
     world_to_associations = {}
     filtered = []
+    domestic_count = 0
     
     for assoc in associations:
         world = map_association_to_world(assoc)
@@ -1564,12 +1622,24 @@ def filter_associations_for_diversity(associations: List[str], max_per_world: in
         if world not in world_to_associations:
             world_to_associations[world] = []
         
+        # HARD RULE: Domestic world gets extra penalty
+        # If we already have domestic and other worlds are available, skip additional domestic
+        if world == "domestic":
+            if domestic_count >= max_per_world:
+                # Skip if we already have domestic and there are other worlds available
+                other_worlds_count = sum(1 for w, assocs in world_to_associations.items() if w != "domestic" and len(assocs) > 0)
+                if other_worlds_count > 0:
+                    # Prefer non-domestic worlds if available
+                    continue
+        
         # Only add if world hasn't reached max_per_world limit
         if len(world_to_associations[world]) < max_per_world:
             world_to_associations[world].append(assoc)
             filtered.append(assoc)
+            if world == "domestic":
+                domestic_count += 1
     
-    logger.info(f"ASSOC_DIVERSITY_FILTER input_count={len(associations)} output_count={len(filtered)} worlds_represented={len(world_to_associations)}")
+    logger.info(f"ASSOC_DIVERSITY_FILTER input_count={len(associations)} output_count={len(filtered)} worlds_represented={len(world_to_associations)} domestic_count={domestic_count}")
     
     return filtered
 
@@ -2400,10 +2470,14 @@ def is_conceptually_too_close(a_name: str, b_name: str) -> bool:
     """
     Check if two object names are conceptually too close (same idea or conceptual neighbors).
     
+    ABSOLUTE LAW: If two objects could share a supplier, store, room, or use case — they are too close.
+    Similar shape does NOT equal similar meaning, but shared context does.
+    
     Returns True if:
     a) One name contains the other (substring) after normalization
     b) They share significant tokens (intersection size >= 1)
     c) They belong to the same conceptual cluster (bedding, water, machinery, etc.)
+    d) They could plausibly appear in the same photograph, room, store, or use case
     
     Args:
         a_name: First object name
@@ -2427,26 +2501,32 @@ def is_conceptually_too_close(a_name: str, b_name: str) -> bool:
     if len(tokens_a & tokens_b) >= 1:
         return True
     
-    # Check conceptual clusters (minimal set for known problematic areas)
-    bedding_cluster = {"pillow", "cushion", "mattress", "blanket", "duvet", "sheet", "bed", "sofa", "armchair", "recliner", "quilt", "comforter"}
-    water_cluster = {"water", "dew", "rain", "mist", "fog", "ice", "frost", "bottle", "river", "lake", "ocean", "sea", "stream", "pond", "pool", "wet", "moisture", "droplet"}
-    machinery_cluster = {"gear", "cog", "wheel", "turbine", "engine", "motor", "rotor", "pulley", "sprocket"}
+    # Check conceptual clusters (expanded for known problematic areas)
+    # ABSOLUTE LAW: If two objects could share a supplier, store, room, or use case — they are too close
+    bedding_cluster = {"pillow", "cushion", "mattress", "blanket", "duvet", "sheet", "bed", "sofa", "armchair", "recliner", "quilt", "comforter", "furniture", "home", "hearth"}
+    water_cluster = {"water", "dew", "rain", "mist", "fog", "ice", "frost", "bottle", "river", "lake", "ocean", "sea", "stream", "pond", "pool", "wet", "moisture", "droplet", "liquid", "fluid"}
+    machinery_cluster = {"gear", "cog", "wheel", "turbine", "engine", "motor", "rotor", "pulley", "sprocket", "mechanism", "machine"}
+    tool_cluster = {"tool", "wrench", "hammer", "screwdriver", "pliers", "drill", "saw", "chisel", "toolbox", "workshop"}
+    office_cluster = {"desk", "chair", "lamp", "pen", "paper", "notebook", "computer", "keyboard", "office", "workspace"}
+    kitchen_cluster = {"knife", "fork", "spoon", "plate", "bowl", "cup", "pot", "pan", "kitchen", "cooking", "utensil"}
     
     # Check if both names belong to the same cluster
-    a_in_bedding = any(token in bedding_cluster for token in tokens_a)
-    b_in_bedding = any(token in bedding_cluster for token in tokens_b)
-    if a_in_bedding and b_in_bedding:
-        return True
+    # If they could plausibly appear in the same photograph, room, store, or use case — reject
+    clusters = [
+        ("bedding", bedding_cluster),
+        ("water", water_cluster),
+        ("machinery", machinery_cluster),
+        ("tool", tool_cluster),
+        ("office", office_cluster),
+        ("kitchen", kitchen_cluster)
+    ]
     
-    a_in_water = any(token in water_cluster for token in tokens_a)
-    b_in_water = any(token in water_cluster for token in tokens_b)
-    if a_in_water and b_in_water:
-        return True
-    
-    a_in_machinery = any(token in machinery_cluster for token in tokens_a)
-    b_in_machinery = any(token in machinery_cluster for token in tokens_b)
-    if a_in_machinery and b_in_machinery:
-        return True
+    for cluster_name, cluster_tokens in clusters:
+        a_in_cluster = any(token in cluster_tokens for token in tokens_a)
+        b_in_cluster = any(token in cluster_tokens for token in tokens_b)
+        if a_in_cluster and b_in_cluster:
+            # Both objects could plausibly appear in the same context — too close
+            return True
     
     return False
 
@@ -2702,7 +2782,9 @@ def generate_ad(
     # STEP 3: GOAL + ASSOCIATIONS → OBJECT POOL
     # ========================================================================
     # Build goals for batch (3 different goals for 3-ad batch)
-    goals_for_batch = build_goals_for_batch(product_name, product_description)
+    # Build goals for batch (3 different goals for 3-ad batch)
+    # Include session_seed to ensure goals vary across sessions (SESSION DIVERSITY RULE)
+    goals_for_batch = build_goals_for_batch(product_name, product_description, session_seed=session_seed)
     goal = goals_for_batch[ad_index] if ad_index < len(goals_for_batch) else goals_for_batch[0]
     
     # ========================================================================
