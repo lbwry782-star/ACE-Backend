@@ -908,19 +908,9 @@ def generate_real_image_bytes(
         secondary_obj = object_a
     
     # Determine environment according to Object Environment Rule and Post-Hybrid Environment Rule
-    if hybrid_type != HybridType.SIDE_BY_SIDE:
-        # HYBRID: Post-Hybrid Environment Rule - environment derived from secondary object only
-        environment = derive_environment_for_object(secondary_obj.name)
-    else:
-        # SIDE_BY_SIDE: can use neutral studio surface or something suitable for both, but not narrative
-        env_a = derive_environment_for_object(object_a.name)
-        env_b = derive_environment_for_object(object_b.name)
-        
-        # If both objects suggest same environment, use it; otherwise use neutral
-        if env_a == env_b and env_a != "neutral studio surface":
-            environment = env_a
-        else:
-            environment = "neutral studio surface"
+    # SIDE_BY_SIDE is permanently disabled - only HYBRID is allowed
+    # HYBRID: Post-Hybrid Environment Rule - environment derived from secondary object only
+    environment = derive_environment_for_object(secondary_obj.name)
     
     # Build PRE-INTENT block (deterministic, no API calls)
     pre_intent = build_pre_intent_block(product_name, product_description)
@@ -928,52 +918,9 @@ def generate_real_image_bytes(
     # Build photorealistic commercial ad prompt (exact requirements)
     # ENVIRONMENT LAW — MANDATORY: Environment always overrides aesthetics.
     # If environment logic fails, the image is invalid.
-    if hybrid_type == HybridType.SIDE_BY_SIDE:
-        # SIDE_BY_SIDE: two objects only, touching edges, no gap, no overlap
-        prompt = (
-            f"{pre_intent}\n\n"
-            f"Do not write any of the PRE-INTENT as text in the image.\n\n"
-            f"Photorealistic commercial advertising photograph. "
-            f"Show two objects only: {object_a.name} and {object_b.name}, touching edges, no gap, no overlap. "
-            f"ENVIRONMENT LAW — MANDATORY: "
-            f"Every image MUST be placed in a realistic, coherent physical environment. "
-            f"No white studio, no abstract background, no generic gradient, no empty void. "
-            f"The environment must logically explain why the objects exist together. "
-            f"Objects A ({object_a.name}) and B ({object_b.name}) belong to DIFFERENT physical families. "
-            f"SIDE-BY-SIDE RULES: "
-            f"Objects must physically touch. "
-            f"Objects must face the SAME direction toward the viewer. "
-            f"No gaps, no separation, no floating. "
-            f"The environment must visually justify WHY these two objects belong together. "
-            f"The environment must visually FORCE proximity. "
-            f"The environment should imply that separation would be unnatural. "
-            f"The environment must support the FUNCTIONAL MEANING of the pairing. "
-            f"The environment must NOT introduce additional objects that compete with or distract from the objects. "
-            f"The environment must reinforce the SHARED SILHOUETTE: background contrast must clearly separate the outlines, no busy textures behind the silhouettes, no visual noise intersecting the contours. "
-            f"The environment must make the pairing feel INTENTIONAL, not accidental, not assembled, not improvised. "
-            f"The objects must appear as if they were DESIGNED FOR this environment, not placed into it afterward. "
-            f"Environment: {environment} (realistic physical context where these objects would naturally exist together). "
-            f"CAMERA & SPATIAL RULES: "
-            f"Straight frontal camera angle only. "
-            f"The environment plane must be perpendicular to the viewer. "
-            f"No perspective skew, no diagonal surfaces, no dramatic depth of field. "
-            f"Horizon line stable and horizontal. "
-            f"MATERIAL & LIGHTING RULES: "
-            f"Realistic material interaction between objects and environment. "
-            f"Soft, neutral, commercial lighting. "
-            f"No harsh shadows, no silhouette blackouts. "
-            f"The objects must retain visible surface detail. "
-            f"Composition: Objects centered, empty clean space at TOP (minimum 15%) for headline. "
-            f"No text, no logos, no labels, no symbols anywhere in the image. "
-            f"ABSOLUTE PROHIBITIONS: "
-            f"No abstract environments, no studio voids unless physically justified, no floating objects, no symbolic or metaphorical backgrounds, no surreal or conceptual scenery. "
-            f"Style: Professional product photography, real materials, real textures. "
-            f"No illustration, no CGI, no 3D render, no vector look. "
-            f"Environment always overrides aesthetics. If environment logic fails, the image is invalid."
-        )
-    else:
-        # HYBRID: single seamless hybrid object created by morphologically merging silhouette projections
-        prompt = (
+    # SIDE_BY_SIDE is permanently disabled - only HYBRID prompts are generated
+    # HYBRID: single seamless hybrid object created by morphologically merging silhouette projections
+    prompt = (
             f"{pre_intent}\n\n"
             f"Do not write any of the PRE-INTENT as text in the image.\n\n"
             f"Photorealistic commercial advertising photograph. "
@@ -1506,7 +1453,7 @@ def generate_associations(goal: str, size: int = 80) -> List[str]:
     
     Rules:
     - Default: EXACTLY 80 associations
-    - Can be expanded to 120 or 200 as fallback (deterministic repetition)
+    - Can be expanded to 120, 200, 300, 400, or 500 as fallback (deterministic repetition)
     - Associations must be physical, experiential, or functional (not abstract words)
     - No symbols, metaphors, or emotions as standalone items
     - Ordered list: index 1 = strongest association
@@ -1514,7 +1461,7 @@ def generate_associations(goal: str, size: int = 80) -> List[str]:
     
     Args:
         goal: Advertising goal string
-        size: Number of associations to generate (80, 120, or 200)
+        size: Number of associations to generate (80, 120, 200, 300, 400, or 500)
     
     Returns:
         List of association strings, ordered by strength
@@ -1538,23 +1485,39 @@ def generate_associations(goal: str, size: int = 80) -> List[str]:
     if size == 80:
         return base_associations
     
-    # Expand deterministically for 120 or 200
+    # Expand deterministically for larger sizes
+    expanded = list(base_associations)
+    
     if size == 120:
-        # 80 base + 40 additional (repeat first 40 with deterministic variation)
-        expanded = list(base_associations)
-        # Add first 40 associations again (deterministic repetition)
+        # 80 base + 40 additional (repeat first 40)
         expanded.extend(base_associations[:40])
-        return expanded
     elif size == 200:
         # 80 base + 40 (first repeat) + 80 (full repeat)
-        expanded = list(base_associations)
-        # Add first 40 associations again
         expanded.extend(base_associations[:40])
-        # Add all 80 associations again
         expanded.extend(base_associations)
-        return expanded
+    elif size == 300:
+        # 80 base + 40 (first repeat) + 80 (full repeat) + 100 (first 20 repeated 5 times)
+        expanded.extend(base_associations[:40])
+        expanded.extend(base_associations)
+        for _ in range(5):
+            expanded.extend(base_associations[:20])
+    elif size == 400:
+        # 80 base + 40 (first repeat) + 80 (full repeat) + 200 (full repeat 2.5 times)
+        expanded.extend(base_associations[:40])
+        expanded.extend(base_associations)
+        expanded.extend(base_associations)
+        expanded.extend(base_associations[:80])
+    elif size == 500:
+        # 80 base + 40 (first repeat) + 80 (full repeat) + 300 (full repeat 3.75 times)
+        expanded.extend(base_associations[:40])
+        expanded.extend(base_associations)
+        expanded.extend(base_associations)
+        expanded.extend(base_associations)
+        expanded.extend(base_associations[:60])
     else:
-        raise ValueError(f"Invalid association size: {size}. Must be 80, 120, or 200")
+        raise ValueError(f"Invalid association size: {size}. Must be 80, 120, 200, 300, 400, or 500")
+    
+    return expanded
 
 
 def determine_shape_family(object_name: str) -> str:
@@ -2109,9 +2072,9 @@ def check_quota_availability(hybrid_type: HybridType, quota_state: BatchQuotaSta
     if hybrid_type == HybridType.STRUCTURAL_PATTERN:
         return quota_state.can_use_structural_exception()
     
-    # SIDE_BY_SIDE doesn't use quotas
+    # SIDE_BY_SIDE is permanently disabled - should never reach here
     if hybrid_type == HybridType.SIDE_BY_SIDE:
-        return True
+        return False  # Reject SIDE_BY_SIDE
     
     return False
 
@@ -2161,9 +2124,10 @@ def evaluate_ab_pair(
     hybrid_allowed, side_by_side_forced = evaluate_geometric_overlap_threshold(overlap_percentage)
     
     # Step 4: If overlap < 70%, HYBRID is strictly forbidden
+    # SIDE_BY_SIDE is PERMANENTLY DISABLED - reject pair if overlap < threshold
     if not hybrid_allowed:
-        # HYBRID forbidden, must use SIDE-BY-SIDE
-        return (True, HybridType.SIDE_BY_SIDE, None)
+        # HYBRID forbidden, SIDE_BY_SIDE is disabled - reject this pair
+        return (False, HybridType.CORE_GEOMETRIC, f"Overlap {overlap_percentage:.2f} < HYBRID threshold 0.70 (SIDE_BY_SIDE disabled)")
     
     # Step 5: Classify hybrid type
     hybrid_type = classify_hybrid_type(
@@ -2195,32 +2159,32 @@ def evaluate_ab_pair(
     return (True, hybrid_type, None)
 
 
-def find_valid_ab_pair(
+def find_valid_hybrid_pair(
     candidate_pairs: List[Tuple[ObjectCandidate, ObjectCandidate]],
     quota_state: BatchQuotaState,
     ranked_associations: List[ObjectCandidate],
     ad_index: int = 0
 ) -> Tuple[Optional[ObjectCandidate], Optional[ObjectCandidate], HybridType, Optional[str]]:
     """
-    Find a valid A/B pair from candidates that passes all rules.
-    Prefers HYBRID over SIDE_BY_SIDE when available.
+    Find a valid HYBRID pair from candidates that passes all rules.
+    SIDE_BY_SIDE is PERMANENTLY DISABLED.
     
     Candidate Resolution Principle:
     - Geometry is a pass/fail gate, not a ranking tool
-    - Prefer HYBRID-eligible pairs (overlap >= 0.70, hybrid_type != SIDE_BY_SIDE) over SIDE_BY_SIDE
+    - Only HYBRID-eligible pairs (overlap >= 0.70) are considered
     - If multiple HYBRID candidates, select based on ad_index for variation
     - NEVER use geometric overlap to choose between candidates (only pass/fail)
     
     Args:
         candidate_pairs: List of (object_a, object_b) candidate pairs (already sanitized)
         quota_state: Batch quota state
-        ranked_associations: Ranked list of associations (size 80) for resolution
+        ranked_associations: Ranked list of associations for resolution
         ad_index: Index of ad in batch (0, 1, or 2) to select different valid pair
     
     Returns:
         Tuple of (object_a, object_b, hybrid_type, error_message):
-        - object_a, object_b: Selected pair if valid, None if none found
-        - hybrid_type: Classification of the valid pair
+        - object_a, object_b: Selected HYBRID pair if valid, None if none found
+        - hybrid_type: Classification of the valid pair (always HYBRID type, never SIDE_BY_SIDE)
         - error_message: None if valid pair found, error if none found
     """
     # Note: All candidates in candidate_pairs have already passed hard sanitation filters
@@ -2228,14 +2192,10 @@ def find_valid_ab_pair(
     # Save original quota_state to restore after evaluation (evaluate_ab_pair modifies it)
     original_quota_dict = quota_state_to_dict(quota_state)
     
-    # Step 1: Collect valid pairs, separating by HYBRID/SIDE_BY_SIDE
+    # Step 1: Collect valid HYBRID pairs only (SIDE_BY_SIDE is permanently disabled)
     # Hard rule: Reject same_family pairs initially (only allow as fallback if no different_family pairs exist)
     hybrid_candidates_different_family = []
-    side_by_side_candidates_different_family = []
-    
-    # Fallback lists (only used if no different_family pairs found)
-    hybrid_candidates_same_family = []
-    side_by_side_candidates_same_family = []
+    hybrid_candidates_same_family = []  # Fallback only
     
     for object_a, object_b in candidate_pairs:
         # Restore quota_state before each evaluation (evaluate_ab_pair modifies it)
@@ -2251,7 +2211,11 @@ def find_valid_ab_pair(
         view_b = select_max_projection_view(object_b)
         overlap_percentage = calculate_geometric_overlap(view_a, view_b)
         
-        # Evaluate pair to get hybrid_type and check quota (only once per pair)
+        # Only consider pairs with overlap >= HYBRID threshold (SIDE_BY_SIDE is disabled)
+        if overlap_percentage < GEOMETRIC_OVERLAP_THRESHOLD_HYBRID:
+            continue  # Skip pairs that don't meet HYBRID threshold
+        
+        # Evaluate pair to get hybrid_type and check quota
         is_valid, hybrid_type, error_msg = evaluate_ab_pair(
             object_a,
             object_b,
@@ -2260,26 +2224,19 @@ def find_valid_ab_pair(
         )
         
         if not is_valid:
-            # Skip invalid pairs
+            # Skip invalid pairs (quota exhausted, etc.)
             continue
         
-        # Check if this is HYBRID-eligible (overlap >= 0.70 and hybrid_type != SIDE_BY_SIDE)
-        hybrid_allowed = overlap_percentage >= GEOMETRIC_OVERLAP_THRESHOLD_HYBRID
+        # Only accept HYBRID types (SIDE_BY_SIDE is permanently disabled)
+        if hybrid_type == HybridType.SIDE_BY_SIDE:
+            continue  # Skip SIDE_BY_SIDE pairs
         
-        if hybrid_allowed and hybrid_type != HybridType.SIDE_BY_SIDE:
-            # This is a valid HYBRID-eligible pair
-            if same_family:
-                # Store for fallback only (not used in primary selection)
-                hybrid_candidates_same_family.append((object_a, object_b, hybrid_type, overlap_percentage))
-            else:
-                hybrid_candidates_different_family.append((object_a, object_b, hybrid_type, overlap_percentage))
+        # This is a valid HYBRID-eligible pair
+        if same_family:
+            # Store for fallback only (not used in primary selection)
+            hybrid_candidates_same_family.append((object_a, object_b, hybrid_type, overlap_percentage))
         else:
-            # SIDE_BY_SIDE candidate (overlap < 0.70 or hybrid_type == SIDE_BY_SIDE)
-            if same_family:
-                # Store for fallback only (not used in primary selection)
-                side_by_side_candidates_same_family.append((object_a, object_b, hybrid_type, overlap_percentage))
-            else:
-                side_by_side_candidates_different_family.append((object_a, object_b, hybrid_type, overlap_percentage))
+            hybrid_candidates_different_family.append((object_a, object_b, hybrid_type, overlap_percentage))
     
     # Step 2: Prefer HYBRID candidates with different families
     if len(hybrid_candidates_different_family) > 0:
@@ -2287,7 +2244,7 @@ def find_valid_ab_pair(
         target_rank = ad_index
         if target_rank >= len(hybrid_candidates_different_family):
             # Fallback to first HYBRID candidate if not enough
-            logger.warning(f"find_valid_ab_pair: ad_index={ad_index} but only {len(hybrid_candidates_different_family)} HYBRID candidates with different families, using first")
+            logger.warning(f"find_valid_hybrid_pair: ad_index={ad_index} but only {len(hybrid_candidates_different_family)} HYBRID candidates with different families, using first")
             target_rank = 0
         
         object_a, object_b, hybrid_type, overlap = hybrid_candidates_different_family[target_rank]
@@ -2303,13 +2260,11 @@ def find_valid_ab_pair(
             similarity_basis="geometric"
         )
         
-        logger.info(f"AB_SELECTION family_relation=DIFFERENT A={object_a.name} B={object_b.name}")
-        logger.info(f"HYBRID_CANDIDATES_FOUND={len(hybrid_candidates_different_family)} SELECTED={object_a.name},{object_b.name},{final_hybrid_type.value},{overlap:.2f}")
         return (object_a, object_b, final_hybrid_type, None)
     
-    # Step 3: If no HYBRID candidates, prefer SIDE_BY_SIDE with different families
-    if len(side_by_side_candidates_different_family) > 0:
-        object_a, object_b, hybrid_type, overlap = side_by_side_candidates_different_family[0]
+    # Step 3: Fallback to same_family HYBRID pairs (only if no different-family candidates exist)
+    if len(hybrid_candidates_same_family) > 0:
+        object_a, object_b, hybrid_type, overlap = hybrid_candidates_same_family[0]
         
         # Re-evaluate the selected pair to update quota_state correctly
         quota_state.material_analogy_used = original_quota_dict['material_analogy_used']
@@ -2322,54 +2277,10 @@ def find_valid_ab_pair(
             similarity_basis="geometric"
         )
         
-        logger.info(f"AB_SELECTION family_relation=DIFFERENT A={object_a.name} B={object_b.name}")
-        logger.info(f"HYBRID_CANDIDATES_FOUND=0 SELECTED={object_a.name},{object_b.name},{final_hybrid_type.value},{overlap:.2f}")
         return (object_a, object_b, final_hybrid_type, None)
     
-    # Step 4: Last resort - Fallback to same_family pairs (only if no different-family candidates exist at all)
-    # This is a last resort - same_family pairs are rejected by default
-    # Hard rule: Only allow same_family if absolutely no different_family pairs exist
-    if len(hybrid_candidates_different_family) == 0 and len(side_by_side_candidates_different_family) == 0:
-        # Try HYBRID same_family first (prefer HYBRID over SIDE_BY_SIDE)
-        if len(hybrid_candidates_same_family) > 0:
-            object_a, object_b, hybrid_type, overlap = hybrid_candidates_same_family[0]
-            
-            # Re-evaluate the selected pair to update quota_state correctly
-            quota_state.material_analogy_used = original_quota_dict['material_analogy_used']
-            quota_state.structural_morphology_used = original_quota_dict['structural_morphology_used']
-            quota_state.structural_exception_used = original_quota_dict['structural_exception_used']
-            is_valid, final_hybrid_type, error_msg = evaluate_ab_pair(
-                object_a,
-                object_b,
-                quota_state,
-                similarity_basis="geometric"
-            )
-            
-            logger.warning(f"AB_SELECTION family_relation=SAME_FAMILY_FALLBACK=true A={object_a.name} B={object_b.name} (no different-family candidates found)")
-            logger.info(f"HYBRID_CANDIDATES_FOUND={len(hybrid_candidates_same_family)} SELECTED={object_a.name},{object_b.name},{final_hybrid_type.value},{overlap:.2f}")
-            return (object_a, object_b, final_hybrid_type, None)
-        
-        # Last resort - SIDE_BY_SIDE same_family
-        if len(side_by_side_candidates_same_family) > 0:
-            object_a, object_b, hybrid_type, overlap = side_by_side_candidates_same_family[0]
-            
-            # Re-evaluate the selected pair to update quota_state correctly
-            quota_state.material_analogy_used = original_quota_dict['material_analogy_used']
-            quota_state.structural_morphology_used = original_quota_dict['structural_morphology_used']
-            quota_state.structural_exception_used = original_quota_dict['structural_exception_used']
-            is_valid, final_hybrid_type, error_msg = evaluate_ab_pair(
-                object_a,
-                object_b,
-                quota_state,
-                similarity_basis="geometric"
-            )
-            
-            logger.warning(f"AB_SELECTION family_relation=SAME_FAMILY_FALLBACK=true A={object_a.name} B={object_b.name} (no different-family candidates found)")
-            logger.info(f"HYBRID_CANDIDATES_FOUND=0 SELECTED={object_a.name},{object_b.name},{final_hybrid_type.value},{overlap:.2f}")
-            return (object_a, object_b, final_hybrid_type, None)
-    
-    # No valid pairs found - FAIL generation
-    return (None, None, HybridType.SIDE_BY_SIDE, "No valid A/B pair found that passes all core decision rules")
+    # No valid HYBRID pairs found
+    return (None, None, HybridType.CORE_GEOMETRIC, "No valid HYBRID pair found (overlap >= 0.70 required)")
 
 
 def generate_ad(
@@ -2414,65 +2325,88 @@ def generate_ad(
     goals_for_batch = build_goals_for_batch(product_name, product_description)
     goal = goals_for_batch[ad_index] if ad_index < len(goals_for_batch) else goals_for_batch[0]
     
-    # Generate associations for the selected goal (default: 80, can expand to 120 or 200)
-    association_size = 80
-    associations = generate_associations(goal, size=association_size)
+    # ========================================================================
+    # HYBRID GUARANTEE SEARCH: Expansion ladder (80 → 120 → 200 → 300 → 400 → 500)
+    # ========================================================================
+    # HARD ASSUMPTION: A valid PERFECT HYBRID ALWAYS EXISTS for any product.
+    # Failure to find one means the search space is too small.
+    # Side-by-side is PERMANENTLY DISABLED.
+    # ========================================================================
+    expansion_levels = [80, 120, 200, 300, 400, 500]
+    object_a = None
+    object_b = None
+    hybrid_type = None
     
-    # Build object pool from associations
-    # Try with default size (80), expand to 120 or 200 if needed
-    try:
-        object_pool = build_object_pool(product_name, product_description, goal=goal, association_size=association_size)
-    except ValueError:
-        # Try expanding to 120
-        association_size = 120
-        associations = generate_associations(goal, size=association_size)
-        logger.info(f"ASSOCIATION_POOL_EXPANDED size=120")
+    for association_size in expansion_levels:
+        logger.info(f"HYBRID_SEARCH_START assoc_count={association_size}")
+        
+        # Rebuild associations from scratch for this size
+        try:
+            associations = generate_associations(goal, size=association_size)
+        except ValueError as e:
+            logger.warning(f"HYBRID_NOT_FOUND assoc_count={association_size} error=Failed to generate associations: {str(e)}")
+            continue
+        
+        # Rebuild object pool
         try:
             object_pool = build_object_pool(product_name, product_description, goal=goal, association_size=association_size)
-        except ValueError:
-            # Try expanding to 200
-            association_size = 200
-            associations = generate_associations(goal, size=association_size)
-            logger.info(f"ASSOCIATION_POOL_EXPANDED size=200")
-            object_pool = build_object_pool(product_name, product_description, goal=goal, association_size=association_size)
+        except ValueError as e:
+            logger.warning(f"HYBRID_NOT_FOUND assoc_count={association_size} error=Failed to build object pool: {str(e)}")
+            if association_size < expansion_levels[-1]:
+                logger.info(f"ASSOCIATION_POOL_EXPANDED to={expansion_levels[expansion_levels.index(association_size) + 1]}")
+            continue
+        
+        # Apply hard sanitation filters (STEP 2.5)
+        try:
+            sanitized_pool = sanitize_candidate_pool(object_pool)
+        except ValueError as e:
+            logger.warning(f"HYBRID_NOT_FOUND assoc_count={association_size} error=Sanitized pool empty: {str(e)}")
+            if association_size < expansion_levels[-1]:
+                logger.info(f"ASSOCIATION_POOL_EXPANDED to={expansion_levels[expansion_levels.index(association_size) + 1]}")
+            continue
+        
+        if len(sanitized_pool) == 0:
+            logger.warning(f"HYBRID_NOT_FOUND assoc_count={association_size} error=No valid candidates after sanitation")
+            if association_size < expansion_levels[-1]:
+                logger.info(f"ASSOCIATION_POOL_EXPANDED to={expansion_levels[expansion_levels.index(association_size) + 1]}")
+            continue
+        
+        # Build ranked object list and generate candidate pairs
+        ranked_objs = build_ranked_object_list(sanitized_pool)
+        candidate_pairs = generate_candidate_pairs(ranked_objs, max_pairs=300, ad_index=ad_index, session_seed=session_seed)
+        
+        if len(candidate_pairs) == 0:
+            logger.warning(f"HYBRID_NOT_FOUND assoc_count={association_size} error=No candidate pairs generated")
+            if association_size < expansion_levels[-1]:
+                logger.info(f"ASSOCIATION_POOL_EXPANDED to={expansion_levels[expansion_levels.index(association_size) + 1]}")
+            continue
+        
+        # Search for HYBRID only (SIDE_BY_SIDE is permanently disabled)
+        object_a, object_b, hybrid_type, error_msg = find_valid_hybrid_pair(
+            candidate_pairs,
+            quota_state,
+            ranked_objs,
+            ad_index=ad_index
+        )
+        
+        # If valid HYBRID found, stop immediately
+        if object_a is not None and object_b is not None:
+            # Calculate overlap for logging
+            view_a = select_max_projection_view(object_a)
+            view_b = select_max_projection_view(object_b)
+            overlap_percentage = calculate_geometric_overlap(view_a, view_b)
+            logger.info(f"HYBRID_SELECTED assoc_count={association_size} A={object_a.name} B={object_b.name} overlap={overlap_percentage:.2f}")
+            break
+        
+        # No HYBRID found at this level, log and continue to next level
+        logger.warning(f"HYBRID_NOT_FOUND assoc_count={association_size}")
+        if association_size < expansion_levels[-1]:
+            logger.info(f"ASSOCIATION_POOL_EXPANDED to={expansion_levels[expansion_levels.index(association_size) + 1]}")
     
-    # Apply hard sanitation filters (STEP 2.5)
-    try:
-        sanitized_pool = sanitize_candidate_pool(object_pool)
-    except ValueError as e:
-        raise ValueError(f"Sanitized object pool is empty: {str(e)}") from e
-    
-    if len(sanitized_pool) == 0:
-        raise ValueError("No valid object candidates after sanitation")
-    
-    # ========================================================================
-    # STEP 4: CANDIDATE PAIR GENERATION (A/B pairs from sanitized pool)
-    # ========================================================================
-    # Build ranked object list and generate candidate pairs
-    # Pairing is deterministic, prioritizes higher-ranked objects
-    # No geometry calculations used for ranking
-    # Window selection varies by ad_index and session_seed for diversity
-    ranked_objs = build_ranked_object_list(sanitized_pool)
-    candidate_pairs = generate_candidate_pairs(ranked_objs, max_pairs=300, ad_index=ad_index, session_seed=session_seed)
-    
-    if len(candidate_pairs) == 0:
-        raise ValueError("No candidate pairs generated from object pool")
-    
-    # ========================================================================
-    # STEP 5: Find valid A/B pair using core decision logic
-    # ========================================================================
-    # Try to find valid pair using geometry and quota rules
-    # Select different pair based on ad_index for variation
-    object_a, object_b, hybrid_type, error_msg = find_valid_ab_pair(
-        candidate_pairs,
-        quota_state,
-        ranked_objs,
-        ad_index=ad_index
-    )
-    
-    # Final check: if we still don't have a valid pair, fail
+    # Final check: if no HYBRID found even at 500 associations, this is a CRITICAL ENGINE EVENT
     if object_a is None or object_b is None:
-        raise ValueError(f"No valid A/B pair found: {error_msg}")
+        logger.error("CRITICAL_ENGINE_EVENT: HYBRID not found even after 500 associations — engine limits reached.")
+        raise ValueError("HYBRID not found even after 500 associations — engine limits reached.")
     
     # ========================================================================
     # STEP 6 & 7: HEADLINE & MARKETING TEXT GENERATION
