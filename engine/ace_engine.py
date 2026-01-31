@@ -924,37 +924,36 @@ def generate_real_image_bytes(
             f"{pre_intent}\n\n"
             f"Do not write any of the PRE-INTENT as text in the image.\n\n"
             f"Photorealistic commercial advertising photograph. "
-            f"Show ONE single seamless hybrid object created by morphologically merging "
-            f"the silhouette projection of {object_a.name} (Object A) and {object_b.name} (Object B) into a shared outline. "
-            f"IMPORTANT: "
+            f"Show ONE single object with the OUTER SILHOUETTE of {object_a.name} (Object A), but with MATERIAL and DETAIL cues that belong to {object_b.name}'s (Object B) world, as if the environment of {object_b.name} shaped it. "
+            f"IMPORTANT — STRICT PROHIBITIONS: "
+            f"Do NOT depict two objects merged, glued, split, or assembled. "
+            f"Do NOT show a half-and-half object. "
+            f"Do NOT show two objects in frame. "
             f"This is NOT two objects placed together. "
             f"This is NOT side by side. "
             f"This is NOT assembly or collage. "
-            f"The hybrid must read as ONE believable physical object. "
-            f"The hybrid shape is based on the shared frontal silhouette projection "
-            f"where both objects align in outline when facing the viewer. "
-            f"Object A ({object_a.name}) and Object B ({object_b.name}) belong to DIFFERENT functional families, "
-            f"but share a similar silhouette profile. "
+            f"The object must read as ONE believable physical object that naturally exists in this environment. "
             f"ENVIRONMENT LAW — MANDATORY: "
             f"Every image MUST be placed in a realistic, coherent physical environment. "
             f"No white studio, no abstract background, no generic gradient, no empty void. "
-            f"The environment must logically explain why the objects exist together. "
-            f"Objects A ({object_a.name}) and B ({object_b.name}) belong to DIFFERENT physical families. "
+            f"Environment authority belongs to object B ({object_b.name}): the scene, surface, props, and context must come from {object_b.name}'s environment. "
+            f"The environment must be clearly {object_b.name}'s domain (workshop / lab / forest / ocean / etc. depending on {object_b.name}), realistic and minimal. "
+            f"The environment must logically explain why this hybrid silhouette exists in this context. "
             f"HYBRID RULES: "
-            f"Hybrid must appear as a natural outcome of the environment. "
+            f"The object must appear as a natural outcome of the environment. "
             f"NOT a glued object, NOT a merged sculpture, NOT an artificial mashup. "
-            f"The hybrid form should feel inevitable given the environment. "
-            f"The environment must visually justify WHY these two objects belong together in a hybrid form. "
-            f"The environment must support the FUNCTIONAL MEANING of the hybrid. "
-            f"The environment must support the hybrid as a SINGLE object. "
+            f"The form should feel inevitable given the environment. "
+            f"The environment must visually justify WHY this object exists in this form. "
+            f"The environment must support the FUNCTIONAL MEANING of the object. "
+            f"The environment must support the object as a SINGLE unified entity. "
             f"Do NOT show seams, joints, or construction logic. "
             f"Do NOT suggest mechanical assembly. "
-            f"The hybrid must appear naturally formed within this context. "
-            f"The environment must NOT introduce additional objects that compete with or distract from the hybrid form. "
-            f"The environment must reinforce the SHARED SILHOUETTE: background contrast must clearly separate the hybrid outline, no busy textures behind the silhouette, no visual noise intersecting the contour. "
-            f"The environment must make the hybrid feel INTENTIONAL, not accidental, not assembled, not improvised. "
-            f"The hybrid must appear as if it was DESIGNED FOR this environment, not placed into it afterward. "
-            f"Environment: {environment} (realistic physical context where this hybrid object would naturally exist). "
+            f"The object must appear naturally formed within this context. "
+            f"The environment must NOT introduce additional objects that compete with or distract from the object. "
+            f"The environment must reinforce the SILHOUETTE: background contrast must clearly separate the outline, no busy textures behind the silhouette, no visual noise intersecting the contour. "
+            f"The environment must make the object feel INTENTIONAL, not accidental, not assembled, not improvised. "
+            f"The object must appear as if it was DESIGNED FOR this environment, not placed into it afterward. "
+            f"Environment: {environment} (realistic physical context from {object_b.name}'s world where this object would naturally exist). "
             f"CAMERA & SPATIAL RULES: "
             f"Straight frontal camera angle only. "
             f"The environment plane must be perpendicular to the viewer. "
@@ -2256,9 +2255,11 @@ def find_valid_hybrid_pair(
     hybrid_candidates_different_family = []
     hybrid_candidates_same_family = []  # Fallback only
     
-    # Track statistics
+    # Track statistics clearly
     evaluated_pairs = 0
-    passed_overlap = 0
+    passed_overlap = 0  # Count of pairs where overlap >= threshold
+    rejected_after_overlap = 0  # Count of pairs that passed overlap but were rejected by later gates
+    selected_pair = None  # First pair that passes all gates
     
     for object_a, object_b in candidate_pairs:
         # Hard cap: stop after max_evaluations
@@ -2284,6 +2285,7 @@ def find_valid_hybrid_pair(
         if overlap_percentage < hybrid_threshold:
             continue  # Skip pairs that don't meet HYBRID threshold
         
+        # This pair passed overlap threshold
         passed_overlap += 1
         
         # Evaluate pair to get hybrid_type and check quota
@@ -2295,21 +2297,36 @@ def find_valid_hybrid_pair(
         )
         
         if not is_valid:
-            # Skip invalid pairs (quota exhausted, etc.)
+            # Pair passed overlap but failed later gate (quota exhausted, etc.)
+            rejected_after_overlap += 1
             continue
         
         # Only accept HYBRID types (SIDE_BY_SIDE is permanently disabled)
         if hybrid_type == HybridType.SIDE_BY_SIDE:
-            continue  # Skip SIDE_BY_SIDE pairs
+            # Pair passed overlap but is SIDE_BY_SIDE (should not happen, but track it)
+            rejected_after_overlap += 1
+            continue
         
-        # This is a valid HYBRID-eligible pair
+        # This is a valid HYBRID-eligible pair that passed all gates
+        # Select the FIRST such pair immediately (no need to collect all candidates)
+        if selected_pair is None:
+            selected_pair = (object_a, object_b, hybrid_type, overlap_percentage, same_family)
+        
+        # Also store for family-based selection logic
         if same_family:
             # Store for fallback only (not used in primary selection)
             hybrid_candidates_same_family.append((object_a, object_b, hybrid_type, overlap_percentage))
         else:
             hybrid_candidates_different_family.append((object_a, object_b, hybrid_type, overlap_percentage))
     
-    # Step 2: Prefer HYBRID candidates with different families
+    # Step 2: Select pair (prefer different families, but use first valid if available)
+    # Sanity check: if all pairs passed overlap but none selected, this is a logic error
+    if passed_overlap == evaluated_pairs and passed_overlap > 0 and selected_pair is None:
+        error_msg = f"SEARCH_LOGIC_BROKEN: all {passed_overlap} pairs pass overlap but none selected"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+    
+    # Select from valid candidates (prefer different family if available)
     if len(hybrid_candidates_different_family) > 0:
         # Select the (ad_index+1)-th HYBRID candidate with different families (0-indexed)
         target_rank = ad_index
@@ -2331,10 +2348,14 @@ def find_valid_hybrid_pair(
             similarity_basis="geometric"
         )
         
-        search_stats = {'evaluated_pairs': evaluated_pairs, 'passed_overlap': passed_overlap}
+        search_stats = {
+            'evaluated_pairs': evaluated_pairs, 
+            'passed_overlap': passed_overlap,
+            'rejected_after_overlap': rejected_after_overlap
+        }
         return (object_a, object_b, final_hybrid_type, None, search_stats)
     
-    # Step 3: Fallback to same_family HYBRID pairs (only if no different-family candidates exist)
+    # Fallback to same_family HYBRID pairs (only if no different-family candidates exist)
     if len(hybrid_candidates_same_family) > 0:
         object_a, object_b, hybrid_type, overlap = hybrid_candidates_same_family[0]
         
@@ -2349,12 +2370,20 @@ def find_valid_hybrid_pair(
             similarity_basis="geometric"
         )
         
-        search_stats = {'evaluated_pairs': evaluated_pairs, 'passed_overlap': passed_overlap}
+        search_stats = {
+            'evaluated_pairs': evaluated_pairs, 
+            'passed_overlap': passed_overlap,
+            'rejected_after_overlap': rejected_after_overlap
+        }
         return (object_a, object_b, final_hybrid_type, None, search_stats)
     
     # No valid HYBRID pairs found
-    search_stats = {'evaluated_pairs': evaluated_pairs, 'passed_overlap': passed_overlap}
-    return (None, None, HybridType.CORE_GEOMETRIC, "No valid HYBRID pair found (overlap >= 0.70 required)", search_stats)
+    search_stats = {
+        'evaluated_pairs': evaluated_pairs, 
+        'passed_overlap': passed_overlap,
+        'rejected_after_overlap': rejected_after_overlap
+    }
+    return (None, None, HybridType.CORE_GEOMETRIC, f"No valid HYBRID pair found (overlap >= {hybrid_threshold} required)", search_stats)
 
 
 def generate_ad(
@@ -2478,7 +2507,8 @@ def generate_ad(
     )
     
     # Log search statistics
-    logger.info(f"HYBRID_SEARCH_STATS threshold={hybrid_threshold} evaluated_pairs={search_stats['evaluated_pairs']} passed_overlap={search_stats['passed_overlap']}")
+    rejected_after_overlap = search_stats.get('rejected_after_overlap', 0)
+    logger.info(f"HYBRID_SEARCH_STATS threshold={hybrid_threshold} evaluated_pairs={search_stats['evaluated_pairs']} passed_overlap={search_stats['passed_overlap']} rejected_after_overlap={rejected_after_overlap}")
     
     # If valid HYBRID found, use it
     if object_a is not None and object_b is not None:
