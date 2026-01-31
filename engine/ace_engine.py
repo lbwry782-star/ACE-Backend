@@ -909,15 +909,22 @@ def generate_real_image_bytes(
     # Build photorealistic commercial ad prompt (ENV_FIXED=A, ENV_EMBED composition)
     # ENVIRONMENT LAW — MANDATORY: Environment always overrides aesthetics.
     # SIDE_BY_SIDE is permanently disabled - only HYBRID prompts are generated
-    # ENV_EMBED: Object A is the environment/world/background, Object B is embedded inside A
+    # ENV_EMBED: Object A is the environment/domain (setting, surface, context) ONLY, not a physical object
+    # Object B is the only visible subject/object
     prompt = (
             f"{pre_intent}\n\n"
             f"Do not write any of the PRE-INTENT as text in the image.\n\n"
             f"Photorealistic commercial advertising photograph. "
             f"COMPOSITION MODE: ENV_EMBED. "
-            f"Object A ({object_a.name}) is the environment/world/background filling the entire frame. "
-            f"Object B ({object_b.name}) is embedded inside A as if it emerges from within A. "
+            f"Show {object_b.name} (Object B) as the only subject, emerging naturally within {object_a.name}'s (Object A) domain environment. "
+            f"Object A ({object_a.name}) is the environment/domain setting (surface, context, materials) and must not appear as an object. "
+            f"Object B ({object_b.name}) is the only visible object/subject. "
             f"IMPORTANT — STRICT PROHIBITIONS: "
+            f"Do NOT depict Object A as a physical object, frame, ring, shell, casing, or outline around B. "
+            f"A must be present only as the environment/domain (setting, surface, materials, context) — not as an object. "
+            f"Do NOT nest B inside a larger version of A. "
+            f"Do NOT wrap, encase, surround, or border B with remnants of A. "
+            f"Only ONE object is allowed as a subject: B. A is background/context only. "
             f"Do NOT show two separate objects. "
             f"Do NOT show two objects merged, glued, split, or assembled. "
             f"Do NOT show a half-and-half object. "
@@ -926,6 +933,7 @@ def generate_real_image_bytes(
             f"This is NOT side by side. "
             f"This is NOT assembly or collage. "
             f"This is NOT overlay or composition. "
+            f"No collage, no assembly, no glued parts, no two-object composition. "
             f"The composition must read as a SINGLE unified believable commercial photo where B naturally exists within A's environment. "
             f"ENVIRONMENT LAW — MANDATORY: "
             f"Every image MUST be placed in a realistic, coherent physical environment. "
@@ -970,7 +978,7 @@ def generate_real_image_bytes(
     
     # Use gpt-image-1.5 model (NO FALLBACK - fail if it doesn't work)
     model = "gpt-image-1.5"
-    logger.info(f"HYBRID_ENV_MODE ENV_FIXED=A COMPOSITION_MODE=ENV_EMBED A={object_a.name} B={object_b.name} env={environment} size={size} model={model}")
+    logger.info(f"HYBRID_ENV_MODE ENV_FIXED=A COMPOSITION_MODE=ENV_EMBED SUBJECT=B A_ENV_ONLY=1 A={object_a.name} B={object_b.name} env={environment} size={size} model={model}")
     logger.info(f"IMAGE_GEN_START model={model} size={size} object_a={object_a.name} object_b={object_b.name} hybrid_type={hybrid_type.value}")
     
     try:
@@ -2251,14 +2259,49 @@ def find_valid_hybrid_pair(
     original_quota_dict = quota_state_to_dict(quota_state)
     
     # Step 1: Collect valid HYBRID pairs only (SIDE_BY_SIDE is permanently disabled)
-    # Hard rule: Reject same_family pairs initially (only allow as fallback if no different_family pairs exist)
+    # Hard rule: Reject same_family pairs and too-close name pairs (HARD REJECT, no fallback)
+    
+    def are_names_too_close(name_a: str, name_b: str) -> bool:
+        """
+        Check if two object names are too similar (one contains the other or shares key tokens).
+        This prevents nesting scenarios like "pillow" inside "pillow" or "cushion" inside "pillow".
+        """
+        name_a_lower = name_a.lower().strip()
+        name_b_lower = name_b.lower().strip()
+        
+        # If one name is contained in the other, they are too close
+        if name_a_lower in name_b_lower or name_b_lower in name_a_lower:
+            return True
+        
+        # Check for shared key tokens (simple word-based check)
+        # Common soft rectangle family tokens
+        soft_rect_tokens = ["pillow", "cushion", "blanket", "duvet", "mattress", "sheet", "quilt", "comforter"]
+        # Common container family tokens
+        container_tokens = ["bottle", "jar", "can", "vial", "flask", "container", "vessel"]
+        # Common disk family tokens
+        disk_tokens = ["coin", "plate", "disc", "discus", "frisbee", "puck"]
+        
+        # Split names into words
+        words_a = set(name_a_lower.split())
+        words_b = set(name_b_lower.split())
+        
+        # Check if they share any key token from the same family
+        for token_list in [soft_rect_tokens, container_tokens, disk_tokens]:
+            tokens_in_a = [t for t in token_list if t in words_a]
+            tokens_in_b = [t for t in token_list if t in words_b]
+            if tokens_in_a and tokens_in_b:
+                # Both contain tokens from the same family - too close
+                return True
+        
+        return False
+    
     hybrid_candidates_different_family = []
-    hybrid_candidates_same_family = []  # Fallback only
     
     # Track statistics clearly
     evaluated_pairs = 0
     passed_overlap = 0  # Count of pairs where overlap >= threshold
     rejected_after_overlap = 0  # Count of pairs that passed overlap but were rejected by later gates
+    rejected_too_close = 0  # Count of pairs rejected due to same_family or too-close names
     selected_pair = None  # First pair that passes all gates
     
     for object_a, object_b in candidate_pairs:
@@ -2272,8 +2315,14 @@ def find_valid_hybrid_pair(
         quota_state.structural_morphology_used = original_quota_dict['structural_morphology_used']
         quota_state.structural_exception_used = original_quota_dict['structural_exception_used']
         
-        # Check if objects have same shape_family (reject initially, allow only as fallback)
+        # FIX #2: HARD REJECT same_family pairs and too-close name pairs (no fallback)
         same_family = (object_a.shape_family == object_b.shape_family)
+        names_too_close = are_names_too_close(object_a.name, object_b.name)
+        
+        if same_family or names_too_close:
+            rejected_too_close += 1
+            logger.info(f"ENV_EMBED_REJECT reason=TOO_CLOSE_OR_SAME_FAMILY A={object_a.name} B={object_b.name} shapeA={object_a.shape_family} shapeB={object_b.shape_family} same_family={same_family} names_too_close={names_too_close}")
+            continue  # HARD REJECT - skip this pair
         
         # Calculate overlap to check if HYBRID is allowed
         view_a = select_max_projection_view(object_a)
@@ -2311,23 +2360,19 @@ def find_valid_hybrid_pair(
         # This is a valid HYBRID-eligible pair that passed all gates
         # Select the FIRST such pair immediately (no need to collect all candidates)
         if selected_pair is None:
-            selected_pair = (object_a, object_b, hybrid_type, overlap_percentage, same_family)
+            selected_pair = (object_a, object_b, hybrid_type, overlap_percentage)
         
-        # Also store for family-based selection logic
-        if same_family:
-            # Store for fallback only (not used in primary selection)
-            hybrid_candidates_same_family.append((object_a, object_b, hybrid_type, overlap_percentage))
-        else:
-            hybrid_candidates_different_family.append((object_a, object_b, hybrid_type, overlap_percentage))
+        # Store for selection logic (all pairs here are different_family and not too-close)
+        hybrid_candidates_different_family.append((object_a, object_b, hybrid_type, overlap_percentage))
     
-    # Step 2: Select pair (prefer different families, but use first valid if available)
+    # Step 2: Select pair from valid candidates (all are different_family and not too-close)
     # Sanity check: if all pairs passed overlap but none selected, this is a logic error
     if passed_overlap == evaluated_pairs and passed_overlap > 0 and selected_pair is None:
         error_msg = f"SEARCH_LOGIC_BROKEN: all {passed_overlap} pairs pass overlap but none selected"
         logger.error(error_msg)
         raise ValueError(error_msg)
     
-    # Select from valid candidates (prefer different family if available)
+    # Select from valid candidates (all are different_family and not too-close)
     if len(hybrid_candidates_different_family) > 0:
         # Select the (ad_index+1)-th HYBRID candidate with different families (0-indexed)
         target_rank = ad_index
@@ -2353,30 +2398,8 @@ def find_valid_hybrid_pair(
         search_stats = {
             'evaluated_pairs': evaluated_pairs, 
             'passed_overlap': passed_overlap,
-            'rejected_after_overlap': rejected_after_overlap
-        }
-        return (object_a, object_b, final_hybrid_type, None, search_stats)
-    
-    # Fallback to same_family HYBRID pairs (only if no different-family candidates exist)
-    if len(hybrid_candidates_same_family) > 0:
-        object_a, object_b, hybrid_type, overlap = hybrid_candidates_same_family[0]
-        
-        # Re-evaluate the selected pair to update quota_state correctly
-        quota_state.material_analogy_used = original_quota_dict['material_analogy_used']
-        quota_state.structural_morphology_used = original_quota_dict['structural_morphology_used']
-        quota_state.structural_exception_used = original_quota_dict['structural_exception_used']
-        is_valid, final_hybrid_type, error_msg = evaluate_ab_pair(
-            object_a,
-            object_b,
-            quota_state,
-            similarity_basis="geometric",
-            hybrid_threshold=hybrid_threshold
-        )
-        
-        search_stats = {
-            'evaluated_pairs': evaluated_pairs, 
-            'passed_overlap': passed_overlap,
-            'rejected_after_overlap': rejected_after_overlap
+            'rejected_after_overlap': rejected_after_overlap,
+            'rejected_too_close': rejected_too_close
         }
         return (object_a, object_b, final_hybrid_type, None, search_stats)
     
@@ -2384,7 +2407,8 @@ def find_valid_hybrid_pair(
     search_stats = {
         'evaluated_pairs': evaluated_pairs, 
         'passed_overlap': passed_overlap,
-        'rejected_after_overlap': rejected_after_overlap
+        'rejected_after_overlap': rejected_after_overlap,
+        'rejected_too_close': rejected_too_close
     }
     return (None, None, HybridType.CORE_GEOMETRIC, f"No valid HYBRID pair found (overlap >= {hybrid_threshold} required)", search_stats)
 
@@ -2519,7 +2543,8 @@ def generate_ad(
             
             # Log search statistics
             rejected_after_overlap = search_stats.get('rejected_after_overlap', 0)
-            logger.info(f"HYBRID_SEARCH_STATS threshold={hybrid_threshold} assoc_size={association_size} evaluated_pairs={search_stats['evaluated_pairs']} passed_overlap={search_stats['passed_overlap']} rejected_after_overlap={rejected_after_overlap}")
+            rejected_too_close = search_stats.get('rejected_too_close', 0)
+            logger.info(f"HYBRID_SEARCH_STATS threshold={hybrid_threshold} assoc_size={association_size} evaluated_pairs={search_stats['evaluated_pairs']} passed_overlap={search_stats['passed_overlap']} rejected_after_overlap={rejected_after_overlap} rejected_too_close={rejected_too_close}")
             
             # If valid HYBRID found, use it
             if object_a is not None and object_b is not None:
