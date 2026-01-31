@@ -2186,7 +2186,9 @@ def find_valid_hybrid_pair(
     candidate_pairs: List[Tuple[ObjectCandidate, ObjectCandidate]],
     quota_state: BatchQuotaState,
     ranked_associations: List[ObjectCandidate],
-    ad_index: int = 0
+    ad_index: int = 0,
+    hybrid_threshold: float = 0.70,
+    max_evaluations: int = 700
 ) -> Tuple[Optional[ObjectCandidate], Optional[ObjectCandidate], HybridType, Optional[str], Dict[str, int]]:
     """
     Find a valid HYBRID pair from candidates that passes all rules.
@@ -2203,6 +2205,8 @@ def find_valid_hybrid_pair(
         quota_state: Batch quota state
         ranked_associations: Ranked list of associations for resolution
         ad_index: Index of ad in batch (0, 1, or 2) to select different valid pair
+        hybrid_threshold: Fixed HYBRID overlap threshold (FIDELITY) for this session
+        max_evaluations: Maximum number of pairs to evaluate (hard cap, default 700)
     
     Returns:
         Tuple of (object_a, object_b, hybrid_type, error_message, search_stats):
@@ -2226,6 +2230,10 @@ def find_valid_hybrid_pair(
     passed_overlap = 0
     
     for object_a, object_b in candidate_pairs:
+        # Hard cap: stop after max_evaluations
+        if evaluated_pairs >= max_evaluations:
+            break
+        
         evaluated_pairs += 1
         # Restore quota_state before each evaluation (evaluate_ab_pair modifies it)
         quota_state.material_analogy_used = original_quota_dict['material_analogy_used']
@@ -2241,7 +2249,8 @@ def find_valid_hybrid_pair(
         overlap_percentage = calculate_geometric_overlap(view_a, view_b)
         
         # Only consider pairs with overlap >= HYBRID threshold (SIDE_BY_SIDE is disabled)
-        if overlap_percentage < GEOMETRIC_OVERLAP_THRESHOLD_HYBRID:
+        # Use the fixed threshold (FIDELITY) for this session
+        if overlap_percentage < hybrid_threshold:
             continue  # Skip pairs that don't meet HYBRID threshold
         
         passed_overlap += 1
@@ -2360,132 +2369,92 @@ def generate_ad(
     goal = goals_for_batch[ad_index] if ad_index < len(goals_for_batch) else goals_for_batch[0]
     
     # ========================================================================
-    # HYBRID GUARANTEE SEARCH: Expansion ladder (80 → 120 → 200 → 300 → 400 → 500 → 700 → 1000)
+    # FIXED FIDELITY HYBRID SEARCH: Single threshold, 700 comparison budget
     # ========================================================================
-    # HARD ASSUMPTION: A valid PERFECT HYBRID ALWAYS EXISTS for any product.
-    # Failure to find one means the search space is too small.
+    # FIDELITY = a single constant HYBRID overlap threshold used for the entire session.
+    # The engine will evaluate up to 700 pairs. If no HYBRID is found, it fails.
     # Side-by-side is PERMANENTLY DISABLED.
     # ========================================================================
-    expansion_levels = [80, 120, 200, 300, 400, 500, 700, 1000]
-    object_a = None
-    object_b = None
-    hybrid_type = None
     
-    # Track previous step sizes for sanity checks
-    prev_pool_size = 0
-    prev_top_n = 0
-    total_evaluated_pairs = 0
+    # Read HYBRID threshold (FIDELITY) from environment variable
+    threshold_str = os.environ.get('ACE_HYBRID_THRESHOLD')
+    if threshold_str:
+        try:
+            hybrid_threshold = float(threshold_str)
+        except ValueError:
+            logger.warning(f"Invalid ACE_HYBRID_THRESHOLD value '{threshold_str}', using default 0.70")
+            hybrid_threshold = 0.70
+    else:
+        hybrid_threshold = 0.70  # Default threshold
     
-    for association_size in expansion_levels:
-        # Rebuild associations from scratch for this size
-        try:
-            associations = generate_associations(goal, size=association_size)
-        except ValueError as e:
-            logger.warning(f"HYBRID_NOT_FOUND assoc_count={association_size} error=Failed to generate associations: {str(e)}")
-            continue
-        
-        # Rebuild object pool
-        try:
-            object_pool = build_object_pool(product_name, product_description, goal=goal, association_size=association_size)
-        except ValueError as e:
-            logger.warning(f"HYBRID_NOT_FOUND assoc_count={association_size} error=Failed to build object pool: {str(e)}")
-            if association_size < expansion_levels[-1]:
-                logger.info(f"ASSOCIATION_POOL_EXPANDED to={expansion_levels[expansion_levels.index(association_size) + 1]}")
-            continue
-        
-        # Apply hard sanitation filters (STEP 2.5)
-        try:
-            sanitized_pool = sanitize_candidate_pool(object_pool)
-        except ValueError as e:
-            logger.warning(f"HYBRID_NOT_FOUND assoc_count={association_size} error=Sanitized pool empty: {str(e)}")
-            if association_size < expansion_levels[-1]:
-                logger.info(f"ASSOCIATION_POOL_EXPANDED to={expansion_levels[expansion_levels.index(association_size) + 1]}")
-            continue
-        
-        if len(sanitized_pool) == 0:
-            logger.warning(f"HYBRID_NOT_FOUND assoc_count={association_size} error=No valid candidates after sanitation")
-            if association_size < expansion_levels[-1]:
-                logger.info(f"ASSOCIATION_POOL_EXPANDED to={expansion_levels[expansion_levels.index(association_size) + 1]}")
-            continue
-        
-        # Build ranked object list
-        ranked_objs = build_ranked_object_list(sanitized_pool)
-        
-        # Sanity check: pool_size must increase when assoc_count increases
-        pool_size = len(sanitized_pool)
-        if association_size > expansion_levels[0] and pool_size <= prev_pool_size:
-            error_msg = f"EXPANSION_BROKEN: assoc_count increased from {expansion_levels[expansion_levels.index(association_size) - 1]} to {association_size} but pool_size did not expand (was {prev_pool_size}, now {pool_size})"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-        
-        # Calculate scalable search parameters
-        # top_n scales with assoc_count, capped at 600
-        top_n = min(len(ranked_objs), max(80, association_size), 600)
-        
-        # Sanity check: top_n must increase when assoc_count increases (unless already at cap)
-        if association_size > expansion_levels[0] and top_n <= prev_top_n and top_n < 600:
-            error_msg = f"EXPANSION_BROKEN: assoc_count increased from {expansion_levels[expansion_levels.index(association_size) - 1]} to {association_size} but top_n did not expand (was {prev_top_n}, now {top_n})"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-        
-        # max_pairs scales with assoc_count, capped at 3000
-        max_pairs = min(3000, max(300, association_size * 3))
-        
-        logger.info(f"HYBRID_SEARCH_START assoc_count={association_size} pool_size={pool_size} ranked_size={len(ranked_objs)}")
-        logger.info(f"PAIR_SEARCH_WINDOW assoc_count={association_size} top_n={top_n} max_pairs={max_pairs}")
-        
-        # Generate candidate pairs with scaled parameters
-        candidate_pairs = generate_candidate_pairs(
-            ranked_objs, 
-            max_pairs=max_pairs, 
-            ad_index=ad_index, 
-            session_seed=session_seed,
-            assoc_count=association_size,
-            top_n=top_n
-        )
-        
-        if len(candidate_pairs) == 0:
-            logger.warning(f"HYBRID_NOT_FOUND assoc_count={association_size} error=No candidate pairs generated")
-            if association_size < expansion_levels[-1]:
-                logger.info(f"ASSOCIATION_POOL_EXPANDED to={expansion_levels[expansion_levels.index(association_size) + 1]}")
-            continue
-        
-        # Search for HYBRID only (SIDE_BY_SIDE is permanently disabled)
-        object_a, object_b, hybrid_type, error_msg, search_stats = find_valid_hybrid_pair(
-            candidate_pairs,
-            quota_state,
-            ranked_objs,
-            ad_index=ad_index
-        )
-        
-        total_evaluated_pairs += search_stats['evaluated_pairs']
-        
-        # Log search statistics
-        logger.info(f"HYBRID_SEARCH_STATS assoc_count={association_size} evaluated_pairs={search_stats['evaluated_pairs']} passed_overlap={search_stats['passed_overlap']}")
-        
-        # If valid HYBRID found, stop immediately
-        if object_a is not None and object_b is not None:
-            # Calculate overlap for logging
-            view_a = select_max_projection_view(object_a)
-            view_b = select_max_projection_view(object_b)
-            overlap_percentage = calculate_geometric_overlap(view_a, view_b)
-            logger.info(f"HYBRID_SELECTED assoc_count={association_size} A={object_a.name}(rank={object_a.association_rank},family={object_a.shape_family}) B={object_b.name}(rank={object_b.association_rank},family={object_b.shape_family}) overlap={overlap_percentage:.2f}")
-            break
-        
-        # No HYBRID found at this level, log and continue to next level
-        logger.warning(f"HYBRID_NOT_FOUND assoc_count={association_size}")
-        if association_size < expansion_levels[-1]:
-            logger.info(f"ASSOCIATION_POOL_EXPANDED to={expansion_levels[expansion_levels.index(association_size) + 1]}")
-        
-        # Update previous sizes for next iteration sanity check
-        prev_pool_size = pool_size
-        prev_top_n = top_n
+    logger.info(f"HYBRID_THRESHOLD_FIXED threshold={hybrid_threshold}")
     
-    # Final check: if no HYBRID found even at 1000 associations, this is a CRITICAL ENGINE EVENT
-    if object_a is None or object_b is None:
-        logger.error(f"HYBRID_NOT_FOUND_FINAL assoc_count=1000 evaluated_pairs={total_evaluated_pairs} passed_overlap=0")
-        logger.error("CRITICAL_ENGINE_EVENT: HYBRID not found even after 1000 associations — engine limits reached.")
-        raise ValueError("HYBRID not found even after 1000 associations — engine limits reached.")
+    # Build associations and object pool (use default size 80)
+    association_size = 80
+    try:
+        associations = generate_associations(goal, size=association_size)
+    except ValueError as e:
+        raise ValueError(f"Failed to generate associations: {str(e)}") from e
+    
+    try:
+        object_pool = build_object_pool(product_name, product_description, goal=goal, association_size=association_size)
+    except ValueError as e:
+        raise ValueError(f"Failed to build object pool: {str(e)}") from e
+    
+    # Apply hard sanitation filters (STEP 2.5)
+    try:
+        sanitized_pool = sanitize_candidate_pool(object_pool)
+    except ValueError as e:
+        raise ValueError(f"Sanitized object pool is empty: {str(e)}") from e
+    
+    if len(sanitized_pool) == 0:
+        raise ValueError("No valid object candidates after sanitation")
+    
+    # Build ranked object list
+    ranked_objs = build_ranked_object_list(sanitized_pool)
+    
+    # Generate candidate pairs (enough to allow 700 evaluations)
+    # Use large enough pool to generate many pairs
+    top_n = min(len(ranked_objs), 600)  # Use up to 600 objects for pairing
+    max_pairs = 1000  # Generate enough pairs to allow 700 evaluations
+    
+    candidate_pairs = generate_candidate_pairs(
+        ranked_objs, 
+        max_pairs=max_pairs, 
+        ad_index=ad_index, 
+        session_seed=session_seed,
+        assoc_count=association_size,
+        top_n=top_n
+    )
+    
+    if len(candidate_pairs) == 0:
+        raise ValueError("No candidate pairs generated from object pool")
+    
+    # Search for HYBRID only (SIDE_BY_SIDE is permanently disabled)
+    # Budget: 700 comparisons (hard cap)
+    object_a, object_b, hybrid_type, error_msg, search_stats = find_valid_hybrid_pair(
+        candidate_pairs,
+        quota_state,
+        ranked_objs,
+        ad_index=ad_index,
+        hybrid_threshold=hybrid_threshold,
+        max_evaluations=700
+    )
+    
+    # Log search statistics
+    logger.info(f"HYBRID_SEARCH_STATS threshold={hybrid_threshold} evaluated_pairs={search_stats['evaluated_pairs']} passed_overlap={search_stats['passed_overlap']}")
+    
+    # If valid HYBRID found, use it
+    if object_a is not None and object_b is not None:
+        # Calculate overlap for logging
+        view_a = select_max_projection_view(object_a)
+        view_b = select_max_projection_view(object_b)
+        overlap_percentage = calculate_geometric_overlap(view_a, view_b)
+        logger.info(f"HYBRID_SELECTED threshold={hybrid_threshold} evaluated_pairs={search_stats['evaluated_pairs']} A={object_a.name} B={object_b.name} overlap={overlap_percentage:.2f}")
+    else:
+        # No HYBRID found within budget
+        logger.error(f"HYBRID_NOT_FOUND threshold={hybrid_threshold} evaluated_pairs={search_stats['evaluated_pairs']} passed_overlap={search_stats['passed_overlap']}")
+        raise ValueError(f"No valid PERFECT HYBRID found within 700 comparisons at threshold={hybrid_threshold}. Lower fidelity slightly and retry.")
     
     # ========================================================================
     # STEP 6 & 7: HEADLINE & MARKETING TEXT GENERATION
