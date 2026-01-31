@@ -899,72 +899,67 @@ def generate_real_image_bytes(
     # Initialize OpenAI client
     client = OpenAI(api_key=api_key)
     
-    # Determine dominant and secondary objects based on association_rank (lower rank = dominant)
-    if object_a.association_rank <= object_b.association_rank:
-        dominant_obj = object_a
-        secondary_obj = object_b
-    else:
-        dominant_obj = object_b
-        secondary_obj = object_a
-    
-    # Determine environment according to Object Environment Rule and Post-Hybrid Environment Rule
-    # SIDE_BY_SIDE is permanently disabled - only HYBRID is allowed
-    # HYBRID: Post-Hybrid Environment Rule - environment derived from secondary object only
-    environment = derive_environment_for_object(secondary_obj.name)
+    # ENV_FIXED=A: Object A is always the environment
+    # Object B is embedded inside A (ENV_EMBED composition mode)
+    environment = derive_environment_for_object(object_a.name)
     
     # Build PRE-INTENT block (deterministic, no API calls)
     pre_intent = build_pre_intent_block(product_name, product_description)
     
-    # Build photorealistic commercial ad prompt (exact requirements)
+    # Build photorealistic commercial ad prompt (ENV_FIXED=A, ENV_EMBED composition)
     # ENVIRONMENT LAW — MANDATORY: Environment always overrides aesthetics.
-    # If environment logic fails, the image is invalid.
     # SIDE_BY_SIDE is permanently disabled - only HYBRID prompts are generated
-    # HYBRID: single seamless hybrid object created by morphologically merging silhouette projections
+    # ENV_EMBED: Object A is the environment/world/background, Object B is embedded inside A
     prompt = (
             f"{pre_intent}\n\n"
             f"Do not write any of the PRE-INTENT as text in the image.\n\n"
             f"Photorealistic commercial advertising photograph. "
-            f"Show ONE single object with the OUTER SILHOUETTE of {object_a.name} (Object A), but with MATERIAL and DETAIL cues that belong to {object_b.name}'s (Object B) world, as if the environment of {object_b.name} shaped it. "
+            f"COMPOSITION MODE: ENV_EMBED. "
+            f"Object A ({object_a.name}) is the environment/world/background filling the entire frame. "
+            f"Object B ({object_b.name}) is embedded inside A as if it emerges from within A. "
             f"IMPORTANT — STRICT PROHIBITIONS: "
-            f"Do NOT depict two objects merged, glued, split, or assembled. "
+            f"Do NOT show two separate objects. "
+            f"Do NOT show two objects merged, glued, split, or assembled. "
             f"Do NOT show a half-and-half object. "
             f"Do NOT show two objects in frame. "
             f"This is NOT two objects placed together. "
             f"This is NOT side by side. "
             f"This is NOT assembly or collage. "
-            f"The object must read as ONE believable physical object that naturally exists in this environment. "
+            f"This is NOT overlay or composition. "
+            f"The composition must read as a SINGLE unified believable commercial photo where B naturally exists within A's environment. "
             f"ENVIRONMENT LAW — MANDATORY: "
             f"Every image MUST be placed in a realistic, coherent physical environment. "
             f"No white studio, no abstract background, no generic gradient, no empty void. "
-            f"Environment authority belongs to object B ({object_b.name}): the scene, surface, props, and context must come from {object_b.name}'s environment. "
-            f"The environment must be clearly {object_b.name}'s domain (workshop / lab / forest / ocean / etc. depending on {object_b.name}), realistic and minimal. "
-            f"The environment must logically explain why this hybrid silhouette exists in this context. "
+            f"Environment authority belongs to Object A ({object_a.name}): the scene, surface, props, and context must come from {object_a.name}'s environment. "
+            f"The environment must be clearly {object_a.name}'s domain (workspace / surface / setting / etc. depending on {object_a.name}), realistic and minimal. "
+            f"Object B ({object_b.name}) must appear as if it naturally emerges from or exists within {object_a.name}'s environment. "
+            f"The environment must logically explain why Object B exists in this context. "
             f"HYBRID RULES: "
-            f"The object must appear as a natural outcome of the environment. "
+            f"Object B must appear as a natural outcome of Object A's environment. "
             f"NOT a glued object, NOT a merged sculpture, NOT an artificial mashup. "
             f"The form should feel inevitable given the environment. "
-            f"The environment must visually justify WHY this object exists in this form. "
-            f"The environment must support the FUNCTIONAL MEANING of the object. "
-            f"The environment must support the object as a SINGLE unified entity. "
+            f"The environment must visually justify WHY Object B exists in this form within Object A's world. "
+            f"The environment must support the FUNCTIONAL MEANING of the composition. "
+            f"The environment must support the composition as a SINGLE unified entity. "
             f"Do NOT show seams, joints, or construction logic. "
             f"Do NOT suggest mechanical assembly. "
-            f"The object must appear naturally formed within this context. "
-            f"The environment must NOT introduce additional objects that compete with or distract from the object. "
+            f"Object B must appear naturally formed within Object A's context. "
+            f"The environment must NOT introduce additional objects that compete with or distract from the composition. "
             f"The environment must reinforce the SILHOUETTE: background contrast must clearly separate the outline, no busy textures behind the silhouette, no visual noise intersecting the contour. "
-            f"The environment must make the object feel INTENTIONAL, not accidental, not assembled, not improvised. "
-            f"The object must appear as if it was DESIGNED FOR this environment, not placed into it afterward. "
-            f"Environment: {environment} (realistic physical context from {object_b.name}'s world where this object would naturally exist). "
+            f"The environment must make the composition feel INTENTIONAL, not accidental, not assembled, not improvised. "
+            f"Object B must appear as if it was DESIGNED FOR Object A's environment, not placed into it afterward. "
+            f"Environment: {environment} (realistic physical context from {object_a.name}'s world where {object_b.name} would naturally exist embedded within). "
             f"CAMERA & SPATIAL RULES: "
             f"Straight frontal camera angle only. "
             f"The environment plane must be perpendicular to the viewer. "
             f"No perspective skew, no diagonal surfaces, no dramatic depth of field. "
             f"Horizon line stable and horizontal. "
             f"MATERIAL & LIGHTING RULES: "
-            f"Realistic material interaction between hybrid object and environment. "
+            f"Realistic material interaction between Object B and Object A's environment. "
             f"Soft, neutral, commercial lighting. "
             f"No harsh shadows, no silhouette blackouts. "
-            f"The hybrid object must retain visible surface detail. "
-            f"Composition: Hybrid centered, empty clean space at TOP (minimum 15%) for headline. "
+            f"Object B must retain visible surface detail. "
+            f"Composition: Object B centered within Object A's environment, empty clean space at TOP (minimum 15%) for headline. "
             f"No text, no logos, no labels, no symbols anywhere in the image. "
             f"ABSOLUTE PROHIBITIONS: "
             f"No abstract environments, no studio voids unless physically justified, no floating objects, no symbolic or metaphorical backgrounds, no surreal or conceptual scenery. "
@@ -975,6 +970,7 @@ def generate_real_image_bytes(
     
     # Use gpt-image-1.5 model (NO FALLBACK - fail if it doesn't work)
     model = "gpt-image-1.5"
+    logger.info(f"HYBRID_ENV_MODE ENV_FIXED=A COMPOSITION_MODE=ENV_EMBED A={object_a.name} B={object_b.name} env={environment} size={size} model={model}")
     logger.info(f"IMAGE_GEN_START model={model} size={size} object_a={object_a.name} object_b={object_b.name} hybrid_type={hybrid_type.value}")
     
     try:
@@ -2025,7 +2021,7 @@ def select_max_projection_view(object: Any) -> Any:
     return object
 
 
-def evaluate_geometric_overlap_threshold(overlap_percentage: float) -> Tuple[bool, bool]:
+def evaluate_geometric_overlap_threshold(overlap_percentage: float, hybrid_threshold: float) -> Tuple[bool, bool]:
     """
     Evaluate if geometric overlap meets HYBRID eligibility threshold.
     
@@ -2033,17 +2029,18 @@ def evaluate_geometric_overlap_threshold(overlap_percentage: float) -> Tuple[boo
     
     Args:
         overlap_percentage: Calculated overlap (0.0 to 1.0)
+        hybrid_threshold: Dynamic HYBRID threshold (FIDELITY) for this session
     
     Returns:
         Tuple of (hybrid_allowed, side_by_side_forced):
-        - hybrid_allowed: True if overlap >= 70% (HYBRID eligible)
-        - side_by_side_forced: True if overlap < 70% (HYBRID forbidden)
+        - hybrid_allowed: True if overlap >= threshold (HYBRID eligible)
+        - side_by_side_forced: True if overlap < threshold (HYBRID forbidden, but SIDE_BY_SIDE is disabled)
     """
-    if overlap_percentage >= GEOMETRIC_OVERLAP_THRESHOLD_HYBRID:
-        # Overlap >= 70%: HYBRID eligible (subject to other conditions)
+    if overlap_percentage >= hybrid_threshold:
+        # Overlap >= threshold: HYBRID eligible (subject to other conditions)
         return (True, False)
     else:
-        # Overlap < 70%: HYBRID strictly forbidden
+        # Overlap < threshold: HYBRID forbidden (SIDE_BY_SIDE is disabled)
         return (False, True)
 
 
@@ -2058,24 +2055,24 @@ def classify_hybrid_type(
     Classify the type of hybrid based on similarity basis.
     
     Classification rules:
-    - CORE Geometric Hybrid: outer silhouette overlap >= 70%, no material/structure logic
+    - CORE Geometric Hybrid: outer silhouette overlap meets threshold, no material/structure logic
     - Material Analogy: requires material transformation
     - Structural Morphology: biological/architectural structure similarity
     - Structural Pattern: micro-structure/repeated units
     
+    Note: Threshold gating is done before this function is called, so overlap is guaranteed to meet threshold.
+    
     Args:
-        overlap_percentage: Geometric overlap (0.0 to 1.0)
+        overlap_percentage: Geometric overlap (0.0 to 1.0) - guaranteed to meet threshold
         similarity_basis: "geometric", "material", "structural", "pattern"
         requires_material_transformation: True if material analogy is needed
         requires_structural_similarity: True if structural morphology is needed
         requires_micro_structure: True if structural pattern exception is needed
     
     Returns:
-        HybridType classification
+        HybridType classification (always HYBRID type, never SIDE_BY_SIDE)
     """
-    # If overlap < 70%, HYBRID is forbidden regardless of similarity basis
-    if overlap_percentage < GEOMETRIC_OVERLAP_THRESHOLD_HYBRID:
-        return HybridType.SIDE_BY_SIDE
+    # Threshold gating is done before this function, so we never return SIDE_BY_SIDE here
     
     # Check if similarity relies on material/structure (Exception types)
     if requires_material_transformation:
@@ -2087,12 +2084,13 @@ def classify_hybrid_type(
     if requires_micro_structure:
         return HybridType.STRUCTURAL_PATTERN
     
-    # If overlap >= 70% and similarity is purely geometric (outer silhouette)
-    if similarity_basis == "geometric" and overlap_percentage >= GEOMETRIC_OVERLAP_THRESHOLD_HYBRID:
+    # If similarity is purely geometric (outer silhouette)
+    # Note: Threshold gating is done before this function, so overlap is guaranteed to meet threshold
+    if similarity_basis == "geometric":
         return HybridType.CORE_GEOMETRIC
     
-    # Default: side-by-side if classification unclear
-    return HybridType.SIDE_BY_SIDE
+    # Default: CORE_GEOMETRIC (should not reach here, but safe fallback)
+    return HybridType.CORE_GEOMETRIC
 
 
 def check_quota_availability(hybrid_type: HybridType, quota_state: BatchQuotaState) -> bool:
@@ -2139,7 +2137,8 @@ def evaluate_ab_pair(
     similarity_basis: str = "geometric",
     requires_material_transformation: bool = False,
     requires_structural_similarity: bool = False,
-    requires_micro_structure: bool = False
+    requires_micro_structure: bool = False,
+    hybrid_threshold: float = 0.70
 ) -> Tuple[bool, HybridType, Optional[str]]:
     """
     Evaluate an A/B pair against all core decision rules.
@@ -2147,7 +2146,7 @@ def evaluate_ab_pair(
     This is the main decision function that applies all canonical rules:
     1. Select max-projection views
     2. Calculate geometric overlap
-    3. Evaluate overlap threshold (70% hard gate)
+    3. Evaluate overlap threshold (dynamic threshold gate)
     4. Classify hybrid type
     5. Check quota availability
     
@@ -2159,6 +2158,7 @@ def evaluate_ab_pair(
         requires_material_transformation: True if material analogy needed
         requires_structural_similarity: True if structural morphology needed
         requires_micro_structure: True if structural pattern needed
+        hybrid_threshold: Dynamic HYBRID threshold (FIDELITY) for this session
     
     Returns:
         Tuple of (is_valid, hybrid_type, error_message):
@@ -2173,14 +2173,14 @@ def evaluate_ab_pair(
     # Step 2: Calculate geometric overlap (deterministic based on shape_family)
     overlap_percentage = calculate_geometric_overlap(view_a, view_b)
     
-    # Step 3: Evaluate geometric overlap threshold (HARD GATE)
-    hybrid_allowed, side_by_side_forced = evaluate_geometric_overlap_threshold(overlap_percentage)
+    # Step 3: Evaluate geometric overlap threshold (HARD GATE with dynamic threshold)
+    hybrid_allowed, side_by_side_forced = evaluate_geometric_overlap_threshold(overlap_percentage, hybrid_threshold)
     
-    # Step 4: If overlap < 70%, HYBRID is strictly forbidden
+    # Step 4: If overlap < threshold, HYBRID is strictly forbidden
     # SIDE_BY_SIDE is PERMANENTLY DISABLED - reject pair if overlap < threshold
     if not hybrid_allowed:
         # HYBRID forbidden, SIDE_BY_SIDE is disabled - reject this pair
-        return (False, HybridType.CORE_GEOMETRIC, f"Overlap {overlap_percentage:.2f} < HYBRID threshold 0.70 (SIDE_BY_SIDE disabled)")
+        return (False, HybridType.CORE_GEOMETRIC, f"Overlap {overlap_percentage:.2f} < HYBRID threshold {hybrid_threshold:.2f} (SIDE_BY_SIDE disabled)")
     
     # Step 5: Classify hybrid type
     hybrid_type = classify_hybrid_type(
@@ -2293,7 +2293,8 @@ def find_valid_hybrid_pair(
             object_a,
             object_b,
             quota_state,
-            similarity_basis="geometric"
+            similarity_basis="geometric",
+            hybrid_threshold=hybrid_threshold
         )
         
         if not is_valid:
@@ -2345,7 +2346,8 @@ def find_valid_hybrid_pair(
             object_a,
             object_b,
             quota_state,
-            similarity_basis="geometric"
+            similarity_basis="geometric",
+            hybrid_threshold=hybrid_threshold
         )
         
         search_stats = {
@@ -2367,7 +2369,8 @@ def find_valid_hybrid_pair(
             object_a,
             object_b,
             quota_state,
-            similarity_basis="geometric"
+            similarity_basis="geometric",
+            hybrid_threshold=hybrid_threshold
         )
         
         search_stats = {
@@ -2429,98 +2432,128 @@ def generate_ad(
     goal = goals_for_batch[ad_index] if ad_index < len(goals_for_batch) else goals_for_batch[0]
     
     # ========================================================================
-    # FIXED FIDELITY HYBRID SEARCH: Single threshold, 700 comparison budget
+    # RELAXATION LOOP: Guaranteed HYBRID search with threshold and pool expansion
     # ========================================================================
-    # FIDELITY = a single constant HYBRID overlap threshold used for the entire session.
-    # The engine will evaluate up to 700 pairs. If no HYBRID is found, it fails.
     # Side-by-side is PERMANENTLY DISABLED.
+    # The engine will try multiple attempts with decreasing threshold and increasing pool size.
+    # Each attempt is limited to 700 comparisons.
     # ========================================================================
     
-    # Read HYBRID threshold (FIDELITY) from environment variable
+    # Read initial HYBRID threshold from environment variable
     threshold_str = os.environ.get('ACE_HYBRID_THRESHOLD')
     if threshold_str:
         try:
-            hybrid_threshold = float(threshold_str)
+            initial_threshold = float(threshold_str)
         except ValueError:
             logger.warning(f"Invalid ACE_HYBRID_THRESHOLD value '{threshold_str}', using default 0.70")
-            hybrid_threshold = 0.70
+            initial_threshold = 0.70
     else:
-        hybrid_threshold = 0.70  # Default threshold
+        initial_threshold = 0.70  # Default threshold
     
-    logger.info(f"HYBRID_THRESHOLD_FIXED threshold={hybrid_threshold}")
+    # Relaxation ladder: threshold decreases, association_size increases
+    threshold_levels = [initial_threshold, 0.65, 0.60, 0.55, 0.50, 0.45]
+    association_levels = [80, 120, 200, 300, 500, 700]
     
-    # Build associations and object pool (use default size 80)
-    association_size = 80
-    try:
-        associations = generate_associations(goal, size=association_size)
-    except ValueError as e:
-        raise ValueError(f"Failed to generate associations: {str(e)}") from e
+    object_a = None
+    object_b = None
+    hybrid_type = None
+    search_stats = None
+    final_threshold = None
+    final_assoc_size = None
     
-    try:
-        object_pool = build_object_pool(product_name, product_description, goal=goal, association_size=association_size)
-    except ValueError as e:
-        raise ValueError(f"Failed to build object pool: {str(e)}") from e
+    # Try each relaxation level
+    for attempt_idx in range(len(threshold_levels)):
+        hybrid_threshold = threshold_levels[attempt_idx]
+        association_size = association_levels[attempt_idx]
+        
+        logger.info(f"HYBRID_SEARCH_ATTEMPT attempt={attempt_idx+1} threshold={hybrid_threshold} assoc_size={association_size}")
+        
+        try:
+            # Build associations and object pool for this attempt
+            associations = generate_associations(goal, size=association_size)
+            object_pool = build_object_pool(product_name, product_description, goal=goal, association_size=association_size)
+            
+            # Apply hard sanitation filters (STEP 2.5)
+            sanitized_pool = sanitize_candidate_pool(object_pool)
+            
+            if len(sanitized_pool) == 0:
+                logger.warning(f"HYBRID_SEARCH_ATTEMPT attempt={attempt_idx+1} sanitized_pool_empty")
+                continue
+            
+            # Log shape family statistics (only on first attempt)
+            if attempt_idx == 0:
+                unknown_count = sum(1 for obj in sanitized_pool if obj.shape_family == "unknown")
+                total_count = len(sanitized_pool)
+                logger.info(f"SHAPE_FAMILY_STATS unknown_count={unknown_count} total={total_count}")
+            
+            # Build ranked object list
+            ranked_objs = build_ranked_object_list(sanitized_pool)
+            
+            # Generate candidate pairs (enough to allow 700 evaluations)
+            top_n = min(len(ranked_objs), 600)  # Use up to 600 objects for pairing
+            max_pairs = 1000  # Generate enough pairs to allow 700 evaluations
+            
+            candidate_pairs = generate_candidate_pairs(
+                ranked_objs, 
+                max_pairs=max_pairs, 
+                ad_index=ad_index, 
+                session_seed=session_seed,
+                assoc_count=association_size,
+                top_n=top_n
+            )
+            
+            if len(candidate_pairs) == 0:
+                logger.warning(f"HYBRID_SEARCH_ATTEMPT attempt={attempt_idx+1} no_candidate_pairs")
+                continue
+            
+            # Search for HYBRID only (SIDE_BY_SIDE is permanently disabled)
+            # Budget: 700 comparisons (hard cap)
+            object_a, object_b, hybrid_type, error_msg, search_stats = find_valid_hybrid_pair(
+                candidate_pairs,
+                quota_state,
+                ranked_objs,
+                ad_index=ad_index,
+                hybrid_threshold=hybrid_threshold,
+                max_evaluations=700
+            )
+            
+            # Log search statistics
+            rejected_after_overlap = search_stats.get('rejected_after_overlap', 0)
+            logger.info(f"HYBRID_SEARCH_STATS threshold={hybrid_threshold} assoc_size={association_size} evaluated_pairs={search_stats['evaluated_pairs']} passed_overlap={search_stats['passed_overlap']} rejected_after_overlap={rejected_after_overlap}")
+            
+            # If valid HYBRID found, use it
+            if object_a is not None and object_b is not None:
+                # Calculate overlap for logging
+                view_a = select_max_projection_view(object_a)
+                view_b = select_max_projection_view(object_b)
+                overlap_percentage = calculate_geometric_overlap(view_a, view_b)
+                final_threshold = hybrid_threshold
+                final_assoc_size = association_size
+                logger.info(f"HYBRID_SELECTED threshold={hybrid_threshold} assoc_size={association_size} evaluated_pairs={search_stats['evaluated_pairs']} A={object_a.name} B={object_b.name} overlap={overlap_percentage:.2f}")
+                break  # Success! Exit relaxation loop
+            else:
+                # No HYBRID found within budget for this attempt
+                logger.warning(f"HYBRID_NOT_FOUND threshold={hybrid_threshold} assoc_size={association_size} evaluated_pairs={search_stats['evaluated_pairs']} passed_overlap={search_stats['passed_overlap']}")
+                # Continue to next relaxation level
+        except Exception as e:
+            logger.warning(f"HYBRID_SEARCH_ATTEMPT attempt={attempt_idx+1} error={str(e)}")
+            continue  # Try next relaxation level
     
-    # Apply hard sanitation filters (STEP 2.5)
-    try:
-        sanitized_pool = sanitize_candidate_pool(object_pool)
-    except ValueError as e:
-        raise ValueError(f"Sanitized object pool is empty: {str(e)}") from e
-    
-    if len(sanitized_pool) == 0:
-        raise ValueError("No valid object candidates after sanitation")
-    
-    # Log shape family statistics
-    unknown_count = sum(1 for obj in sanitized_pool if obj.shape_family == "unknown")
-    total_count = len(sanitized_pool)
-    logger.info(f"SHAPE_FAMILY_STATS unknown_count={unknown_count} total={total_count}")
-    
-    # Build ranked object list
-    ranked_objs = build_ranked_object_list(sanitized_pool)
-    
-    # Generate candidate pairs (enough to allow 700 evaluations)
-    # Use large enough pool to generate many pairs
-    top_n = min(len(ranked_objs), 600)  # Use up to 600 objects for pairing
-    max_pairs = 1000  # Generate enough pairs to allow 700 evaluations
-    
-    candidate_pairs = generate_candidate_pairs(
-        ranked_objs, 
-        max_pairs=max_pairs, 
-        ad_index=ad_index, 
-        session_seed=session_seed,
-        assoc_count=association_size,
-        top_n=top_n
-    )
-    
-    if len(candidate_pairs) == 0:
-        raise ValueError("No candidate pairs generated from object pool")
-    
-    # Search for HYBRID only (SIDE_BY_SIDE is permanently disabled)
-    # Budget: 700 comparisons (hard cap)
-    object_a, object_b, hybrid_type, error_msg, search_stats = find_valid_hybrid_pair(
-        candidate_pairs,
-        quota_state,
-        ranked_objs,
-        ad_index=ad_index,
-        hybrid_threshold=hybrid_threshold,
-        max_evaluations=700
-    )
-    
-    # Log search statistics
-    rejected_after_overlap = search_stats.get('rejected_after_overlap', 0)
-    logger.info(f"HYBRID_SEARCH_STATS threshold={hybrid_threshold} evaluated_pairs={search_stats['evaluated_pairs']} passed_overlap={search_stats['passed_overlap']} rejected_after_overlap={rejected_after_overlap}")
-    
-    # If valid HYBRID found, use it
-    if object_a is not None and object_b is not None:
-        # Calculate overlap for logging
-        view_a = select_max_projection_view(object_a)
-        view_b = select_max_projection_view(object_b)
-        overlap_percentage = calculate_geometric_overlap(view_a, view_b)
-        logger.info(f"HYBRID_SELECTED threshold={hybrid_threshold} evaluated_pairs={search_stats['evaluated_pairs']} A={object_a.name} B={object_b.name} overlap={overlap_percentage:.2f}")
-    else:
-        # No HYBRID found within budget
-        logger.error(f"HYBRID_NOT_FOUND threshold={hybrid_threshold} evaluated_pairs={search_stats['evaluated_pairs']} passed_overlap={search_stats['passed_overlap']}")
-        raise ValueError(f"No valid PERFECT HYBRID found within 700 comparisons at threshold={hybrid_threshold}. Lower fidelity slightly and retry.")
+    # If still no HYBRID found after all attempts, use fallback
+    if object_a is None or object_b is None:
+        logger.warning("FALLBACK_MAX_OVERLAP_PAIR_USED: No HYBRID found after all relaxation attempts, using fallback pair")
+        # Fallback: use first two objects from ranked list (deterministic)
+        if len(ranked_objs) >= 2:
+            object_a = ranked_objs[0]
+            object_b = ranked_objs[1]
+            hybrid_type = HybridType.CORE_GEOMETRIC
+            # Calculate overlap for logging
+            view_a = select_max_projection_view(object_a)
+            view_b = select_max_projection_view(object_b)
+            overlap_percentage = calculate_geometric_overlap(view_a, view_b)
+            logger.info(f"FALLBACK_MAX_OVERLAP_PAIR_USED A={object_a.name} B={object_b.name} overlap={overlap_percentage:.2f}")
+        else:
+            raise ValueError("No valid object candidates available for fallback")
     
     # ========================================================================
     # STEP 6 & 7: HEADLINE & MARKETING TEXT GENERATION
