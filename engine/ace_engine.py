@@ -733,7 +733,7 @@ def generate_headline(product_name: str, goal: str, ad_index: int = 0) -> str:
 # STEP 8: REAL IMAGE GENERATION (OpenAI GPT Image)
 # ============================================================================
 # Generate real photorealistic ad images via OpenAI Images API.
-# Headline is added via PIL overlay after image generation.
+# Headline is integrated directly into the image by the image model.
 # ============================================================================
 
 def derive_environment_for_object(obj_name: str) -> str:
@@ -873,10 +873,12 @@ def generate_real_image_bytes(
     object_a: ObjectCandidate,
     object_b: ObjectCandidate,
     hybrid_type: HybridType,
-    goal: str
+    goal: str,
+    headline: str
 ) -> bytes:
     """
     Generate real photorealistic ad image via OpenAI Images API.
+    The headline is integrated directly into the image by the image model.
     
     Args:
         product_name: Name of the product
@@ -886,6 +888,7 @@ def generate_real_image_bytes(
         object_b: ObjectCandidate for object B
         hybrid_type: HybridType (CORE_GEOMETRIC or SIDE_BY_SIDE)
         goal: Advertising goal (hidden, for context)
+        headline: The advertisement headline to be integrated into the image
     
     Returns:
         bytes: JPEG image data
@@ -975,8 +978,36 @@ def generate_real_image_bytes(
             f"Soft, neutral, commercial lighting. "
             f"No harsh shadows, no silhouette blackouts. "
             f"Object B must retain visible surface detail. "
-            f"Composition: Object B centered within Object A's environment, empty clean space at TOP (minimum 15%) for headline. "
-            f"No text, no logos, no labels, no symbols anywhere in the image. "
+            f"INTEGRATED HEADLINE — IMAGE GENERATION LAW (MANDATORY): "
+            f"The advertisement headline is a VISUAL OBJECT that must be generated INSIDE the image by the image model. "
+            f"There is NO external headline rendering. The headline is part of the photographic composition. "
+            f"It is NOT an overlay, caption, UI element, or subtitle. The image and headline are born together. "
+            f"If the headline can be removed without breaking the image — the generation failed. "
+            f"HEADLINE VISUAL REQUIREMENTS (MANDATORY): "
+            f"The headline MUST be LARGE and visually dominant, immediately readable on mobile without zoom, "
+            f"comparable in visual weight to Object B. Use clean, bold, sans-serif typography. "
+            f"Be sharp, high-contrast, and well-lit. Look physically present in the scene. "
+            f"The headline must feel printed, painted, etched, engraved, cast, or otherwise physically integrated. "
+            f"STRICT PROHIBITIONS: "
+            f"The model MUST NOT place the headline as a floating overlay, in a corner like a caption, "
+            f"use small or thin text, use decorative or handwritten fonts, use stylized 'AI typography', "
+            f"warp or distort the text, crop or partially hide letters, or add extra text beyond the headline. "
+            f"ONE headline only. No subtitles. No slogans. "
+            f"COMPOSITION RULES: "
+            f"The headline must coexist naturally with Object B. It must respect perspective, lighting, and depth. "
+            f"It must NOT block or obscure the main object. It must NOT compete visually with Object A's environment. "
+            f"It must feel inevitable within the scene. Examples of acceptable integration: "
+            f"text carved into material, text printed on a physical surface, text emerging from the environment, "
+            f"text existing as a real object within the space. "
+            f"LANGUAGE & CONTENT: "
+            f"Language: English only. Text must be EXACTLY the provided headline string: '{headline}'. "
+            f"No paraphrasing, no creative reinterpretation of the words, no spelling changes. "
+            f"FAILURE CONDITION: "
+            f"If the result looks like an image with text on top, a poster with a caption, a UI mockup, "
+            f"a watermark, or a thumbnail-style title — then the generation FAILED and must be retried. "
+            f"SUCCESS CONDITION: "
+            f"The final result must look like a real advertising photograph where the headline "
+            f"could not exist anywhere else except inside this image. "
             f"ABSOLUTE PROHIBITIONS: "
             f"No abstract environments, no studio voids unless physically justified, no floating objects, no symbolic or metaphorical backgrounds, no surreal or conceptual scenery. "
             f"Style: Professional product photography, real materials, real textures. "
@@ -1057,7 +1088,7 @@ def draw_silhouette_placeholder(
     Rules:
     - SIDE_BY_SIDE: Two separate shapes (left/right) with clear gap
     - HYBRID: One merged shape (center) or significant overlap
-    - Shapes drawn in center area, avoiding headline zone
+    - Shapes drawn in center area
     - No text labels or metadata on image
     
     Args:
@@ -2922,7 +2953,7 @@ def generate_ad(
     marketing_text = generate_marketing_text(product_name, product_description, goal, ad_index)
     
     # ========================================================================
-    # STEP 8: REAL IMAGE GENERATION (OpenAI GPT Image + Headline Overlay)
+    # STEP 8: REAL IMAGE GENERATION (OpenAI GPT Image with Integrated Headline)
     # ========================================================================
     # Parse size
     try:
@@ -2945,7 +2976,8 @@ def generate_ad(
             object_a,
             object_b,
             hybrid_type,
-            goal
+            goal,
+            headline
         )
     except ValueError as e:
         # Re-raise ValueError with clear message (NO PLACEHOLDER FALLBACK)
@@ -2956,86 +2988,23 @@ def generate_ad(
         logger.error(f"IMAGE_GEN_FAIL in generate_ad: {str(e)}")
         raise ValueError(f"Image generation failed: {str(e)}") from e
     
-    # Open image with PIL (from real OpenAI image, NOT placeholder)
+    # Open image with PIL to convert to JPEG format if needed
+    # Headline is already integrated into the image by the image model
     try:
         img = Image.open(io.BytesIO(image_bytes))
         # Convert to RGB if needed (handles PNG/WebP from OpenAI)
         if img.mode != 'RGB':
             img = img.convert('RGB')
         logger.info(f"IMAGE_OPENED size={img.size} mode={img.mode} bytes={len(image_bytes)}")
+        
+        # Convert to JPEG bytes
+        jpeg_buffer = io.BytesIO()
+        img.save(jpeg_buffer, format='JPEG', quality=95)
+        image_bytes_jpg = jpeg_buffer.getvalue()
+        jpeg_buffer.close()
     except Exception as e:
         logger.error(f"IMAGE_OPEN_FAIL error={str(e)}")
-        raise ValueError(f"Failed to open generated image: {str(e)}") from e
-    
-    # Get image dimensions
-    img_width, img_height = img.size
-    
-    # Create drawing context
-    draw = ImageDraw.Draw(img)
-    
-    # Safe margins
-    margin_x = int(img_width * 0.06)
-    margin_y = int(img_height * 0.04)
-    
-    # Try to load a font, fallback to default
-    # Start with large font size, will be reduced if needed
-    font_size = 72
-    font_large = None
-    try:
-        # Try common font paths
-        font_large = ImageFont.truetype("arial.ttf", font_size)
-    except (OSError, IOError):
-        try:
-            font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
-        except (OSError, IOError):
-            # Fallback to default font
-            font_large = ImageFont.load_default()
-    
-    # Measure text width and adjust font size if needed
-    max_text_width = img_width - 2 * margin_x
-    min_font_size = 18
-    
-    while True:
-        headline_bbox = draw.textbbox((0, 0), headline, font=font_large)
-        text_width = headline_bbox[2] - headline_bbox[0]
-        
-        if text_width <= max_text_width or font_size <= min_font_size:
-            break
-        
-        # Reduce font size
-        font_size = max(min_font_size, font_size - 4)
-        try:
-            font_large = ImageFont.truetype("arial.ttf", font_size)
-        except (OSError, IOError):
-            try:
-                font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
-            except (OSError, IOError):
-                # If font loading fails, use default and break
-                font_large = ImageFont.load_default()
-                break
-    
-    # Re-measure with final font size
-    headline_bbox = draw.textbbox((0, 0), headline, font=font_large)
-    text_width = headline_bbox[2] - headline_bbox[0]
-    
-    # Position headline with safe margins (clamp to avoid cutting)
-    headline_x = (img_width - text_width) // 2
-    headline_x = max(margin_x, min(headline_x, img_width - margin_x - text_width))
-    headline_y = margin_y
-    
-    # Draw headline with white outline for visibility
-    # Draw outline first (thicker)
-    for adj in range(-2, 3):
-        for adj2 in range(-2, 3):
-            draw.text((headline_x + adj, headline_y + adj2), headline, fill='white', font=font_large)
-    # Then draw main text
-    draw.text((headline_x, headline_y), headline, fill='black', font=font_large)
-    
-    # Convert to JPEG bytes
-    jpeg_buffer = io.BytesIO()
-    img.save(jpeg_buffer, format='JPEG', quality=95)
-    image_bytes_jpg = jpeg_buffer.getvalue()
-    jpeg_buffer.close()
+        raise ValueError(f"Failed to process generated image: {str(e)}") from e
     
     # Return result with updated batch state
     return {
