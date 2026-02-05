@@ -2776,10 +2776,10 @@ def find_valid_hybrid_pair(
 
 def check_silhouette_similarity(object_a: ObjectCandidate, object_b: ObjectCandidate) -> bool:
     """
-    SILHOUETTE SIMILARITY LAW (PRE-GENERATION — MANDATORY)
+    SILHOUETTE SIMILARITY LAW (SELECTION GATE)
     
-    This law MUST be enforced before any image generation.
-    If it is not satisfied, generation must NOT proceed.
+    This law influences pair selection by rejecting pairs that don't share
+    recognizable silhouette similarity. It defers generation but never blocks it.
     
     CORE RULE:
     Object A and Object B must share a clearly recognizable outer silhouette.
@@ -2793,10 +2793,11 @@ def check_silhouette_similarity(object_a: ObjectCandidate, object_b: ObjectCandi
         object_b: ObjectCandidate for object B
     
     Returns:
-        True if objects share recognizable silhouette similarity, False otherwise
+        True if objects share recognizable silhouette similarity, False otherwise.
+        Returns False on any error (API failure, etc.) to allow fallback behavior.
     
     Raises:
-        ValueError: If silhouette similarity check fails (prevents generation)
+        ValueError: Only if OPENAI_API_KEY is missing (system configuration error)
     """
     # Get OpenAI API key from environment
     api_key = os.environ.get('OPENAI_API_KEY')
@@ -2939,11 +2940,14 @@ def generate_ad(
     goal = goals_for_batch[ad_index] if ad_index < len(goals_for_batch) else goals_for_batch[0]
     
     # ========================================================================
-    # RELAXATION LOOP: Guaranteed HYBRID search with threshold and pool expansion
+    # 3-TIER RETRY LADDER WITH SILHOUETTE SIMILARITY LAW
     # ========================================================================
-    # Side-by-side is PERMANENTLY DISABLED.
-    # The engine will try multiple attempts with decreasing threshold and increasing pool size.
-    # Each attempt is limited to 700 comparisons.
+    # Silhouette Law is a SELECTION GATE that defers image generation,
+    # NOT a hard failure that aborts the request.
+    # 
+    # Tier 1: Strict silhouette rule, up to 700 evaluations per attempt
+    # Tier 2: Expand search space (increase association_size to 200 or 300)
+    # Tier 3: Controlled relaxation (lower hybrid_threshold slightly, e.g. 0.70 → 0.66)
     # ========================================================================
     
     # Read initial HYBRID threshold from environment variable
@@ -2957,138 +2961,179 @@ def generate_ad(
     else:
         initial_threshold = 0.70  # Default threshold
     
-    # Relaxation ladder: threshold decreases, association_size increases
-    threshold_levels = [initial_threshold, 0.65, 0.60, 0.55, 0.50, 0.45]
-    association_levels = [80, 120, 200, 300, 500, 700]
-    
     object_a = None
     object_b = None
     hybrid_type = None
     search_stats = None
     final_threshold = None
     final_assoc_size = None
+    tier_used = 1  # Track which tier succeeded
     
-    # Try each relaxation level
-    for attempt_idx in range(len(threshold_levels)):
-        hybrid_threshold = threshold_levels[attempt_idx]
-        association_size = association_levels[attempt_idx]
-        
-        logger.info(f"HYBRID_SEARCH_ATTEMPT attempt={attempt_idx+1} threshold={hybrid_threshold} assoc_size={association_size}")
-        
-        try:
-            # Build associations and object pool for this attempt
-            associations = generate_associations(goal, size=association_size)
-            object_pool = build_object_pool(product_name, product_description, goal=goal, association_size=association_size)
+    # Helper function to search for valid pair with silhouette check
+    def search_with_silhouette_check(threshold_levels, association_levels, tier_num):
+        """Search for valid pair with silhouette check, return (object_a, object_b, hybrid_type, search_stats, threshold, assoc_size) or (None, None, None, None, None, None)"""
+        for attempt_idx in range(len(threshold_levels)):
+            hybrid_threshold = threshold_levels[attempt_idx]
+            association_size = association_levels[attempt_idx]
             
-            # Apply hard sanitation filters (STEP 2.5)
+            logger.info(f"HYBRID_SEARCH_ATTEMPT tier={tier_num} attempt={attempt_idx+1} threshold={hybrid_threshold} assoc_size={association_size}")
+            
+            try:
+                # Build associations and object pool for this attempt
+                associations = generate_associations(goal, size=association_size)
+                object_pool = build_object_pool(product_name, product_description, goal=goal, association_size=association_size)
+                
+                # Apply hard sanitation filters (STEP 2.5)
+                sanitized_pool = sanitize_candidate_pool(object_pool)
+                
+                if len(sanitized_pool) == 0:
+                    logger.warning(f"HYBRID_SEARCH_ATTEMPT tier={tier_num} attempt={attempt_idx+1} sanitized_pool_empty")
+                    continue
+                
+                # Log shape family statistics (only on first attempt of tier 1)
+                if tier_num == 1 and attempt_idx == 0:
+                    unknown_count = sum(1 for obj in sanitized_pool if obj.shape_family == "unknown")
+                    total_count = len(sanitized_pool)
+                    logger.info(f"SHAPE_FAMILY_STATS unknown_count={unknown_count} total={total_count}")
+                
+                # Build ranked object list
+                ranked_objs = build_ranked_object_list(sanitized_pool)
+                
+                # Generate candidate pairs (enough to allow 700 evaluations)
+                top_n = min(len(ranked_objs), 600)  # Use up to 600 objects for pairing
+                max_pairs = 1000  # Generate enough pairs to allow 700 evaluations
+                
+                candidate_pairs = generate_candidate_pairs(
+                    ranked_objs, 
+                    max_pairs=max_pairs, 
+                    ad_index=ad_index, 
+                    session_seed=session_seed,
+                    assoc_count=association_size,
+                    top_n=top_n
+                )
+                
+                if len(candidate_pairs) == 0:
+                    logger.warning(f"HYBRID_SEARCH_ATTEMPT tier={tier_num} attempt={attempt_idx+1} no_candidate_pairs")
+                    continue
+                
+                # Search for HYBRID only (SIDE_BY_SIDE is permanently disabled)
+                # Budget: 700 comparisons (hard cap)
+                candidate_a, candidate_b, candidate_hybrid_type, error_msg, candidate_stats = find_valid_hybrid_pair(
+                    candidate_pairs,
+                    quota_state,
+                    ranked_objs,
+                    ad_index=ad_index,
+                    hybrid_threshold=hybrid_threshold,
+                    max_evaluations=700
+                )
+                
+                # Log search statistics
+                rejected_after_overlap = candidate_stats.get('rejected_after_overlap', 0)
+                rejected_too_close = candidate_stats.get('rejected_too_close', 0)
+                rejected_same_association = candidate_stats.get('rejected_same_association', 0)
+                rejected_conceptual_neighbors = candidate_stats.get('rejected_conceptual_neighbors', 0)
+                logger.info(f"HYBRID_SEARCH_STATS tier={tier_num} threshold={hybrid_threshold} assoc_size={association_size} evaluated_pairs={candidate_stats['evaluated_pairs']} passed_overlap={candidate_stats['passed_overlap']} rejected_after_overlap={rejected_after_overlap} rejected_too_close={rejected_too_close} rejected_same_association={rejected_same_association} rejected_conceptual_neighbors={rejected_conceptual_neighbors}")
+                
+                # If valid HYBRID found, check silhouette similarity
+                if candidate_a is not None and candidate_b is not None:
+                    # ========================================================================
+                    # SILHOUETTE SIMILARITY LAW (SELECTION GATE)
+                    # ========================================================================
+                    # This law influences selection by rejecting pairs that don't share
+                    # recognizable silhouette similarity. It defers generation but never blocks it.
+                    # ========================================================================
+                    if not check_silhouette_similarity(candidate_a, candidate_b):
+                        # Silhouette similarity check failed - reject this pair and continue searching
+                        logger.warning(f"SILHOUETTE_REJECT tier={tier_num} threshold={hybrid_threshold} assoc_size={association_size} A={candidate_a.name} B={candidate_b.name} - continuing search")
+                        continue  # Continue to next attempt in this tier
+                    
+                    # Silhouette check passed - return this pair
+                    return (candidate_a, candidate_b, candidate_hybrid_type, candidate_stats, hybrid_threshold, association_size)
+                else:
+                    # No HYBRID found within budget for this attempt
+                    logger.warning(f"HYBRID_NOT_FOUND tier={tier_num} threshold={hybrid_threshold} assoc_size={association_size} evaluated_pairs={candidate_stats['evaluated_pairs']} passed_overlap={candidate_stats['passed_overlap']}")
+                    # Continue to next attempt in this tier
+            except Exception as e:
+                logger.warning(f"HYBRID_SEARCH_ATTEMPT tier={tier_num} attempt={attempt_idx+1} error={str(e)}")
+                continue  # Try next attempt in this tier
+        
+        # No valid pair found in this tier
+        return (None, None, None, None, None, None)
+    
+    # TIER 1: Strict silhouette rule with original relaxation ladder
+    threshold_levels_tier1 = [initial_threshold, 0.65, 0.60, 0.55, 0.50, 0.45]
+    association_levels_tier1 = [80, 120, 200, 300, 500, 700]
+    
+    object_a, object_b, hybrid_type, search_stats, final_threshold, final_assoc_size = search_with_silhouette_check(
+        threshold_levels_tier1, association_levels_tier1, tier_used
+    )
+    
+    # TIER 2: Expand search space (increase association_size to 200 or 300)
+    if object_a is None or object_b is None:
+        logger.info(f"SILHOUETTE_RETRY tier=2 assoc_size=200,300 - Tier 1 found no valid pairs, expanding search space")
+        tier_used = 2
+        threshold_levels_tier2 = [initial_threshold, 0.65, 0.60, 0.55, 0.50, 0.45]
+        association_levels_tier2 = [200, 300, 400, 500, 600, 700]  # Start with larger association sizes
+        
+        object_a, object_b, hybrid_type, search_stats, final_threshold, final_assoc_size = search_with_silhouette_check(
+            threshold_levels_tier2, association_levels_tier2, tier_used
+        )
+    
+    # TIER 3: Controlled relaxation (lower hybrid_threshold slightly, e.g. 0.70 → 0.66)
+    if object_a is None or object_b is None:
+        relaxed_threshold = max(0.50, initial_threshold - 0.04)  # Lower by 0.04, but not below 0.50
+        logger.info(f"SILHOUETTE_RETRY tier=3 threshold={relaxed_threshold} - Tier 2 found no valid pairs, relaxing threshold")
+        tier_used = 3
+        threshold_levels_tier3 = [relaxed_threshold, relaxed_threshold - 0.05, relaxed_threshold - 0.10, relaxed_threshold - 0.15, 0.50, 0.45]
+        association_levels_tier3 = [200, 300, 400, 500, 600, 700]  # Keep expanded association sizes
+        
+        object_a, object_b, hybrid_type, search_stats, final_threshold, final_assoc_size = search_with_silhouette_check(
+            threshold_levels_tier3, association_levels_tier3, tier_used
+        )
+    
+    # FINAL FALLBACK: If still no valid pair found after all tiers, use first available pair
+    # This ensures generation NEVER fails - silhouette law influences selection but never blocks
+    if object_a is None or object_b is None:
+        logger.warning("SILHOUETTE_FINAL_FALLBACK: No valid pair found after all tiers, using first available pair (silhouette check bypassed)")
+        # Build a minimal object pool to get at least one pair
+        try:
+            associations = generate_associations(goal, size=80)
+            object_pool = build_object_pool(product_name, product_description, goal=goal, association_size=80)
             sanitized_pool = sanitize_candidate_pool(object_pool)
             
-            if len(sanitized_pool) == 0:
-                logger.warning(f"HYBRID_SEARCH_ATTEMPT attempt={attempt_idx+1} sanitized_pool_empty")
-                continue
-            
-            # Log shape family statistics (only on first attempt)
-            if attempt_idx == 0:
-                unknown_count = sum(1 for obj in sanitized_pool if obj.shape_family == "unknown")
-                total_count = len(sanitized_pool)
-                logger.info(f"SHAPE_FAMILY_STATS unknown_count={unknown_count} total={total_count}")
-            
-            # Build ranked object list
-            ranked_objs = build_ranked_object_list(sanitized_pool)
-            
-            # Generate candidate pairs (enough to allow 700 evaluations)
-            top_n = min(len(ranked_objs), 600)  # Use up to 600 objects for pairing
-            max_pairs = 1000  # Generate enough pairs to allow 700 evaluations
-            
-            candidate_pairs = generate_candidate_pairs(
-                ranked_objs, 
-                max_pairs=max_pairs, 
-                ad_index=ad_index, 
-                session_seed=session_seed,
-                assoc_count=association_size,
-                top_n=top_n
-            )
-            
-            if len(candidate_pairs) == 0:
-                logger.warning(f"HYBRID_SEARCH_ATTEMPT attempt={attempt_idx+1} no_candidate_pairs")
-                continue
-            
-            # Search for HYBRID only (SIDE_BY_SIDE is permanently disabled)
-            # Budget: 700 comparisons (hard cap)
-            object_a, object_b, hybrid_type, error_msg, search_stats = find_valid_hybrid_pair(
-                candidate_pairs,
-                quota_state,
-                ranked_objs,
-                ad_index=ad_index,
-                hybrid_threshold=hybrid_threshold,
-                max_evaluations=700
-            )
-            
-            # Log search statistics
-            rejected_after_overlap = search_stats.get('rejected_after_overlap', 0)
-            rejected_too_close = search_stats.get('rejected_too_close', 0)
-            rejected_same_association = search_stats.get('rejected_same_association', 0)
-            rejected_conceptual_neighbors = search_stats.get('rejected_conceptual_neighbors', 0)
-            logger.info(f"HYBRID_SEARCH_STATS threshold={hybrid_threshold} assoc_size={association_size} evaluated_pairs={search_stats['evaluated_pairs']} passed_overlap={search_stats['passed_overlap']} rejected_after_overlap={rejected_after_overlap} rejected_too_close={rejected_too_close} rejected_same_association={rejected_same_association} rejected_conceptual_neighbors={rejected_conceptual_neighbors}")
-            
-            # If valid HYBRID found, use it
-            if object_a is not None and object_b is not None:
-                # ========================================================================
-                # SILHOUETTE SIMILARITY LAW (PRE-GENERATION — MANDATORY)
-                # ========================================================================
-                # This law MUST be enforced before any image generation.
-                # If it is not satisfied, generation must NOT proceed.
-                # ========================================================================
-                if not check_silhouette_similarity(object_a, object_b):
-                    # Silhouette similarity check failed - reject this pair and continue searching
-                    logger.warning(f"SILHOUETTE_REJECT threshold={hybrid_threshold} assoc_size={association_size} A={object_a.name} B={object_b.name} - continuing search")
-                    object_a = None
-                    object_b = None
-                    continue  # Continue to next relaxation level
-                
-                # Calculate overlap for logging
-                view_a = select_max_projection_view(object_a)
-                view_b = select_max_projection_view(object_b)
-                overlap_percentage = calculate_geometric_overlap(view_a, view_b)
-                final_threshold = hybrid_threshold
-                final_assoc_size = association_size
-                logger.info(f"HYBRID_SELECTED threshold={hybrid_threshold} assoc_size={association_size} evaluated_pairs={search_stats['evaluated_pairs']} A={object_a.name} B={object_b.name} overlap={overlap_percentage:.2f}")
-                break  # Success! Exit relaxation loop
+            # Try sanitized pool first
+            if len(sanitized_pool) >= 2:
+                ranked_objs = build_ranked_object_list(sanitized_pool)
+                object_a = ranked_objs[0]
+                object_b = ranked_objs[1]
+                hybrid_type = HybridType.CORE_GEOMETRIC
+                final_threshold = initial_threshold
+                final_assoc_size = 80
+                logger.info(f"SILHOUETTE_FINAL_FALLBACK_USED A={object_a.name} B={object_b.name} (silhouette check bypassed for guaranteed generation)")
+            elif len(object_pool) >= 2:
+                # Last resort: use unsanitized pool if sanitized pool is too small
+                # This ensures generation never fails, even if all objects fail hard filters
+                logger.warning("SILHOUETTE_FINAL_FALLBACK: Using unsanitized pool (some hard filters bypassed)")
+                ranked_objs = build_ranked_object_list(object_pool)
+                object_a = ranked_objs[0]
+                object_b = ranked_objs[1]
+                hybrid_type = HybridType.CORE_GEOMETRIC
+                final_threshold = initial_threshold
+                final_assoc_size = 80
+                logger.info(f"SILHOUETTE_FINAL_FALLBACK_USED_UNSANITIZED A={object_a.name} B={object_b.name} (silhouette check and some hard filters bypassed for guaranteed generation)")
             else:
-                # No HYBRID found within budget for this attempt
-                logger.warning(f"HYBRID_NOT_FOUND threshold={hybrid_threshold} assoc_size={association_size} evaluated_pairs={search_stats['evaluated_pairs']} passed_overlap={search_stats['passed_overlap']}")
-                # Continue to next relaxation level
+                # Truly last resort: if we can't even get 2 objects from any pool, this is a system error
+                raise ValueError("Insufficient object candidates available (need at least 2 objects)")
         except Exception as e:
-            logger.warning(f"HYBRID_SEARCH_ATTEMPT attempt={attempt_idx+1} error={str(e)}")
-            continue  # Try next relaxation level
+            logger.error(f"SILHOUETTE_FINAL_FALLBACK_ERROR: {str(e)}")
+            raise ValueError(f"Failed to generate object pair: {str(e)}")
     
-    # If still no HYBRID found after all attempts, use fallback
-    if object_a is None or object_b is None:
-        logger.warning("FALLBACK_MAX_OVERLAP_PAIR_USED: No HYBRID found after all relaxation attempts, using fallback pair")
-        # Fallback: use first two objects from ranked list (deterministic)
-        if len(ranked_objs) >= 2:
-            object_a = ranked_objs[0]
-            object_b = ranked_objs[1]
-            hybrid_type = HybridType.CORE_GEOMETRIC
-            
-            # ========================================================================
-            # SILHOUETTE SIMILARITY LAW (PRE-GENERATION — MANDATORY)
-            # ========================================================================
-            # This law MUST be enforced before any image generation.
-            # If it is not satisfied, generation must NOT proceed.
-            # ========================================================================
-            if not check_silhouette_similarity(object_a, object_b):
-                # Silhouette similarity check failed - cannot use fallback pair
-                logger.error(f"SILHOUETTE_REJECT_FALLBACK A={object_a.name} B={object_b.name} - fallback pair rejected")
-                raise ValueError(f"Silhouette similarity check failed for fallback pair ({object_a.name} + {object_b.name}). Generation cannot proceed.")
-            
-            # Calculate overlap for logging
-            view_a = select_max_projection_view(object_a)
-            view_b = select_max_projection_view(object_b)
-            overlap_percentage = calculate_geometric_overlap(view_a, view_b)
-            logger.info(f"FALLBACK_MAX_OVERLAP_PAIR_USED A={object_a.name} B={object_b.name} overlap={overlap_percentage:.2f}")
-        else:
-            raise ValueError("No valid object candidates available for fallback")
+    # Log final selection
+    if object_a is not None and object_b is not None:
+        view_a = select_max_projection_view(object_a)
+        view_b = select_max_projection_view(object_b)
+        overlap_percentage = calculate_geometric_overlap(view_a, view_b)
+        logger.info(f"HYBRID_SELECTED tier={tier_used} threshold={final_threshold} assoc_size={final_assoc_size} evaluated_pairs={search_stats['evaluated_pairs'] if search_stats else 'N/A'} A={object_a.name} B={object_b.name} overlap={overlap_percentage:.2f}")
     
     # ========================================================================
     # STEP 6 & 7: HEADLINE & MARKETING TEXT GENERATION
