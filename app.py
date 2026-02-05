@@ -6,7 +6,8 @@ import io
 import zipfile
 import json
 import base64
-from engine.ace_engine import generate_ad, quota_state_from_dict, quota_state_to_dict
+# Lazy import: engine only loaded when needed (not for /health endpoint)
+# from engine.ace_engine import generate_ad, quota_state_from_dict, quota_state_to_dict
 
 app = Flask(__name__)
 
@@ -19,6 +20,12 @@ CORS(app, origins=[
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Lazy import function for engine (avoids heavy initialization on startup)
+def get_engine_functions():
+    """Lazy import of engine functions - only called when needed"""
+    from engine.ace_engine import generate_ad, quota_state_from_dict, quota_state_to_dict
+    return generate_ad, quota_state_from_dict, quota_state_to_dict
 
 # Allowed image sizes
 ALLOWED_SIZES = ["1024x1024", "1536x1024", "1024x1536"]
@@ -74,6 +81,9 @@ def generate():
                 batch_state_dict = json.loads(batch_state_header)
             except (json.JSONDecodeError, TypeError):
                 logger.warning(f"Request {request_id}: Invalid X-ACE-Batch-State header, using request batchState")
+        
+        # Lazy import engine functions (only when actually needed, not for /health)
+        generate_ad, quota_state_from_dict, quota_state_to_dict = get_engine_functions()
         
         # Convert batchState dict to BatchQuotaState (defaults to all False if missing)
         quota_state = quota_state_from_dict(batch_state_dict)
@@ -290,6 +300,9 @@ def preview():
             except (json.JSONDecodeError, TypeError):
                 logger.warning(f"Request {request_id}: Invalid X-ACE-Batch-State header, using request batchState")
         
+        # Lazy import engine functions (only when actually needed, not for /health)
+        generate_ad, quota_state_from_dict, quota_state_to_dict = get_engine_functions()
+        
         # Convert batchState dict to BatchQuotaState (defaults to all False if missing)
         quota_state = quota_state_from_dict(batch_state_dict)
         current_batch_state = quota_state_to_dict(quota_state)
@@ -436,12 +449,16 @@ def preview():
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check endpoint"""
-    return jsonify({'status': 'ok'}), 200
+    """
+    Health check endpoint - minimal, no heavy imports, returns plain text.
+    This endpoint must NOT trigger any ACE/OpenAI initialization.
+    """
+    return 'ok', 200
 
 
 if __name__ == '__main__':
     import os
     port = int(os.environ.get('PORT', 5000))
+    logger.info(f"HEALTH_READY /health returns 200 immediately")
     app.run(host='0.0.0.0', port=port, debug=False)
 
