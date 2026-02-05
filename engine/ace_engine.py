@@ -940,13 +940,22 @@ def generate_real_image_bytes(
             f"This is NOT overlay or composition. "
             f"No collage, no assembly, no glued parts, no two-object composition. "
             f"The composition must read as a SINGLE unified believable commercial photo where B naturally exists within A's environment. "
-            f"ENVIRONMENT LAW — MANDATORY: "
+            f"ENVIRONMENT LAW — MANDATORY AND UNBREAKABLE: "
             f"Every image MUST be placed in a realistic, coherent physical environment. "
-            f"No white studio, no abstract background, no generic gradient, no empty void. "
-            f"Environment authority belongs to Object A ({object_a.name}): the scene, surface, props, and context must come from {object_a.name}'s environment. "
+            f"No white studio, no abstract background, no generic gradient, no empty void, no neutral background. "
+            f"Environment authority belongs EXCLUSIVELY to Object A ({object_a.name}): the FULL scene, surface, props, lighting, perspective, and ALL context must come from {object_a.name}'s environment. "
             f"The environment must be clearly {object_a.name}'s domain (workspace / surface / setting / etc. depending on {object_a.name}), realistic and minimal. "
-            f"Object B ({object_b.name}) must appear as if it naturally emerges from or exists within {object_a.name}'s environment. "
+            f"Object B ({object_b.name}) must appear as a SINGLE inserted subject placed IN {object_a.name}'s environment, with consistent lighting and perspective matching the environment. "
             f"The environment must logically explain why Object B exists in this context. "
+            f"ABSOLUTELY FORBIDDEN: "
+            f"- Any leftover parts of Object A wrapping, outlining, or forming a shell around B (no hybrid remnants). "
+            f"- Any neutral studio background, gradient background, or generic scene not tied to A. "
+            f"- Any split scene or half/half composition. "
+            f"- Any background that does not clearly match A's environment. "
+            f"SUCCESS CONDITION: "
+            f"The viewer must instantly recognize A's environment even if A itself is not visible as an object. "
+            f"The full scene/background must be the natural, recognizable environment/world of Object A. "
+            f"If the model cannot comply, it must output a scene that still clearly matches A's environment and keeps B as a single clean subject (no hybrid). "
             f"HYBRID RULES — ABSOLUTE LAWS: "
             f"Object B must appear as a natural outcome of Object A's environment. "
             f"NOT a glued object, NOT a merged sculpture, NOT an artificial mashup. "
@@ -1020,51 +1029,103 @@ def generate_real_image_bytes(
     logger.info(f"HYBRID_ENV_MODE ENV_FIXED=A COMPOSITION_MODE=ENV_EMBED SUBJECT=B A_ENV_ONLY=1 A={object_a.name} B={object_b.name} env={environment} size={size} model={model}")
     logger.info(f"IMAGE_GEN_START model={model} size={size} object_a={object_a.name} object_b={object_b.name} hybrid_type={hybrid_type.value}")
     
-    try:
-        response = client.images.generate(
-            model=model,
-            prompt=prompt,
-            size=size,
-            quality="medium"
-        )
-    except Exception as e:
-        # NO FALLBACK - fail immediately with clear error
-        logger.error(f"IMAGE_GEN_FAIL error={str(e)}")
-        raise ValueError(f"OpenAI image generation failed: {str(e)}") from e
+    # Post-check/retry logic for ENVIRONMENT compliance
+    max_retries = 2
+    image_bytes = None
+    environment_weak_warning = False
     
-    # Extract image data
-    if not response.data or len(response.data) == 0:
-        logger.error("IMAGE_GEN_FAIL error=OpenAI returned empty image data")
-        raise ValueError("OpenAI returned empty image data")
-    
-    # Try to get base64 from response (if available)
-    image_b64 = getattr(response.data[0], 'b64_json', None)
-    if image_b64:
-        # Decode base64 to bytes
+    for retry_attempt in range(max_retries + 1):
         try:
-            image_bytes = base64.b64decode(image_b64)
-            logger.info(f"IMAGE_GEN_OK bytes={len(image_bytes)}")
-            return image_bytes
+            # Strengthen ENVIRONMENT reminder on retry
+            if retry_attempt > 0:
+                environment_reminder = (
+                    f"CRITICAL REMINDER — ENVIRONMENT MUST BE A: "
+                    f"The full scene/background MUST be the natural, recognizable environment/world of Object A ({object_a.name}). "
+                    f"Object B ({object_b.name}) must appear as a single inserted subject placed IN A's environment. "
+                    f"ABSOLUTELY NO neutral studio background, no generic gradient, no abstract background. "
+                    f"The environment must be clearly {object_a.name}'s domain. "
+                    f"If you cannot comply, output a scene that still clearly matches A's environment. "
+                )
+                enhanced_prompt = prompt + "\n\n" + environment_reminder
+            else:
+                enhanced_prompt = prompt
+            
+            response = client.images.generate(
+                model=model,
+                prompt=enhanced_prompt,
+                size=size,
+                quality="medium"
+            )
+            
+            # Extract image data
+            if not response.data or len(response.data) == 0:
+                if retry_attempt < max_retries:
+                    logger.warning(f"IMAGE_GEN_RETRY attempt={retry_attempt+1} reason=empty_response")
+                    continue
+                else:
+                    logger.error("IMAGE_GEN_FAIL error=OpenAI returned empty image data")
+                    raise ValueError("OpenAI returned empty image data")
+            
+            # Try to get base64 from response (if available)
+            image_b64 = getattr(response.data[0], 'b64_json', None)
+            if image_b64:
+                try:
+                    image_bytes = base64.b64decode(image_b64)
+                    logger.info(f"IMAGE_GEN_OK bytes={len(image_bytes)} attempt={retry_attempt+1}")
+                    break
+                except Exception as e:
+                    if retry_attempt < max_retries:
+                        logger.warning(f"IMAGE_GEN_RETRY attempt={retry_attempt+1} reason=decode_error")
+                        continue
+                    else:
+                        logger.error(f"IMAGE_GEN_FAIL error=Failed to decode base64: {str(e)}")
+                        raise ValueError(f"Failed to decode base64 image: {str(e)}") from e
+            
+            # If no base64, try to get URL and download
+            image_url = getattr(response.data[0], 'url', None)
+            if image_url:
+                import requests
+                try:
+                    img_response = requests.get(image_url)
+                    img_response.raise_for_status()
+                    image_bytes = img_response.content
+                    logger.info(f"IMAGE_GEN_OK bytes={len(image_bytes)} attempt={retry_attempt+1} (from URL)")
+                    break
+                except Exception as e:
+                    if retry_attempt < max_retries:
+                        logger.warning(f"IMAGE_GEN_RETRY attempt={retry_attempt+1} reason=download_error")
+                        continue
+                    else:
+                        logger.error(f"IMAGE_GEN_FAIL error=Failed to download from URL: {str(e)}")
+                        raise ValueError(f"Failed to download image from URL: {str(e)}") from e
+            
+            # If we get here, no valid image data
+            if retry_attempt < max_retries:
+                logger.warning(f"IMAGE_GEN_RETRY attempt={retry_attempt+1} reason=no_valid_data")
+                continue
+            else:
+                logger.error("IMAGE_GEN_FAIL error=OpenAI returned invalid image data (no base64 or URL)")
+                raise ValueError("OpenAI returned invalid image data (no base64 or URL)")
+                
         except Exception as e:
-            logger.error(f"IMAGE_GEN_FAIL error=Failed to decode base64: {str(e)}")
-            raise ValueError(f"Failed to decode base64 image: {str(e)}") from e
+            if retry_attempt < max_retries and "rate limit" not in str(e).lower() and "quota" not in str(e).lower():
+                logger.warning(f"IMAGE_GEN_RETRY attempt={retry_attempt+1} error={str(e)}")
+                continue
+            else:
+                # Final attempt failed or non-retryable error
+                logger.error(f"IMAGE_GEN_FAIL error={str(e)}")
+                raise ValueError(f"OpenAI image generation failed: {str(e)}") from e
     
-    # If no base64, try to get URL and download
-    image_url = getattr(response.data[0], 'url', None)
-    if image_url:
-        import requests
-        try:
-            img_response = requests.get(image_url)
-            img_response.raise_for_status()
-            image_bytes = img_response.content
-            logger.info(f"IMAGE_GEN_OK bytes={len(image_bytes)} (from URL)")
-            return image_bytes
-        except Exception as e:
-            logger.error(f"IMAGE_GEN_FAIL error=Failed to download from URL: {str(e)}")
-            raise ValueError(f"Failed to download image from URL: {str(e)}") from e
+    # If we used retries, log environment weak warning
+    if retry_attempt > 0 and image_bytes:
+        environment_weak_warning = True
+        logger.warning(f"ENVIRONMENT_WEAK_WARNING A={object_a.name} B={object_b.name} retries={retry_attempt} (environment enforcement may be weak)")
     
-    logger.error("IMAGE_GEN_FAIL error=OpenAI returned invalid image data (no base64 or URL)")
-    raise ValueError("OpenAI returned invalid image data (no base64 or URL)")
+    if image_bytes is None:
+        raise ValueError("Failed to generate image after all retry attempts")
+    
+    return image_bytes
+    
 
 
 # ============================================================================
@@ -3014,6 +3075,153 @@ Respond with ONLY "VALID" or "INVALID" followed by a brief one-sentence explanat
         return False
 
 
+def find_group_similarity_pair(
+    ranked_objs: List[ObjectCandidate],
+    quota_state: BatchQuotaState,
+    ad_index: int = 0,
+    max_evaluations: int = 200
+) -> Tuple[Optional[ObjectCandidate], Optional[ObjectCandidate], Optional[str]]:
+    """
+    GROUP SIMILARITY FALLBACK (NO TEXT OBJECTS)
+    
+    When extreme silhouette similarity cannot be found, fall back to pairs that:
+    1. Share ONE strong group attribute (material, color, surface, type, structural motif)
+    2. Are NOT conceptually close (not same association, not same world, not same family)
+    3. Do NOT use text objects (objects whose identity relies on text)
+    
+    Args:
+        ranked_objs: Ranked list of object candidates
+        quota_state: Batch quota state
+        ad_index: Index of ad in batch
+        max_evaluations: Maximum pairs to evaluate
+    
+    Returns:
+        Tuple of (object_a, object_b, shared_trait) or (None, None, None) if none found
+    """
+    # Get OpenAI API key from environment
+    api_key = os.environ.get('OPENAI_API_KEY')
+    if not api_key:
+        logger.warning("GROUP_SIM: OPENAI_API_KEY not set, skipping group similarity fallback")
+        return (None, None, None)
+    
+    client = OpenAI(api_key=api_key)
+    
+    # Filter out text objects (objects whose identity relies on text)
+    # This is a simple heuristic - objects with "text", "letter", "word", "sign", "label" in name
+    text_keywords = ["text", "letter", "word", "sign", "label", "tag", "badge", "sticker", "poster", "banner"]
+    non_text_objs = [
+        obj for obj in ranked_objs 
+        if not any(keyword in obj.name.lower() for keyword in text_keywords)
+    ]
+    
+    if len(non_text_objs) < 2:
+        logger.warning("GROUP_SIM: Not enough non-text objects for group similarity fallback")
+        return (None, None, None)
+    
+    # Try to find pairs with group similarity
+    evaluated = 0
+    top_n = min(len(non_text_objs), 100)  # Limit search space
+    
+    for i in range(min(top_n, max_evaluations // 2)):
+        if evaluated >= max_evaluations:
+            break
+        
+        obj_a = non_text_objs[i]
+        
+        for j in range(i + 1, min(top_n, i + max_evaluations // 2)):
+            if evaluated >= max_evaluations:
+                break
+            
+            evaluated += 1
+            obj_b = non_text_objs[j]
+            
+            # Apply conceptual distance constraints (same as main search)
+            # Reject same association
+            if hasattr(obj_a, 'association_key') and hasattr(obj_b, 'association_key'):
+                if obj_a.association_key == obj_b.association_key and obj_a.association_key:
+                    continue
+            
+            # Reject conceptually too close
+            if is_conceptually_too_close(obj_a.name, obj_b.name):
+                continue
+            
+            # Reject same family or too-close names
+            same_family = (obj_a.shape_family == obj_b.shape_family and obj_a.shape_family != "unknown")
+            if same_family:
+                continue
+            
+            # Check for name containment
+            name_a_lower = obj_a.name.lower().strip()
+            name_b_lower = obj_b.name.lower().strip()
+            if name_a_lower in name_b_lower or name_b_lower in name_a_lower:
+                continue
+            
+            # Check group similarity using LLM
+            prompt = f"""Evaluate if two objects share a strong GROUP SIMILARITY attribute.
+
+OBJECT A: {obj_a.name}
+OBJECT B: {obj_b.name}
+
+GROUP SIMILARITY CRITERIA:
+Objects must share ONE strong group attribute from:
+- Same primary material (e.g., both white marble, polished metal, glass, ceramic)
+- Same dominant color family (e.g., both white, both matte-black) BUT not the same object class
+- Same surface/finish (glossy, brushed, satin, frosted)
+- Same physical "type" (both sculptures, both containers, both protective shells) BUT must not be near-duplicates
+- Same structural motif (ribbed, perforated, latticed, layered)
+
+IMPORTANT CONSTRAINTS:
+- Do NOT use letters/words/text as the similarity basis
+- Objects must NOT be the same association, same world, or obviously neighboring concepts
+- Objects must NOT be near-duplicates or same object class
+
+EVALUATION:
+1. Do they share a strong group attribute? (material, color, surface, type, or structural motif)
+2. Are they conceptually distant? (not same association, not same world, not same family)
+3. Is the similarity based on visual/physical attributes, NOT text or semantic meaning?
+
+Respond with ONLY "VALID" or "INVALID" followed by the shared trait if VALID (e.g., "VALID material=white_marble" or "VALID surface=glossy")."""
+
+            try:
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "You are an evaluator of group similarity. Find pairs that share visual/physical attributes but are conceptually distant."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.0,
+                    max_tokens=50
+                )
+                
+                result_text = response.choices[0].message.content.strip().upper()
+                
+                if result_text.startswith("VALID"):
+                    # Extract shared trait if mentioned
+                    shared_trait = "group_similarity"
+                    if "=" in result_text:
+                        try:
+                            shared_trait = result_text.split("=")[1].strip().split()[0].lower()
+                        except:
+                            pass
+                    
+                    # Check environment causality (still required even for group similarity)
+                    if check_environment_causality(obj_a, obj_b):
+                        logger.info(f"GROUP_SIM_FOUND A={obj_a.name} B={obj_b.name} shared_trait={shared_trait}")
+                        return (obj_a, obj_b, shared_trait)
+                    else:
+                        logger.debug(f"GROUP_SIM_ENV_REJECT A={obj_a.name} B={obj_b.name}")
+                        continue
+                else:
+                    continue
+                    
+            except Exception as e:
+                logger.warning(f"GROUP_SIM_CHECK_ERROR A={obj_a.name} B={obj_b.name} error={str(e)}")
+                continue  # Continue to next pair
+    
+    logger.warning(f"GROUP_SIM_NO_PAIR_FOUND evaluated={evaluated}")
+    return (None, None, None)
+
+
 def generate_ad(
     product_name: str,
     product_description: str,
@@ -3094,6 +3302,11 @@ def generate_ad(
     # Helper function to search for valid pair with silhouette check
     def search_with_silhouette_check(threshold_levels, association_levels, tier_num):
         """Search for valid pair with silhouette check, return (object_a, object_b, hybrid_type, search_stats, threshold, assoc_size) or (None, None, None, None, None, None)"""
+        tier_silhouette_passed = 0
+        tier_silhouette_rejected = 0
+        tier_env_passed = 0
+        tier_env_rejected = 0
+        
         for attempt_idx in range(len(threshold_levels)):
             hybrid_threshold = threshold_levels[attempt_idx]
             association_size = association_levels[attempt_idx]
@@ -3166,8 +3379,11 @@ def generate_ad(
                     # ========================================================================
                     if not check_silhouette_similarity(candidate_a, candidate_b):
                         # Silhouette similarity check failed - reject this pair and continue searching
+                        tier_silhouette_rejected += 1
                         logger.warning(f"SILHOUETTE_REJECT tier={tier_num} threshold={hybrid_threshold} assoc_size={association_size} A={candidate_a.name} B={candidate_b.name} - continuing search")
                         continue  # Continue to next attempt in this tier
+                    
+                    tier_silhouette_passed += 1
                     
                     # ========================================================================
                     # ENVIRONMENT CAUSALITY LAW (SELECTION GATE)
@@ -3178,10 +3394,17 @@ def generate_ad(
                     # ========================================================================
                     if not check_environment_causality(candidate_a, candidate_b):
                         # Environment causality check failed - reject this pair and continue searching
+                        tier_env_rejected += 1
                         logger.warning(f"ENV_CAUSALITY_REJECT tier={tier_num} threshold={hybrid_threshold} assoc_size={association_size} A={candidate_a.name} B={candidate_b.name} - continuing search")
                         continue  # Continue to next attempt in this tier
                     
-                    # Both checks passed - return this pair
+                    tier_env_passed += 1
+                    
+                    # Both checks passed - return this pair with updated stats
+                    candidate_stats['silhouette_passed'] = tier_silhouette_passed
+                    candidate_stats['silhouette_rejected'] = tier_silhouette_rejected
+                    candidate_stats['env_passed'] = tier_env_passed
+                    candidate_stats['env_rejected'] = tier_env_rejected
                     return (candidate_a, candidate_b, candidate_hybrid_type, candidate_stats, hybrid_threshold, association_size)
                 else:
                     # No HYBRID found within budget for this attempt
@@ -3191,8 +3414,35 @@ def generate_ad(
                 logger.warning(f"HYBRID_SEARCH_ATTEMPT tier={tier_num} attempt={attempt_idx+1} error={str(e)}")
                 continue  # Try next attempt in this tier
         
-        # No valid pair found in this tier
-        return (None, None, None, None, None, None)
+        # No valid pair found in this tier - return stats
+        empty_stats = {
+            'evaluated_pairs': 0,
+            'passed_overlap': 0,
+            'silhouette_passed': tier_silhouette_passed,
+            'silhouette_rejected': tier_silhouette_rejected,
+            'env_passed': tier_env_passed,
+            'env_rejected': tier_env_rejected
+        }
+        return (None, None, None, empty_stats, None, None)
+    
+    # Track silhouette gate statistics
+    silhouette_gate_stats = {
+        'tier1_attempts': 0,
+        'tier1_silhouette_passed': 0,
+        'tier1_silhouette_rejected': 0,
+        'tier1_env_passed': 0,
+        'tier1_env_rejected': 0,
+        'tier2_attempts': 0,
+        'tier2_silhouette_passed': 0,
+        'tier2_silhouette_rejected': 0,
+        'tier2_env_passed': 0,
+        'tier2_env_rejected': 0,
+        'tier3_attempts': 0,
+        'tier3_silhouette_passed': 0,
+        'tier3_silhouette_rejected': 0,
+        'tier3_env_passed': 0,
+        'tier3_env_rejected': 0
+    }
     
     # TIER 1: Strict silhouette rule with original relaxation ladder
     threshold_levels_tier1 = [initial_threshold, 0.65, 0.60, 0.55, 0.50, 0.45]
@@ -3201,6 +3451,14 @@ def generate_ad(
     object_a, object_b, hybrid_type, search_stats, final_threshold, final_assoc_size = search_with_silhouette_check(
         threshold_levels_tier1, association_levels_tier1, tier_used
     )
+    
+    # Update silhouette gate stats for tier 1
+    if search_stats:
+        silhouette_gate_stats['tier1_attempts'] = search_stats.get('evaluated_pairs', 0)
+        silhouette_gate_stats['tier1_silhouette_passed'] = search_stats.get('silhouette_passed', 0)
+        silhouette_gate_stats['tier1_silhouette_rejected'] = search_stats.get('silhouette_rejected', 0)
+        silhouette_gate_stats['tier1_env_passed'] = search_stats.get('env_passed', 0)
+        silhouette_gate_stats['tier1_env_rejected'] = search_stats.get('env_rejected', 0)
     
     # TIER 2: Expand search space (increase association_size to 200 or 300)
     if object_a is None or object_b is None:
@@ -3212,6 +3470,14 @@ def generate_ad(
         object_a, object_b, hybrid_type, search_stats, final_threshold, final_assoc_size = search_with_silhouette_check(
             threshold_levels_tier2, association_levels_tier2, tier_used
         )
+        
+        # Update silhouette gate stats for tier 2
+        if search_stats:
+            silhouette_gate_stats['tier2_attempts'] = search_stats.get('evaluated_pairs', 0)
+            silhouette_gate_stats['tier2_silhouette_passed'] = search_stats.get('silhouette_passed', 0)
+            silhouette_gate_stats['tier2_silhouette_rejected'] = search_stats.get('silhouette_rejected', 0)
+            silhouette_gate_stats['tier2_env_passed'] = search_stats.get('env_passed', 0)
+            silhouette_gate_stats['tier2_env_rejected'] = search_stats.get('env_rejected', 0)
     
     # TIER 3: Controlled relaxation (lower hybrid_threshold slightly, e.g. 0.70 → 0.66)
     if object_a is None or object_b is None:
@@ -3224,6 +3490,45 @@ def generate_ad(
         object_a, object_b, hybrid_type, search_stats, final_threshold, final_assoc_size = search_with_silhouette_check(
             threshold_levels_tier3, association_levels_tier3, tier_used
         )
+        
+        # Update silhouette gate stats for tier 3
+        if search_stats:
+            silhouette_gate_stats['tier3_attempts'] = search_stats.get('evaluated_pairs', 0)
+            silhouette_gate_stats['tier3_silhouette_passed'] = search_stats.get('silhouette_passed', 0)
+            silhouette_gate_stats['tier3_silhouette_rejected'] = search_stats.get('silhouette_rejected', 0)
+            silhouette_gate_stats['tier3_env_passed'] = search_stats.get('env_passed', 0)
+            silhouette_gate_stats['tier3_env_rejected'] = search_stats.get('env_rejected', 0)
+    
+    # GROUP SIMILARITY FALLBACK: If extreme silhouette similarity not found
+    group_sim_shared_trait = None
+    if object_a is None or object_b is None:
+        logger.info(f"GROUP_SIM_FALLBACK: No extreme silhouette similarity found after all tiers, trying group similarity fallback")
+        # Get the ranked objects from the last attempt (or rebuild if needed)
+        try:
+            associations = generate_associations(goal, size=200)
+            object_pool = build_object_pool(product_name, product_description, goal=goal, association_size=200)
+            sanitized_pool = sanitize_candidate_pool(object_pool)
+            ranked_objs = build_ranked_object_list(sanitized_pool)
+            
+            group_a, group_b, shared_trait = find_group_similarity_pair(
+                ranked_objs,
+                quota_state,
+                ad_index=ad_index,
+                max_evaluations=200
+            )
+            
+            if group_a is not None and group_b is not None:
+                object_a = group_a
+                object_b = group_b
+                group_sim_shared_trait = shared_trait
+                hybrid_type = HybridType.CORE_GEOMETRIC
+                tier_used = 4  # Mark as group similarity tier
+                total_attempts = silhouette_gate_stats['tier1_attempts'] + silhouette_gate_stats['tier2_attempts'] + silhouette_gate_stats['tier3_attempts']
+                logger.info(f"GROUP_SIM_FALLBACK_USED A={object_a.name} B={object_b.name} shared_trait={shared_trait} reason=no_extreme_silhouette_found attempts={total_attempts}")
+            else:
+                logger.warning(f"GROUP_SIM_FALLBACK_NO_PAIR: Group similarity fallback also found no valid pairs")
+        except Exception as e:
+            logger.warning(f"GROUP_SIM_FALLBACK_ERROR: {str(e)}")
     
     # FINAL FALLBACK: If still no valid pair found after all tiers, use first available pair
     # This ensures generation NEVER fails - silhouette law influences selection but never blocks
@@ -3262,12 +3567,16 @@ def generate_ad(
             logger.error(f"SILHOUETTE_FINAL_FALLBACK_ERROR: {str(e)}")
             raise ValueError(f"Failed to generate object pair: {str(e)}")
     
+    # Log silhouette gate statistics
+    logger.info(f"SILHOUETTE_GATE_STATS tier1_attempts={silhouette_gate_stats['tier1_attempts']} tier1_silhouette_passed={silhouette_gate_stats['tier1_silhouette_passed']} tier1_silhouette_rejected={silhouette_gate_stats['tier1_silhouette_rejected']} tier1_env_passed={silhouette_gate_stats['tier1_env_passed']} tier1_env_rejected={silhouette_gate_stats['tier1_env_rejected']} tier2_attempts={silhouette_gate_stats['tier2_attempts']} tier2_silhouette_passed={silhouette_gate_stats['tier2_silhouette_passed']} tier2_silhouette_rejected={silhouette_gate_stats['tier2_silhouette_rejected']} tier2_env_passed={silhouette_gate_stats['tier2_env_passed']} tier2_env_rejected={silhouette_gate_stats['tier2_env_rejected']} tier3_attempts={silhouette_gate_stats['tier3_attempts']} tier3_silhouette_passed={silhouette_gate_stats['tier3_silhouette_passed']} tier3_silhouette_rejected={silhouette_gate_stats['tier3_silhouette_rejected']} tier3_env_passed={silhouette_gate_stats['tier3_env_passed']} tier3_env_rejected={silhouette_gate_stats['tier3_env_rejected']}")
+    
     # Log final selection
     if object_a is not None and object_b is not None:
         view_a = select_max_projection_view(object_a)
         view_b = select_max_projection_view(object_b)
         overlap_percentage = calculate_geometric_overlap(view_a, view_b)
-        logger.info(f"HYBRID_SELECTED tier={tier_used} threshold={final_threshold} assoc_size={final_assoc_size} evaluated_pairs={search_stats['evaluated_pairs'] if search_stats else 'N/A'} A={object_a.name} B={object_b.name} overlap={overlap_percentage:.2f}")
+        selection_method = "group_similarity" if tier_used == 4 else "silhouette_similarity"
+        logger.info(f"HYBRID_SELECTED tier={tier_used} method={selection_method} threshold={final_threshold} assoc_size={final_assoc_size} evaluated_pairs={search_stats['evaluated_pairs'] if search_stats else 'N/A'} A={object_a.name} B={object_b.name} overlap={overlap_percentage:.2f} shared_trait={group_sim_shared_trait if group_sim_shared_trait else 'N/A'}")
     
     # ========================================================================
     # STEP 6 & 7: HEADLINE & MARKETING TEXT GENERATION
