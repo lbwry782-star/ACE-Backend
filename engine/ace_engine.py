@@ -2774,6 +2774,126 @@ def find_valid_hybrid_pair(
     return (None, None, HybridType.CORE_GEOMETRIC, f"No valid HYBRID pair found (overlap >= {hybrid_threshold} required)", search_stats)
 
 
+def check_silhouette_similarity(object_a: ObjectCandidate, object_b: ObjectCandidate) -> bool:
+    """
+    SILHOUETTE SIMILARITY LAW (PRE-GENERATION — MANDATORY)
+    
+    This law MUST be enforced before any image generation.
+    If it is not satisfied, generation must NOT proceed.
+    
+    CORE RULE:
+    Object A and Object B must share a clearly recognizable outer silhouette.
+    Their similarity must be obvious from SHAPE ALONE.
+    
+    Color, texture, material, scale, and internal details are irrelevant
+    and must be ignored when evaluating similarity.
+    
+    Args:
+        object_a: ObjectCandidate for object A
+        object_b: ObjectCandidate for object B
+    
+    Returns:
+        True if objects share recognizable silhouette similarity, False otherwise
+    
+    Raises:
+        ValueError: If silhouette similarity check fails (prevents generation)
+    """
+    # Get OpenAI API key from environment
+    api_key = os.environ.get('OPENAI_API_KEY')
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY environment variable is not set")
+    
+    # Initialize OpenAI client
+    client = OpenAI(api_key=api_key)
+    
+    # Build prompt for silhouette similarity evaluation
+    prompt = f"""You are evaluating SILHOUETTE SIMILARITY between two objects.
+
+OBJECT A: {object_a.name}
+OBJECT B: {object_b.name}
+
+SILHOUETTE SIMILARITY LAW (MANDATORY):
+
+CORE RULE:
+Object A and Object B must share a clearly recognizable outer silhouette.
+Their similarity must be obvious from SHAPE ALONE.
+
+SILHOUETTE TEST:
+Mentally convert both objects into solid black silhouettes.
+If the outline of Object A does NOT immediately remind you of the outline of Object B, the pair is INVALID.
+If similarity disappears when texture, lighting, or detail is removed, the pair is INVALID.
+
+FORBIDDEN PAIRS:
+Reject any pair where similarity is based on:
+- Concept
+- Function
+- Category
+- Usage
+- Semantic meaning
+- Material alone
+
+Examples of INVALID similarity:
+- Pillow + sofa (conceptual/functional)
+- Bottle + water (usage/function)
+- Chair + table (category/function)
+- Shoe + foot (usage/function)
+- Grass + plant (category)
+
+REQUIRED TYPE OF SIMILARITY:
+Valid pairs MUST share a common shape archetype, such as:
+- Central axis with branching
+- Teardrop / droplet geometry
+- Oval tapering form
+- Fractal repetition
+- Radial symmetry
+- Narrow-to-wide vertical progression
+
+Examples of VALID similarity:
+- Leaf ↔ Tree (branching structure)
+- Lung ↔ Tree (branching structure)
+- Water droplet ↔ Light bulb (teardrop/droplet)
+- Shell ↔ Ear (oval tapering)
+- River delta ↔ Leaf veins (branching/fractal)
+
+FINAL CHECK:
+If the viewer could plausibly mistake one object for a variation, evolution, or scaled form of the other at first glance (based on shape alone), the law is satisfied.
+If the result feels like "one object attached to another", the law is violated.
+
+EVALUATION:
+Evaluate ONLY based on outer silhouette/shape. Ignore color, texture, material, scale, and internal details.
+
+Respond with ONLY "VALID" or "INVALID" followed by a brief one-sentence explanation."""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # Use cost-effective model for this check
+            messages=[
+                {"role": "system", "content": "You are a strict evaluator of silhouette similarity. You must be precise and reject pairs that do not share recognizable outer shape similarity."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.0,  # Deterministic evaluation
+            max_tokens=100
+        )
+        
+        result_text = response.choices[0].message.content.strip().upper()
+        
+        # Check if result indicates VALID similarity
+        is_valid = result_text.startswith("VALID")
+        
+        if is_valid:
+            logger.info(f"SILHOUETTE_CHECK PASSED A={object_a.name} B={object_b.name}")
+            return True
+        else:
+            logger.warning(f"SILHOUETTE_CHECK FAILED A={object_a.name} B={object_b.name} reason={result_text[:100]}")
+            return False
+            
+    except Exception as e:
+        # If LLM check fails, log error but be conservative: reject the pair
+        logger.error(f"SILHOUETTE_CHECK_ERROR A={object_a.name} B={object_b.name} error={str(e)}")
+        # Conservative approach: reject if check fails
+        return False
+
+
 def generate_ad(
     product_name: str,
     product_description: str,
@@ -2913,6 +3033,19 @@ def generate_ad(
             
             # If valid HYBRID found, use it
             if object_a is not None and object_b is not None:
+                # ========================================================================
+                # SILHOUETTE SIMILARITY LAW (PRE-GENERATION — MANDATORY)
+                # ========================================================================
+                # This law MUST be enforced before any image generation.
+                # If it is not satisfied, generation must NOT proceed.
+                # ========================================================================
+                if not check_silhouette_similarity(object_a, object_b):
+                    # Silhouette similarity check failed - reject this pair and continue searching
+                    logger.warning(f"SILHOUETTE_REJECT threshold={hybrid_threshold} assoc_size={association_size} A={object_a.name} B={object_b.name} - continuing search")
+                    object_a = None
+                    object_b = None
+                    continue  # Continue to next relaxation level
+                
                 # Calculate overlap for logging
                 view_a = select_max_projection_view(object_a)
                 view_b = select_max_projection_view(object_b)
@@ -2937,6 +3070,18 @@ def generate_ad(
             object_a = ranked_objs[0]
             object_b = ranked_objs[1]
             hybrid_type = HybridType.CORE_GEOMETRIC
+            
+            # ========================================================================
+            # SILHOUETTE SIMILARITY LAW (PRE-GENERATION — MANDATORY)
+            # ========================================================================
+            # This law MUST be enforced before any image generation.
+            # If it is not satisfied, generation must NOT proceed.
+            # ========================================================================
+            if not check_silhouette_similarity(object_a, object_b):
+                # Silhouette similarity check failed - cannot use fallback pair
+                logger.error(f"SILHOUETTE_REJECT_FALLBACK A={object_a.name} B={object_b.name} - fallback pair rejected")
+                raise ValueError(f"Silhouette similarity check failed for fallback pair ({object_a.name} + {object_b.name}). Generation cannot proceed.")
+            
             # Calculate overlap for logging
             view_a = select_max_projection_view(object_a)
             view_b = select_max_projection_view(object_b)
