@@ -874,7 +874,8 @@ def generate_real_image_bytes(
     object_b: ObjectCandidate,
     hybrid_type: HybridType,
     goal: str,
-    headline: str
+    headline: str,
+    shared_archetype: Optional[str] = None
 ) -> bytes:
     """
     Generate real photorealistic ad image via OpenAI Images API.
@@ -972,7 +973,13 @@ def generate_real_image_bytes(
             f"Do NOT suggest that two objects existed before the hybrid. "
             f"Object B must appear naturally formed within Object A's context. "
             f"The environment must NOT introduce additional objects that compete with or distract from the composition. "
-            f"The environment must reinforce the SILHOUETTE: background contrast must clearly separate the outline, no busy textures behind the silhouette, no visual noise intersecting the contour. "
+            f"SHAPE COMPATIBILITY LAW — MANDATORY: "
+            f"Object A ({object_a.name}) and Object B ({object_b.name}) MUST share the same shape archetype. "
+            f"{f'The shared shape archetype is: {shared_archetype}. ' if shared_archetype else ''}"
+            f"The resulting hybrid must look like a SINGLE object that naturally belongs in A's world. "
+            f"B must inherit the physical shape language of A. "
+            f"The hybrid must appear as a natural shape transformation, NOT an assembly or combination. "
+            f"No visible remnants of A wrapping around B. "
             f"The environment must make the composition feel INEVITABLE, not accidental, not assembled, not improvised, not clever. "
             f"Object B must appear as if it was BORN FROM Object A's environment, not placed into it afterward. "
             f"The connection must feel DISCOVERED, not designed. "
@@ -985,8 +992,9 @@ def generate_real_image_bytes(
             f"MATERIAL & LIGHTING RULES: "
             f"Realistic material interaction between Object B and Object A's environment. "
             f"Soft, neutral, commercial lighting. "
-            f"No harsh shadows, no silhouette blackouts. "
+            f"No harsh shadows. "
             f"Object B must retain visible surface detail. "
+            f"Background contrast must clearly separate the outline, no busy textures behind the object, no visual noise intersecting the contour. "
             f"INTEGRATED HEADLINE — IMAGE GENERATION LAW (MANDATORY): "
             f"The advertisement headline is a VISUAL OBJECT that must be generated INSIDE the image by the image model. "
             f"There is NO external headline rendering. The headline is part of the photographic composition. "
@@ -2372,7 +2380,7 @@ def classify_hybrid_type(
     
     Args:
         overlap_percentage: Geometric overlap (0.0 to 1.0) - guaranteed to meet threshold
-        similarity_basis: "geometric", "material", "structural", "pattern"
+        similarity_basis: "geometric", "material", "structural", "pattern", "shape_archetype"
         requires_material_transformation: True if material analogy is needed
         requires_structural_similarity: True if structural morphology is needed
         requires_micro_structure: True if structural pattern exception is needed
@@ -2392,8 +2400,11 @@ def classify_hybrid_type(
     if requires_micro_structure:
         return HybridType.STRUCTURAL_PATTERN
     
-    # If similarity is purely geometric (outer silhouette)
-    # Note: Threshold gating is done before this function, so overlap is guaranteed to meet threshold
+    # If similarity is based on shape archetype (replaces geometric/silhouette)
+    if similarity_basis == "shape_archetype":
+        return HybridType.CORE_GEOMETRIC
+    
+    # If similarity is purely geometric (outer silhouette) - legacy support
     if similarity_basis == "geometric":
         return HybridType.CORE_GEOMETRIC
     
@@ -2462,11 +2473,11 @@ def evaluate_ab_pair(
         object_a: First object candidate
         object_b: Second object candidate
         quota_state: Batch quota state (for exception quotas)
-        similarity_basis: "geometric", "material", "structural", "pattern"
+        similarity_basis: "geometric", "material", "structural", "pattern", "shape_archetype"
         requires_material_transformation: True if material analogy needed
         requires_structural_similarity: True if structural morphology needed
         requires_micro_structure: True if structural pattern needed
-        hybrid_threshold: Dynamic HYBRID threshold (FIDELITY) for this session
+        hybrid_threshold: Dynamic HYBRID threshold (FIDELITY) for this session (ignored for shape_archetype)
     
     Returns:
         Tuple of (is_valid, hybrid_type, error_message):
@@ -2474,21 +2485,27 @@ def evaluate_ab_pair(
         - hybrid_type: Classification if valid
         - error_message: None if valid, error description if invalid
     """
-    # Step 1: Select max-projection views (maximum silhouette area)
-    view_a = select_max_projection_view(object_a)
-    view_b = select_max_projection_view(object_b)
-    
-    # Step 2: Calculate geometric overlap (deterministic based on shape_family)
-    overlap_percentage = calculate_geometric_overlap(view_a, view_b)
-    
-    # Step 3: Evaluate geometric overlap threshold (HARD GATE with dynamic threshold)
-    hybrid_allowed, side_by_side_forced = evaluate_geometric_overlap_threshold(overlap_percentage, hybrid_threshold)
-    
-    # Step 4: If overlap < threshold, HYBRID is strictly forbidden
-    # SIDE_BY_SIDE is PERMANENTLY DISABLED - reject pair if overlap < threshold
-    if not hybrid_allowed:
-        # HYBRID forbidden, SIDE_BY_SIDE is disabled - reject this pair
-        return (False, HybridType.CORE_GEOMETRIC, f"Overlap {overlap_percentage:.2f} < HYBRID threshold {hybrid_threshold:.2f} (SIDE_BY_SIDE disabled)")
+    # For shape_archetype basis, skip overlap calculation (shape compatibility already verified)
+    if similarity_basis == "shape_archetype":
+        # Shape archetype compatibility already verified - skip overlap threshold
+        overlap_percentage = 1.0  # Set to 1.0 to pass threshold check
+        hybrid_allowed = True
+    else:
+        # Step 1: Select max-projection views (maximum silhouette area)
+        view_a = select_max_projection_view(object_a)
+        view_b = select_max_projection_view(object_b)
+        
+        # Step 2: Calculate geometric overlap (deterministic based on shape_family)
+        overlap_percentage = calculate_geometric_overlap(view_a, view_b)
+        
+        # Step 3: Evaluate geometric overlap threshold (HARD GATE with dynamic threshold)
+        hybrid_allowed, side_by_side_forced = evaluate_geometric_overlap_threshold(overlap_percentage, hybrid_threshold)
+        
+        # Step 4: If overlap < threshold, HYBRID is strictly forbidden
+        # SIDE_BY_SIDE is PERMANENTLY DISABLED - reject pair if overlap < threshold
+        if not hybrid_allowed:
+            # HYBRID forbidden, SIDE_BY_SIDE is disabled - reject this pair
+            return (False, HybridType.CORE_GEOMETRIC, f"Overlap {overlap_percentage:.2f} < HYBRID threshold {hybrid_threshold:.2f} (SIDE_BY_SIDE disabled)")
     
     # Step 5: Classify hybrid type
     hybrid_type = classify_hybrid_type(
@@ -3075,6 +3092,282 @@ Respond with ONLY "VALID" or "INVALID" followed by a brief one-sentence explanat
         return False
 
 
+# ============================================================================
+# SHAPE COMPATIBILITY LAW (Archetype-based)
+# ============================================================================
+
+# Canonical list of Shape Archetypes (closed list - do not add without explicit decision)
+SHAPE_ARCHETYPES = [
+    "central_axis_branching",           # tree, leaf with veins, lung, river delta
+    "concave_half_circle_inner_fold",   # ear, shell, inner bowl
+    "concave_half_circle_spiral",      # spiral shell, snail
+    "elongated_core_ridge_array",       # TV remote ↔ corn cob: elongated body with many protrusions/buttons/kernels
+    "elongated_tapered_ribbing",       # feather, elongated leaf, fish
+    "cylindrical_core_segmentation",    # bamboo, vertebral column, tube with rings
+    "ring_spokes",                     # wheel, clock with hands, symmetric daisy flower
+    "shell_layered_wrap",              # armor, helmet, hard shell with layers
+    "stacked_layers_strata",           # layered rock, layered cake, compressed books
+    "soft_rectangle_tufting",          # sewn pillow/capitonnage - dangerous archetype (same family risk)
+    "spherical_core_pores",            # golf ball, sea sponge, porous coral
+    "blade_serrated_edge",             # saw, serrated leaf, knife - caution with weapons
+    "bulb_narrow_neck",                # light bulb, bottle, droplet - dangerous family
+    "grid_repeating_cells",            # honeycomb, grid, window cells
+    "spiral_tapering_cone"             # spiral shell, conceptual tornado
+]
+
+
+def map_object_to_shape_archetypes(object_name: str) -> List[str]:
+    """
+    Map an object to 1-3 Shape Archetypes.
+    
+    Uses a combination of:
+    1. Manual mapping for common objects
+    2. LLM-based mapping for other objects (returns only from canonical list)
+    
+    Args:
+        object_name: Name of the object
+    
+    Returns:
+        List of 1-3 archetype strings from SHAPE_ARCHETYPES
+    """
+    # Manual mappings for common objects
+    manual_mappings = {
+        # central_axis_branching
+        "tree": ["central_axis_branching"],
+        "leaf": ["central_axis_branching"],
+        "lung": ["central_axis_branching"],
+        "river": ["central_axis_branching"],
+        "delta": ["central_axis_branching"],
+        "veins": ["central_axis_branching"],
+        
+        # concave_half_circle_inner_fold
+        "ear": ["concave_half_circle_inner_fold"],
+        "shell": ["concave_half_circle_inner_fold", "concave_half_circle_spiral"],
+        "bowl": ["concave_half_circle_inner_fold"],
+        
+        # concave_half_circle_spiral
+        "snail": ["concave_half_circle_spiral"],
+        "spiral shell": ["concave_half_circle_spiral"],
+        
+        # elongated_core_ridge_array
+        "remote": ["elongated_core_ridge_array"],
+        "corn": ["elongated_core_ridge_array"],
+        "corn cob": ["elongated_core_ridge_array"],
+        "controller": ["elongated_core_ridge_array"],
+        
+        # elongated_tapered_ribbing
+        "feather": ["elongated_tapered_ribbing"],
+        "fish": ["elongated_tapered_ribbing"],
+        
+        # cylindrical_core_segmentation
+        "bamboo": ["cylindrical_core_segmentation"],
+        "spine": ["cylindrical_core_segmentation"],
+        "vertebra": ["cylindrical_core_segmentation"],
+        
+        # ring_spokes
+        "wheel": ["ring_spokes"],
+        "clock": ["ring_spokes"],
+        "daisy": ["ring_spokes"],
+        
+        # shell_layered_wrap
+        "armor": ["shell_layered_wrap"],
+        "helmet": ["shell_layered_wrap"],
+        
+        # stacked_layers_strata
+        "rock": ["stacked_layers_strata"],
+        "cake": ["stacked_layers_strata"],
+        "books": ["stacked_layers_strata"],
+        
+        # soft_rectangle_tufting
+        "pillow": ["soft_rectangle_tufting"],
+        "cushion": ["soft_rectangle_tufting"],
+        
+        # spherical_core_pores
+        "golf ball": ["spherical_core_pores"],
+        "sponge": ["spherical_core_pores"],
+        "coral": ["spherical_core_pores"],
+        
+        # blade_serrated_edge
+        "saw": ["blade_serrated_edge"],
+        "knife": ["blade_serrated_edge"],
+        
+        # bulb_narrow_neck
+        "light bulb": ["bulb_narrow_neck"],
+        "bottle": ["bulb_narrow_neck"],
+        "droplet": ["bulb_narrow_neck"],
+        
+        # grid_repeating_cells
+        "honeycomb": ["grid_repeating_cells"],
+        "grid": ["grid_repeating_cells"],
+        
+        # spiral_tapering_cone
+        "tornado": ["spiral_tapering_cone"],
+    }
+    
+    # Check manual mapping first
+    object_lower = object_name.lower().strip()
+    for key, archetypes in manual_mappings.items():
+        if key in object_lower or object_lower in key:
+            logger.info(f"SHAPE_MAP object={object_name} archetypes={archetypes} method=manual")
+            return archetypes
+    
+    # LLM-based mapping for unmapped objects
+    api_key = os.environ.get('OPENAI_API_KEY')
+    if not api_key:
+        # Fallback: return empty list if API key not available
+        logger.warning(f"SHAPE_MAP object={object_name} archetypes=[] method=fallback_no_api_key")
+        return []
+    
+    client = OpenAI(api_key=api_key)
+    
+    prompt = f"""Map the object "{object_name}" to 1-3 Shape Archetypes from this EXACT list (respond with ONLY the archetype names, comma-separated):
+
+central_axis_branching
+concave_half_circle_inner_fold
+concave_half_circle_spiral
+elongated_core_ridge_array
+elongated_tapered_ribbing
+cylindrical_core_segmentation
+ring_spokes
+shell_layered_wrap
+stacked_layers_strata
+soft_rectangle_tufting
+spherical_core_pores
+blade_serrated_edge
+bulb_narrow_neck
+grid_repeating_cells
+spiral_tapering_cone
+
+Return ONLY the archetype names (1-3), comma-separated. Do not add explanations."""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a shape archetype mapper. Return only archetype names from the canonical list."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.0,
+            max_tokens=50
+        )
+        
+        result_text = response.choices[0].message.content.strip()
+        # Parse comma-separated archetypes
+        archetypes = [a.strip() for a in result_text.split(",") if a.strip() in SHAPE_ARCHETYPES]
+        
+        # Limit to 1-3 archetypes
+        archetypes = archetypes[:3]
+        
+        if not archetypes:
+            # Fallback: return empty list
+            logger.warning(f"SHAPE_MAP object={object_name} archetypes=[] method=llm_no_match")
+            return []
+        
+        logger.info(f"SHAPE_MAP object={object_name} archetypes={archetypes} method=llm")
+        return archetypes
+        
+    except Exception as e:
+        logger.warning(f"SHAPE_MAP object={object_name} error={str(e)} method=llm_error")
+        return []
+
+
+def shape_compatibility_score(archetypes_a: List[str], archetypes_b: List[str]) -> float:
+    """
+    Calculate shape compatibility score (0-1) based on archetype overlap.
+    
+    Scoring:
+    - Exact match: 1.0 (highest)
+    - Primary archetype match: 0.8
+    - Secondary archetype match: 0.6
+    - No match: 0.0
+    
+    Args:
+        archetypes_a: List of archetypes for object A (1-3 items)
+        archetypes_b: List of archetypes for object B (1-3 items)
+    
+    Returns:
+        Compatibility score between 0.0 and 1.0
+    """
+    if not archetypes_a or not archetypes_b:
+        return 0.0
+    
+    # Check for exact matches
+    set_a = set(archetypes_a)
+    set_b = set(archetypes_b)
+    overlap = set_a.intersection(set_b)
+    
+    if overlap:
+        # Exact match found
+        if len(overlap) == len(archetypes_a) == len(archetypes_b) == 1:
+            # Single archetype, exact match
+            return 1.0
+        elif len(overlap) >= 2:
+            # Multiple archetypes match
+            return 1.0
+        else:
+            # One archetype matches
+            # Check if it's primary (first in list)
+            if archetypes_a[0] in overlap and archetypes_b[0] in overlap:
+                return 0.9  # Primary match
+            else:
+                return 0.7  # Secondary match
+    
+    return 0.0
+
+
+def is_same_family_reject(object_a: ObjectCandidate, object_b: ObjectCandidate) -> bool:
+    """
+    Strong filter to prevent pairs that are "same family" functionally/conceptually.
+    
+    Rejects pairs like:
+    - pillow+cushion, sofa+bed (same furniture family)
+    - bottle+water, bottle+glass (same container family)
+    - wet grass+water (same concept)
+    - Same product in same category
+    
+    Args:
+        object_a: ObjectCandidate for object A
+        object_b: ObjectCandidate for object B
+    
+    Returns:
+        True if pair should be rejected (same family), False otherwise
+    """
+    name_a = object_a.name.lower().strip()
+    name_b = object_b.name.lower().strip()
+    
+    # Same-family groups (functionally/conceptually related)
+    same_family_groups = [
+        # Furniture/soft items
+        ["pillow", "cushion", "mattress", "bed", "sofa", "couch", "blanket", "duvet", "quilt", "comforter"],
+        # Containers/liquids
+        ["bottle", "jar", "can", "vial", "flask", "container", "vessel", "water", "liquid", "glass", "cup", "mug"],
+        # Nature/water
+        ["grass", "wet grass", "water", "rain", "dew", "moisture"],
+        # Tools/cutters
+        ["knife", "saw", "blade", "scissors", "cutter"],
+        # Lighting
+        ["light", "bulb", "lamp", "torch", "flashlight"],
+        # Text/writing
+        ["text", "letter", "word", "sign", "label", "tag", "badge"],
+    ]
+    
+    # Check if both objects belong to the same family group
+    for family_group in same_family_groups:
+        a_in_family = any(family_word in name_a for family_word in family_group)
+        b_in_family = any(family_word in name_b for family_word in family_group)
+        
+        if a_in_family and b_in_family:
+            logger.info(f"SHAPE_REJECT_SAME_FAMILY A={object_a.name} B={object_b.name} family={family_group}")
+            return True
+    
+    # Check for name containment (one contains the other)
+    if name_a in name_b or name_b in name_a:
+        logger.info(f"SHAPE_REJECT_SAME_FAMILY A={object_a.name} B={object_b.name} reason=name_containment")
+        return True
+    
+    return False
+
+
 def find_group_similarity_pair(
     ranked_objs: List[ObjectCandidate],
     quota_state: BatchQuotaState,
@@ -3267,316 +3560,199 @@ def generate_ad(
     goal = goals_for_batch[ad_index] if ad_index < len(goals_for_batch) else goals_for_batch[0]
     
     # ========================================================================
-    # 3-TIER RETRY LADDER WITH SILHOUETTE SIMILARITY & ENVIRONMENT CAUSALITY LAWS
+    # SHAPE COMPATIBILITY LAW (Archetype-based Selection)
     # ========================================================================
-    # Both laws are SELECTION GATES that defer image generation,
-    # NOT hard failures that abort the request.
+    # Replaces Silhouette Similarity system with Shape Archetype compatibility.
     # 
-    # Silhouette Similarity Law: Objects must share recognizable outer silhouette
-    # Environment Causality Law: Object B must emerge from Object A's environment
-    # 
-    # Tier 1: Strict application of both laws, up to 700 evaluations per attempt
-    # Tier 2: Expand search space (increase association_size to 200 or 300)
-    # Tier 3: Controlled relaxation (lower hybrid_threshold slightly, e.g. 0.70 → 0.66)
+    # Core Principles:
+    # - A/B selection based on Shape Archetype compatibility (not silhouette overlap)
+    # - Same-family rejection: prevents pillow+cushion, sofa+bed, bottle+water, etc.
+    # - Environment Causality Law: Object B must emerge from Object A's environment
+    # - No hard-fails: always finds a valid pair, expands search if needed
     # ========================================================================
-    
-    # Read initial HYBRID threshold from environment variable
-    threshold_str = os.environ.get('ACE_HYBRID_THRESHOLD')
-    if threshold_str:
-        try:
-            initial_threshold = float(threshold_str)
-        except ValueError:
-            logger.warning(f"Invalid ACE_HYBRID_THRESHOLD value '{threshold_str}', using default 0.70")
-            initial_threshold = 0.70
-    else:
-        initial_threshold = 0.70  # Default threshold
     
     object_a = None
     object_b = None
     hybrid_type = None
-    search_stats = None
-    final_threshold = None
-    final_assoc_size = None
-    tier_used = 1  # Track which tier succeeded
+    shared_archetype = None
+    shape_compatibility_score_final = 0.0
     
-    # Helper function to search for valid pair with silhouette check
-    def search_with_silhouette_check(threshold_levels, association_levels, tier_num):
-        """Search for valid pair with silhouette check, return (object_a, object_b, hybrid_type, search_stats, threshold, assoc_size) or (None, None, None, None, None, None)"""
-        tier_silhouette_passed = 0
-        tier_silhouette_rejected = 0
-        tier_env_passed = 0
-        tier_env_rejected = 0
+    # Helper function to find best pair using Shape Compatibility
+    def find_best_shape_compatible_pair(association_size: int, min_score: float = 0.7):
+        """
+        Find the best A/B pair using Shape Archetype compatibility.
         
-        for attempt_idx in range(len(threshold_levels)):
-            hybrid_threshold = threshold_levels[attempt_idx]
-            association_size = association_levels[attempt_idx]
-            
-            logger.info(f"HYBRID_SEARCH_ATTEMPT tier={tier_num} attempt={attempt_idx+1} threshold={hybrid_threshold} assoc_size={association_size}")
-            
-            try:
-                # Build associations and object pool for this attempt
-                associations = generate_associations(goal, size=association_size)
-                object_pool = build_object_pool(product_name, product_description, goal=goal, association_size=association_size)
-                
-                # Apply hard sanitation filters (STEP 2.5)
-                sanitized_pool = sanitize_candidate_pool(object_pool)
-                
-                if len(sanitized_pool) == 0:
-                    logger.warning(f"HYBRID_SEARCH_ATTEMPT tier={tier_num} attempt={attempt_idx+1} sanitized_pool_empty")
-                    continue
-                
-                # Log shape family statistics (only on first attempt of tier 1)
-                if tier_num == 1 and attempt_idx == 0:
-                    unknown_count = sum(1 for obj in sanitized_pool if obj.shape_family == "unknown")
-                    total_count = len(sanitized_pool)
-                    logger.info(f"SHAPE_FAMILY_STATS unknown_count={unknown_count} total={total_count}")
-                
-                # Build ranked object list
-                ranked_objs = build_ranked_object_list(sanitized_pool)
-                
-                # Generate candidate pairs (enough to allow 700 evaluations)
-                top_n = min(len(ranked_objs), 600)  # Use up to 600 objects for pairing
-                max_pairs = 1000  # Generate enough pairs to allow 700 evaluations
-                
-                candidate_pairs = generate_candidate_pairs(
-                    ranked_objs, 
-                    max_pairs=max_pairs, 
-                    ad_index=ad_index, 
-                    session_seed=session_seed,
-                    assoc_count=association_size,
-                    top_n=top_n
-                )
-                
-                if len(candidate_pairs) == 0:
-                    logger.warning(f"HYBRID_SEARCH_ATTEMPT tier={tier_num} attempt={attempt_idx+1} no_candidate_pairs")
-                    continue
-                
-                # Search for HYBRID only (SIDE_BY_SIDE is permanently disabled)
-                # Budget: 700 comparisons (hard cap)
-                candidate_a, candidate_b, candidate_hybrid_type, error_msg, candidate_stats = find_valid_hybrid_pair(
-                    candidate_pairs,
-                    quota_state,
-                    ranked_objs,
-                    ad_index=ad_index,
-                    hybrid_threshold=hybrid_threshold,
-                    max_evaluations=700
-                )
-                
-                # Log search statistics
-                rejected_after_overlap = candidate_stats.get('rejected_after_overlap', 0)
-                rejected_too_close = candidate_stats.get('rejected_too_close', 0)
-                rejected_same_association = candidate_stats.get('rejected_same_association', 0)
-                rejected_conceptual_neighbors = candidate_stats.get('rejected_conceptual_neighbors', 0)
-                logger.info(f"HYBRID_SEARCH_STATS tier={tier_num} threshold={hybrid_threshold} assoc_size={association_size} evaluated_pairs={candidate_stats['evaluated_pairs']} passed_overlap={candidate_stats['passed_overlap']} rejected_after_overlap={rejected_after_overlap} rejected_too_close={rejected_too_close} rejected_same_association={rejected_same_association} rejected_conceptual_neighbors={rejected_conceptual_neighbors}")
-                
-                # If valid HYBRID found, check both silhouette similarity and environment causality
-                if candidate_a is not None and candidate_b is not None:
-                    # ========================================================================
-                    # SILHOUETTE SIMILARITY LAW (SELECTION GATE)
-                    # ========================================================================
-                    # This law influences selection by rejecting pairs that don't share
-                    # recognizable silhouette similarity. It defers generation but never blocks it.
-                    # ========================================================================
-                    if not check_silhouette_similarity(candidate_a, candidate_b):
-                        # Silhouette similarity check failed - reject this pair and continue searching
-                        tier_silhouette_rejected += 1
-                        logger.warning(f"SILHOUETTE_REJECT tier={tier_num} threshold={hybrid_threshold} assoc_size={association_size} A={candidate_a.name} B={candidate_b.name} - continuing search")
-                        continue  # Continue to next attempt in this tier
-                    
-                    tier_silhouette_passed += 1
-                    
-                    # ========================================================================
-                    # ENVIRONMENT CAUSALITY LAW (SELECTION GATE)
-                    # ========================================================================
-                    # This law influences selection by rejecting pairs where Object B cannot
-                    # plausibly emerge from Object A's environment. It defers generation but never blocks it.
-                    # Silhouette similarity alone is insufficient - environmental causality is required.
-                    # ========================================================================
-                    if not check_environment_causality(candidate_a, candidate_b):
-                        # Environment causality check failed - reject this pair and continue searching
-                        tier_env_rejected += 1
-                        logger.warning(f"ENV_CAUSALITY_REJECT tier={tier_num} threshold={hybrid_threshold} assoc_size={association_size} A={candidate_a.name} B={candidate_b.name} - continuing search")
-                        continue  # Continue to next attempt in this tier
-                    
-                    tier_env_passed += 1
-                    
-                    # Both checks passed - return this pair with updated stats
-                    candidate_stats['silhouette_passed'] = tier_silhouette_passed
-                    candidate_stats['silhouette_rejected'] = tier_silhouette_rejected
-                    candidate_stats['env_passed'] = tier_env_passed
-                    candidate_stats['env_rejected'] = tier_env_rejected
-                    return (candidate_a, candidate_b, candidate_hybrid_type, candidate_stats, hybrid_threshold, association_size)
-                else:
-                    # No HYBRID found within budget for this attempt
-                    logger.warning(f"HYBRID_NOT_FOUND tier={tier_num} threshold={hybrid_threshold} assoc_size={association_size} evaluated_pairs={candidate_stats['evaluated_pairs']} passed_overlap={candidate_stats['passed_overlap']}")
-                    # Continue to next attempt in this tier
-            except Exception as e:
-                logger.warning(f"HYBRID_SEARCH_ATTEMPT tier={tier_num} attempt={attempt_idx+1} error={str(e)}")
-                continue  # Try next attempt in this tier
-        
-        # No valid pair found in this tier - return stats
-        empty_stats = {
-            'evaluated_pairs': 0,
-            'passed_overlap': 0,
-            'silhouette_passed': tier_silhouette_passed,
-            'silhouette_rejected': tier_silhouette_rejected,
-            'env_passed': tier_env_passed,
-            'env_rejected': tier_env_rejected
-        }
-        return (None, None, None, empty_stats, None, None)
-    
-    # Track silhouette gate statistics
-    silhouette_gate_stats = {
-        'tier1_attempts': 0,
-        'tier1_silhouette_passed': 0,
-        'tier1_silhouette_rejected': 0,
-        'tier1_env_passed': 0,
-        'tier1_env_rejected': 0,
-        'tier2_attempts': 0,
-        'tier2_silhouette_passed': 0,
-        'tier2_silhouette_rejected': 0,
-        'tier2_env_passed': 0,
-        'tier2_env_rejected': 0,
-        'tier3_attempts': 0,
-        'tier3_silhouette_passed': 0,
-        'tier3_silhouette_rejected': 0,
-        'tier3_env_passed': 0,
-        'tier3_env_rejected': 0
-    }
-    
-    # TIER 1: Strict silhouette rule with original relaxation ladder
-    threshold_levels_tier1 = [initial_threshold, 0.65, 0.60, 0.55, 0.50, 0.45]
-    association_levels_tier1 = [80, 120, 200, 300, 500, 700]
-    
-    object_a, object_b, hybrid_type, search_stats, final_threshold, final_assoc_size = search_with_silhouette_check(
-        threshold_levels_tier1, association_levels_tier1, tier_used
-    )
-    
-    # Update silhouette gate stats for tier 1
-    if search_stats:
-        silhouette_gate_stats['tier1_attempts'] = search_stats.get('evaluated_pairs', 0)
-        silhouette_gate_stats['tier1_silhouette_passed'] = search_stats.get('silhouette_passed', 0)
-        silhouette_gate_stats['tier1_silhouette_rejected'] = search_stats.get('silhouette_rejected', 0)
-        silhouette_gate_stats['tier1_env_passed'] = search_stats.get('env_passed', 0)
-        silhouette_gate_stats['tier1_env_rejected'] = search_stats.get('env_rejected', 0)
-    
-    # TIER 2: Expand search space (increase association_size to 200 or 300)
-    if object_a is None or object_b is None:
-        logger.info(f"SILHOUETTE_RETRY tier=2 assoc_size=200,300 - Tier 1 found no valid pairs, expanding search space")
-        tier_used = 2
-        threshold_levels_tier2 = [initial_threshold, 0.65, 0.60, 0.55, 0.50, 0.45]
-        association_levels_tier2 = [200, 300, 400, 500, 600, 700]  # Start with larger association sizes
-        
-        object_a, object_b, hybrid_type, search_stats, final_threshold, final_assoc_size = search_with_silhouette_check(
-            threshold_levels_tier2, association_levels_tier2, tier_used
-        )
-        
-        # Update silhouette gate stats for tier 2
-        if search_stats:
-            silhouette_gate_stats['tier2_attempts'] = search_stats.get('evaluated_pairs', 0)
-            silhouette_gate_stats['tier2_silhouette_passed'] = search_stats.get('silhouette_passed', 0)
-            silhouette_gate_stats['tier2_silhouette_rejected'] = search_stats.get('silhouette_rejected', 0)
-            silhouette_gate_stats['tier2_env_passed'] = search_stats.get('env_passed', 0)
-            silhouette_gate_stats['tier2_env_rejected'] = search_stats.get('env_rejected', 0)
-    
-    # TIER 3: Controlled relaxation (lower hybrid_threshold slightly, e.g. 0.70 → 0.66)
-    if object_a is None or object_b is None:
-        relaxed_threshold = max(0.50, initial_threshold - 0.04)  # Lower by 0.04, but not below 0.50
-        logger.info(f"SILHOUETTE_RETRY tier=3 threshold={relaxed_threshold} - Tier 2 found no valid pairs, relaxing threshold")
-        tier_used = 3
-        threshold_levels_tier3 = [relaxed_threshold, relaxed_threshold - 0.05, relaxed_threshold - 0.10, relaxed_threshold - 0.15, 0.50, 0.45]
-        association_levels_tier3 = [200, 300, 400, 500, 600, 700]  # Keep expanded association sizes
-        
-        object_a, object_b, hybrid_type, search_stats, final_threshold, final_assoc_size = search_with_silhouette_check(
-            threshold_levels_tier3, association_levels_tier3, tier_used
-        )
-        
-        # Update silhouette gate stats for tier 3
-        if search_stats:
-            silhouette_gate_stats['tier3_attempts'] = search_stats.get('evaluated_pairs', 0)
-            silhouette_gate_stats['tier3_silhouette_passed'] = search_stats.get('silhouette_passed', 0)
-            silhouette_gate_stats['tier3_silhouette_rejected'] = search_stats.get('silhouette_rejected', 0)
-            silhouette_gate_stats['tier3_env_passed'] = search_stats.get('env_passed', 0)
-            silhouette_gate_stats['tier3_env_rejected'] = search_stats.get('env_rejected', 0)
-    
-    # GROUP SIMILARITY FALLBACK: If extreme silhouette similarity not found
-    group_sim_shared_trait = None
-    if object_a is None or object_b is None:
-        logger.info(f"GROUP_SIM_FALLBACK: No extreme silhouette similarity found after all tiers, trying group similarity fallback")
-        # Get the ranked objects from the last attempt (or rebuild if needed)
+        Returns:
+            (object_a, object_b, hybrid_type, shared_archetype, score) or (None, None, None, None, 0.0)
+        """
         try:
-            associations = generate_associations(goal, size=200)
-            object_pool = build_object_pool(product_name, product_description, goal=goal, association_size=200)
+            # Build associations and object pool
+            associations = generate_associations(goal, size=association_size)
+            object_pool = build_object_pool(product_name, product_description, goal=goal, association_size=association_size)
+            
+            # Apply hard sanitation filters
             sanitized_pool = sanitize_candidate_pool(object_pool)
+            
+            if len(sanitized_pool) < 2:
+                logger.warning(f"SHAPE_COMPAT: Not enough objects in pool (need at least 2, got {len(sanitized_pool)})")
+                return (None, None, None, None, 0.0)
+            
+            # Build ranked object list
             ranked_objs = build_ranked_object_list(sanitized_pool)
             
-            group_a, group_b, shared_trait = find_group_similarity_pair(
-                ranked_objs,
-                quota_state,
-                ad_index=ad_index,
-                max_evaluations=200
-            )
+            # Map all objects to archetypes
+            obj_archetypes = {}
+            for obj in ranked_objs:
+                archetypes = map_object_to_shape_archetypes(obj.name)
+                obj_archetypes[obj] = archetypes
+                if archetypes:
+                    logger.debug(f"SHAPE_MAP object={obj.name} archetypes={archetypes}")
             
-            if group_a is not None and group_b is not None:
-                object_a = group_a
-                object_b = group_b
-                group_sim_shared_trait = shared_trait
-                hybrid_type = HybridType.CORE_GEOMETRIC
-                tier_used = 4  # Mark as group similarity tier
-                total_attempts = silhouette_gate_stats['tier1_attempts'] + silhouette_gate_stats['tier2_attempts'] + silhouette_gate_stats['tier3_attempts']
-                logger.info(f"GROUP_SIM_FALLBACK_USED A={object_a.name} B={object_b.name} shared_trait={shared_trait} reason=no_extreme_silhouette_found attempts={total_attempts}")
-            else:
-                logger.warning(f"GROUP_SIM_FALLBACK_NO_PAIR: Group similarity fallback also found no valid pairs")
+            # Build compatibility matrix
+            best_pair = None
+            best_score = 0.0
+            best_shared_archetype = None
+            evaluated = 0
+            max_evaluations = min(500, len(ranked_objs) * (len(ranked_objs) - 1) // 2)
+            
+            for i, obj_a in enumerate(ranked_objs):
+                if evaluated >= max_evaluations:
+                    break
+                
+                archetypes_a = obj_archetypes.get(obj_a, [])
+                if not archetypes_a:
+                    continue  # Skip objects without archetypes
+                
+                for j, obj_b in enumerate(ranked_objs[i+1:], start=i+1):
+                    if evaluated >= max_evaluations:
+                        break
+                    
+                    evaluated += 1
+                    archetypes_b = obj_archetypes.get(obj_b, [])
+                    if not archetypes_b:
+                        continue  # Skip objects without archetypes
+                    
+                    # Apply filters BEFORE scoring
+                    # 1. Same-family rejection (STRONG - absolute rejection)
+                    if is_same_family_reject(obj_a, obj_b):
+                        continue
+                    
+                    # 2. Same association rejection
+                    if hasattr(obj_a, 'association_key') and hasattr(obj_b, 'association_key'):
+                        if obj_a.association_key == obj_b.association_key and obj_a.association_key:
+                            continue
+                    
+                    # 3. Conceptual neighbors rejection
+                    if is_conceptually_too_close(obj_a.name, obj_b.name):
+                        continue
+                    
+                    # 4. Same shape family rejection (if not unknown)
+                    if obj_a.shape_family == obj_b.shape_family and obj_a.shape_family != "unknown":
+                        continue
+                    
+                    # Calculate shape compatibility score
+                    score = shape_compatibility_score(archetypes_a, archetypes_b)
+                    
+                    if score < min_score:
+                        continue  # Score too low
+                    
+                    # Check environment causality (still required)
+                    if not check_environment_causality(obj_a, obj_b):
+                        logger.debug(f"SHAPE_PAIR_ENV_REJECT A={obj_a.name} B={obj_b.name} score={score:.2f}")
+                        continue
+                    
+                    # Found a valid pair - check if it's better than current best
+                    if score > best_score:
+                        best_score = score
+                        best_pair = (obj_a, obj_b)
+                        # Find shared archetype
+                        shared = set(archetypes_a).intersection(set(archetypes_b))
+                        best_shared_archetype = list(shared)[0] if shared else archetypes_a[0]
+                        logger.info(f"SHAPE_PAIR_SCORE A={obj_a.name} B={obj_b.name} score={score:.2f} shared_archetype={best_shared_archetype}")
+            
+            if best_pair:
+                obj_a, obj_b = best_pair
+                # Evaluate pair for quota
+                is_valid, hybrid_type_result, error_msg = evaluate_ab_pair(
+                    obj_a,
+                    obj_b,
+                    quota_state,
+                    similarity_basis="shape_archetype",
+                    hybrid_threshold=0.0  # No threshold needed for shape compatibility
+                )
+                
+                if is_valid:
+                    logger.info(f"SHAPE_FINAL_PICK A={obj_a.name} B={obj_b.name} score={best_score:.2f} shared_archetype={best_shared_archetype} evaluated={evaluated}")
+                    return (obj_a, obj_b, hybrid_type_result, best_shared_archetype, best_score)
+                else:
+                    logger.warning(f"SHAPE_PAIR_QUOTA_REJECT A={obj_a.name} B={obj_b.name} reason={error_msg}")
+            
+            logger.warning(f"SHAPE_COMPAT_NO_PAIR min_score={min_score} evaluated={evaluated}")
+            return (None, None, None, None, 0.0)
+            
         except Exception as e:
-            logger.warning(f"GROUP_SIM_FALLBACK_ERROR: {str(e)}")
+            logger.error(f"SHAPE_COMPAT_ERROR: {str(e)}")
+            return (None, None, None, None, 0.0)
     
-    # FINAL FALLBACK: If still no valid pair found after all tiers, use first available pair
-    # This ensures generation NEVER fails - silhouette law influences selection but never blocks
+    # Try to find best pair with shape compatibility (expand search if needed)
+    association_sizes = [80, 120, 200, 300, 500]
+    min_scores = [0.8, 0.7, 0.6, 0.5, 0.4]  # Gradually relax minimum score
+    
+    for assoc_size, min_score in zip(association_sizes, min_scores):
+        logger.info(f"SHAPE_COMPAT_SEARCH assoc_size={assoc_size} min_score={min_score}")
+        obj_a, obj_b, hybrid_type_result, shared_arch, score = find_best_shape_compatible_pair(assoc_size, min_score)
+        
+        if obj_a and obj_b:
+            object_a = obj_a
+            object_b = obj_b
+            hybrid_type = hybrid_type_result
+            shared_archetype = shared_arch
+            shape_compatibility_score_final = score
+            break
+    
+    # FINAL FALLBACK: If still no valid pair found, use first available pair
     if object_a is None or object_b is None:
-        logger.warning("SILHOUETTE_FINAL_FALLBACK: No valid pair found after all tiers, using first available pair (silhouette check bypassed)")
-        # Build a minimal object pool to get at least one pair
+        logger.warning("SHAPE_COMPAT_FINAL_FALLBACK: No shape-compatible pair found, using first available pair")
         try:
             associations = generate_associations(goal, size=80)
             object_pool = build_object_pool(product_name, product_description, goal=goal, association_size=80)
             sanitized_pool = sanitize_candidate_pool(object_pool)
             
-            # Try sanitized pool first
             if len(sanitized_pool) >= 2:
                 ranked_objs = build_ranked_object_list(sanitized_pool)
-                object_a = ranked_objs[0]
-                object_b = ranked_objs[1]
-                hybrid_type = HybridType.CORE_GEOMETRIC
-                final_threshold = initial_threshold
-                final_assoc_size = 80
-                logger.info(f"SILHOUETTE_FINAL_FALLBACK_USED A={object_a.name} B={object_b.name} (silhouette check bypassed for guaranteed generation)")
-            elif len(object_pool) >= 2:
-                # Last resort: use unsanitized pool if sanitized pool is too small
-                # This ensures generation never fails, even if all objects fail hard filters
-                logger.warning("SILHOUETTE_FINAL_FALLBACK: Using unsanitized pool (some hard filters bypassed)")
-                ranked_objs = build_ranked_object_list(object_pool)
-                object_a = ranked_objs[0]
-                object_b = ranked_objs[1]
-                hybrid_type = HybridType.CORE_GEOMETRIC
-                final_threshold = initial_threshold
-                final_assoc_size = 80
-                logger.info(f"SILHOUETTE_FINAL_FALLBACK_USED_UNSANITIZED A={object_a.name} B={object_b.name} (silhouette check and some hard filters bypassed for guaranteed generation)")
+                # Find first pair that passes same-family and environment checks
+                for i, obj_a_candidate in enumerate(ranked_objs):
+                    for obj_b_candidate in ranked_objs[i+1:]:
+                        if not is_same_family_reject(obj_a_candidate, obj_b_candidate):
+                            if check_environment_causality(obj_a_candidate, obj_b_candidate):
+                                object_a = obj_a_candidate
+                                object_b = obj_b_candidate
+                                hybrid_type = HybridType.CORE_GEOMETRIC
+                                # Map to get archetypes for logging
+                                arch_a = map_object_to_shape_archetypes(object_a.name)
+                                arch_b = map_object_to_shape_archetypes(object_b.name)
+                                shared_archetype = list(set(arch_a).intersection(set(arch_b)))[0] if arch_a and arch_b else "fallback"
+                                shape_compatibility_score_final = shape_compatibility_score(arch_a, arch_b) if arch_a and arch_b else 0.0
+                                logger.info(f"SHAPE_COMPAT_FINAL_FALLBACK_USED A={object_a.name} B={object_b.name} shared_archetype={shared_archetype} score={shape_compatibility_score_final:.2f}")
+                                break
+                    if object_a and object_b:
+                        break
+                
+                if not object_a or not object_b:
+                    # Last resort: use first two objects
+                    object_a = ranked_objs[0]
+                    object_b = ranked_objs[1]
+                    hybrid_type = HybridType.CORE_GEOMETRIC
+                    logger.warning(f"SHAPE_COMPAT_LAST_RESORT A={object_a.name} B={object_b.name}")
             else:
-                # Truly last resort: if we can't even get 2 objects from any pool, this is a system error
                 raise ValueError("Insufficient object candidates available (need at least 2 objects)")
         except Exception as e:
-            logger.error(f"SILHOUETTE_FINAL_FALLBACK_ERROR: {str(e)}")
+            logger.error(f"SHAPE_COMPAT_FINAL_FALLBACK_ERROR: {str(e)}")
             raise ValueError(f"Failed to generate object pair: {str(e)}")
-    
-    # Log silhouette gate statistics
-    logger.info(f"SILHOUETTE_GATE_STATS tier1_attempts={silhouette_gate_stats['tier1_attempts']} tier1_silhouette_passed={silhouette_gate_stats['tier1_silhouette_passed']} tier1_silhouette_rejected={silhouette_gate_stats['tier1_silhouette_rejected']} tier1_env_passed={silhouette_gate_stats['tier1_env_passed']} tier1_env_rejected={silhouette_gate_stats['tier1_env_rejected']} tier2_attempts={silhouette_gate_stats['tier2_attempts']} tier2_silhouette_passed={silhouette_gate_stats['tier2_silhouette_passed']} tier2_silhouette_rejected={silhouette_gate_stats['tier2_silhouette_rejected']} tier2_env_passed={silhouette_gate_stats['tier2_env_passed']} tier2_env_rejected={silhouette_gate_stats['tier2_env_rejected']} tier3_attempts={silhouette_gate_stats['tier3_attempts']} tier3_silhouette_passed={silhouette_gate_stats['tier3_silhouette_passed']} tier3_silhouette_rejected={silhouette_gate_stats['tier3_silhouette_rejected']} tier3_env_passed={silhouette_gate_stats['tier3_env_passed']} tier3_env_rejected={silhouette_gate_stats['tier3_env_rejected']}")
     
     # Log final selection
     if object_a is not None and object_b is not None:
-        view_a = select_max_projection_view(object_a)
-        view_b = select_max_projection_view(object_b)
-        overlap_percentage = calculate_geometric_overlap(view_a, view_b)
-        selection_method = "group_similarity" if tier_used == 4 else "silhouette_similarity"
-        logger.info(f"HYBRID_SELECTED tier={tier_used} method={selection_method} threshold={final_threshold} assoc_size={final_assoc_size} evaluated_pairs={search_stats['evaluated_pairs'] if search_stats else 'N/A'} A={object_a.name} B={object_b.name} overlap={overlap_percentage:.2f} shared_trait={group_sim_shared_trait if group_sim_shared_trait else 'N/A'}")
+        logger.info(f"SHAPE_FINAL_SELECTION A={object_a.name} B={object_b.name} shared_archetype={shared_archetype} score={shape_compatibility_score_final:.2f}")
     
     # ========================================================================
     # STEP 6 & 7: HEADLINE & MARKETING TEXT GENERATION
@@ -3610,7 +3786,8 @@ def generate_ad(
             object_b,
             hybrid_type,
             goal,
-            headline
+            headline,
+            shared_archetype=shared_archetype
         )
     except ValueError as e:
         # Re-raise ValueError with clear message (NO PLACEHOLDER FALLBACK)
