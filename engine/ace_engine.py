@@ -736,6 +736,97 @@ def generate_headline(product_name: str, goal: str, ad_index: int = 0) -> str:
 # Headline is integrated directly into the image by the image model.
 # ============================================================================
 
+def derive_environment_binding_mode(obj_name: str, obj_archetypes: List[str], world: str) -> str:
+    """
+    Derive ENVIRONMENT_BINDING_MODE from Object A's archetype/world.
+    
+    The binding mode determines the PHYSICAL CAUSAL LINK between Object A's environment
+    and the existence/pose of Object B. This is NOT about background styling, but about
+    physical constraints that make the object's presence inevitable.
+    
+    Binding Modes:
+    - ROOTED/EMBEDDED: soil/sand/foam/wood grain (tree, plant, rooted objects)
+    - SUBMERGED: liquid/gel/ice (water, liquid environments)
+    - SUSPENDED/HUNG: hooks/cables/gravity tension (industrial, hanging objects)
+    - BOLTED/FASTENED: industrial fixtures (tools, mechanical objects)
+    - GROWN/ORGANICALLY_INTEGRATED: veins/fibers/biological attachment (organic, biological)
+    - CRADLED/NESTED: concave shell/cushion/holder (shells, containers, soft surfaces)
+    
+    Args:
+        obj_name: Name of Object A
+        obj_archetypes: List of shape archetypes for Object A
+        world: World/domain of Object A (from map_association_to_world)
+    
+    Returns:
+        Binding mode string (one of the modes above)
+    """
+    obj_lower = obj_name.lower()
+    
+    # Check archetypes first (most specific)
+    if obj_archetypes:
+        # ROOTED/EMBEDDED for branching/root-like archetypes
+        if "central_axis_branching" in obj_archetypes:
+            return "ROOTED/EMBEDDED"
+        
+        # GROWN/ORGANICALLY_INTEGRATED for organic structures
+        if any(arch in obj_archetypes for arch in ["elongated_tapered_ribbing", "cylindrical_core_segmentation"]):
+            if any(kw in obj_lower for kw in ["plant", "organic", "biological", "natural", "leaf", "flower", "bud", "sprout", "seedling", "vein", "fiber"]):
+                return "GROWN/ORGANICALLY_INTEGRATED"
+        
+        # CRADLED/NESTED for concave/spiral archetypes
+        if any(arch in obj_archetypes for arch in ["concave_half_circle_inner_fold", "concave_half_circle_spiral", "spiral_tapering_cone"]):
+            if any(kw in obj_lower for kw in ["shell", "nest", "cradle", "bowl", "container"]):
+                return "CRADLED/NESTED"
+        
+        # BOLTED/FASTENED for mechanical/industrial archetypes
+        if any(arch in obj_archetypes for arch in ["ring_spokes", "shell_layered_wrap"]):
+            if any(kw in obj_lower for kw in ["tool", "gear", "wheel", "machine", "mechanical", "industrial"]):
+                return "BOLTED/FASTENED"
+        
+        # SUBMERGED for fluid-related archetypes
+        if "bulb_narrow_neck" in obj_archetypes:
+            if any(kw in obj_lower for kw in ["water", "liquid", "fluid", "droplet", "bottle"]):
+                return "SUBMERGED"
+    
+    # Check by object name keywords
+    # SUBMERGED for water/liquid
+    if any(kw in obj_lower for kw in ["water", "dew", "rain", "snow", "ice", "frost", "mist", "fog", "ocean", "sea", "lake", "river", "stream", "pond", "pool", "fountain", "spring", "liquid", "gel"]):
+        return "SUBMERGED"
+    
+    # ROOTED/EMBEDDED for nature/soil-based
+    if any(kw in obj_lower for kw in ["tree", "plant", "root", "soil", "earth", "ground", "sand", "dirt", "mud", "grass", "forest", "garden"]):
+        return "ROOTED/EMBEDDED"
+    
+    # GROWN/ORGANICALLY_INTEGRATED for biological/organic
+    if any(kw in obj_lower for kw in ["leaf", "flower", "bud", "sprout", "seedling", "vein", "fiber", "biological", "organic", "living"]):
+        return "GROWN/ORGANICALLY_INTEGRATED"
+    
+    # BOLTED/FASTENED for industrial/mechanical
+    if any(kw in obj_lower for kw in ["tool", "gear", "cog", "wheel", "pulley", "lever", "mechanism", "machine", "engine", "motor", "turbine", "generator", "wrench", "screwdriver", "hammer", "bolt", "screw", "fixture"]):
+        return "BOLTED/FASTENED"
+    
+    # SUSPENDED/HUNG for hanging/suspended objects
+    if any(kw in obj_lower for kw in ["hook", "cable", "wire", "rope", "chain", "hanging", "suspended", "pendant", "chandelier", "lamp"]):
+        return "SUSPENDED/HUNG"
+    
+    # CRADLED/NESTED for containers/shells/soft surfaces
+    if any(kw in obj_lower for kw in ["shell", "nest", "cradle", "bowl", "container", "vessel", "cup", "dish", "pillow", "cushion", "bed"]):
+        return "CRADLED/NESTED"
+    
+    # Check by world
+    if world == "nature" or world == "outdoor":
+        return "ROOTED/EMBEDDED"
+    elif world == "aquatic" or world == "fluid":
+        return "SUBMERGED"
+    elif world == "industrial" or world == "mechanical":
+        return "BOLTED/FASTENED"
+    elif world == "domestic":
+        return "CRADLED/NESTED"
+    
+    # Default fallback
+    return "ROOTED/EMBEDDED"
+
+
 def derive_environment_for_object(obj_name: str) -> str:
     """
     Derive minimal environment for an object (deterministic mapping).
@@ -909,6 +1000,13 @@ def generate_real_image_bytes(
     # Object B is embedded inside A (ENV_EMBED composition mode)
     environment = derive_environment_for_object(object_a.name)
     
+    # Derive ENVIRONMENT_BINDING_MODE (PHYSICAL CAUSAL LINK)
+    # Get Object A's archetypes and world for binding mode determination
+    obj_a_archetypes = map_object_to_shape_archetypes(object_a.name)
+    obj_a_world = map_association_to_world(object_a.association_key) if object_a.association_key else "abstract"
+    binding_mode = derive_environment_binding_mode(object_a.name, obj_a_archetypes, obj_a_world)
+    logger.info(f"ENV_BINDING_SELECTED A={object_a.name} mode={binding_mode} world={obj_a_world}")
+    
     # Build PRE-INTENT block (deterministic, no API calls)
     pre_intent = build_pre_intent_block(product_name, product_description)
     
@@ -941,22 +1039,28 @@ def generate_real_image_bytes(
             f"This is NOT overlay or composition. "
             f"No collage, no assembly, no glued parts, no two-object composition. "
             f"The composition must read as a SINGLE unified believable commercial photo where B naturally exists within A's environment. "
-            f"ENVIRONMENT LAW — MANDATORY AND UNBREAKABLE: "
-            f"Every image MUST be placed in a realistic, coherent physical environment. "
-            f"No white studio, no abstract background, no generic gradient, no empty void, no neutral background. "
-            f"Environment authority belongs EXCLUSIVELY to Object A ({object_a.name}): the FULL scene, surface, props, lighting, perspective, and ALL context must come from {object_a.name}'s environment. "
-            f"The environment must be clearly {object_a.name}'s domain (workspace / surface / setting / etc. depending on {object_a.name}), realistic and minimal. "
-            f"Object B ({object_b.name}) must appear as a SINGLE inserted subject placed IN {object_a.name}'s environment, with consistent lighting and perspective matching the environment. "
-            f"The environment must logically explain why Object B exists in this context. "
+            f"ENVIRONMENT LAW — PHYSICAL CAUSAL LINK (MANDATORY AND UNBREAKABLE): "
+            f"The environment belongs to Object A ({object_a.name}) ONLY if there is a PHYSICAL RELATIONSHIP that makes Object B's presence/pose inevitable. "
+            f"The environment is NOT a background styling — it is a PHYSICAL ANCHOR that constrains the hybrid object. "
+            f"BINDING MODE: {binding_mode}. "
+            f"The hybrid object MUST be {binding_mode.lower()} in the environment in a physically believable way. "
+            f"At least one visible physical contact point must be present and believable. "
+            f"The contact must match Object A's world (A is the source of the binding physics). "
+            f"The hybrid must LOOK physically constrained by the environment, not freely placed. "
+            f"The environment must create a clear physical constraint on the hybrid object: "
+            f"embedded, rooted, attached, inserted, submerged, supported, hung, bolted, welded, fused-by-growth, etc. "
             f"ABSOLUTELY FORBIDDEN: "
+            f"- A generic studio background (no physical binding). "
+            f"- A themed background with no physical interaction (just decoration). "
+            f"- Object B 'standing on' a generic surface unless that surface is a physically meaningful binding for A. "
             f"- Any leftover parts of Object A wrapping, outlining, or forming a shell around B (no hybrid remnants). "
-            f"- Any neutral studio background, gradient background, or generic scene not tied to A. "
-            f"- Any split scene or half/half composition. "
-            f"- Any background that does not clearly match A's environment. "
+            f"- Any appearance of leftover parts of A wrapping B. "
+            f"- Any assembly/mashup look. "
             f"SUCCESS CONDITION: "
-            f"The viewer must instantly recognize A's environment even if A itself is not visible as an object. "
-            f"The full scene/background must be the natural, recognizable environment/world of Object A. "
-            f"If the model cannot comply, it must output a scene that still clearly matches A's environment and keeps B as a single clean subject (no hybrid). "
+            f"When A={object_a.name}, the hybrid reads as {binding_mode.lower()} (not merely 'in a themed background'). "
+            f"Environment feels 'owned' by A because it physically constrains the object, not because it contains props. "
+            f"The result must NOT look like object B 'standing on' a generic surface unless that surface is a physically meaningful binding for A. "
+            f"The environment can be minimal, but the binding must be undeniable. "
             f"HYBRID RULES — ABSOLUTE LAWS: "
             f"Object B must appear as a natural outcome of Object A's environment. "
             f"NOT a glued object, NOT a merged sculpture, NOT an artificial mashup. "
@@ -984,6 +1088,7 @@ def generate_real_image_bytes(
             f"Object B must appear as if it was BORN FROM Object A's environment, not placed into it afterward. "
             f"The connection must feel DISCOVERED, not designed. "
             f"Environment: {environment} (realistic physical context from {object_a.name}'s world where {object_b.name} would naturally exist embedded within). "
+            f"ENV_BINDING_PROMPT_APPLIED mode={binding_mode} A={object_a.name} B={object_b.name}. "
             f"CAMERA & SPATIAL RULES: "
             f"Straight frontal camera angle only. "
             f"The environment plane must be perpendicular to the viewer. "
