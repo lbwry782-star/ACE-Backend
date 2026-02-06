@@ -736,6 +736,153 @@ def generate_headline(product_name: str, goal: str, ad_index: int = 0) -> str:
 # Headline is integrated directly into the image by the image model.
 # ============================================================================
 
+def derive_morphological_features(shared_archetype: Optional[str], obj_a_archetypes: List[str], obj_b_archetypes: List[str]) -> List[str]:
+    """
+    Derive shared Morphological Feature Set based on Shape Archetype.
+    
+    Morphological features are physical characteristics that can vary within a category:
+    - openness (narrow ↔ wide)
+    - curvature depth (shallow ↔ deep)
+    - fold or rib rhythm (sparse ↔ dense)
+    - symmetry (perfect ↔ organic)
+    - edge character (smooth, scalloped, segmented)
+    - elongation ratio (short ↔ long)
+    
+    Args:
+        shared_archetype: The shared shape archetype between A and B (if any)
+        obj_a_archetypes: List of archetypes for Object A
+        obj_b_archetypes: List of archetypes for Object B
+    
+    Returns:
+        List of morphological features to match between A and B instances
+    """
+    features = []
+    
+    # If we have a shared archetype, derive features from it
+    if shared_archetype:
+        archetype_lower = shared_archetype.lower()
+        
+        # central_axis_branching: focus on branching rhythm and openness
+        if "central_axis_branching" in archetype_lower:
+            features.extend(["branching rhythm (dense, evenly spaced)", "openness (wide, radial spread)", "symmetry (radial, organic)"])
+        
+        # concave_half_circle: focus on curvature depth and fold rhythm
+        elif "concave_half_circle" in archetype_lower:
+            features.extend(["curvature depth (deep, pronounced)", "fold rhythm (dense, layered)", "openness (half-circle, wide opening)"])
+        
+        # elongated_core_ridge_array: focus on protrusion density and spacing
+        elif "elongated_core_ridge" in archetype_lower or "ridge_array" in archetype_lower:
+            features.extend(["protrusion density (dense, evenly spaced)", "elongation ratio (long, consistent)", "edge character (segmented, regular)"])
+        
+        # elongated_tapered_ribbing: focus on rib rhythm and taper
+        elif "elongated_tapered" in archetype_lower or "ribbing" in archetype_lower:
+            features.extend(["rib rhythm (dense, parallel)", "elongation ratio (long, tapered)", "edge character (smooth, ribbed)"])
+        
+        # cylindrical_core_segmentation: focus on segmentation rhythm
+        elif "cylindrical_core" in archetype_lower or "segmentation" in archetype_lower:
+            features.extend(["segmentation rhythm (regular, evenly spaced)", "elongation ratio (long, consistent)", "symmetry (radial, perfect)"])
+        
+        # ring_spokes: focus on spoke density and symmetry
+        elif "ring_spokes" in archetype_lower or "spokes" in archetype_lower:
+            features.extend(["spoke density (dense, evenly distributed)", "symmetry (perfect, radial)", "openness (circular, open center)"])
+        
+        # shell_layered_wrap: focus on layer rhythm and curvature
+        elif "shell_layered" in archetype_lower or "layered_wrap" in archetype_lower:
+            features.extend(["layer rhythm (dense, overlapping)", "curvature depth (deep, protective)", "edge character (smooth, layered)"])
+        
+        # stacked_layers_strata: focus on layer spacing and regularity
+        elif "stacked_layers" in archetype_lower or "strata" in archetype_lower:
+            features.extend(["layer spacing (regular, evenly stacked)", "symmetry (vertical, perfect)", "edge character (smooth, horizontal)"])
+        
+        # spherical_core_pores: focus on pore density and distribution
+        elif "spherical_core" in archetype_lower or "pores" in archetype_lower:
+            features.extend(["pore density (dense, evenly distributed)", "symmetry (spherical, perfect)", "surface character (textured, porous)"])
+        
+        # blade_serrated_edge: focus on serration rhythm and edge character
+        elif "blade_serrated" in archetype_lower or "serrated_edge" in archetype_lower:
+            features.extend(["serration rhythm (dense, regular)", "edge character (sharp, serrated)", "elongation ratio (long, narrow)"])
+        
+        # bulb_narrow_neck: focus on neck proportion and curvature
+        elif "bulb_narrow" in archetype_lower or "narrow_neck" in archetype_lower:
+            features.extend(["neck proportion (narrow, pronounced)", "curvature depth (smooth, bulbous)", "symmetry (radial, perfect)"])
+        
+        # grid_repeating_cells: focus on cell density and regularity
+        elif "grid_repeating" in archetype_lower or "repeating_cells" in archetype_lower:
+            features.extend(["cell density (dense, regular)", "symmetry (perfect, geometric)", "edge character (sharp, angular)"])
+        
+        # spiral_tapering_cone: focus on spiral tightness and taper
+        elif "spiral_tapering" in archetype_lower or "tapering_cone" in archetype_lower:
+            features.extend(["spiral tightness (dense, regular)", "taper ratio (pronounced, smooth)", "curvature depth (deep, continuous)"])
+    
+    # If no shared archetype but we have archetypes, try to find common features
+    elif obj_a_archetypes and obj_b_archetypes:
+        # Check for common morphological patterns
+        common_patterns = []
+        
+        # Check for elongation
+        if any("elongated" in arch for arch in obj_a_archetypes) and any("elongated" in arch for arch in obj_b_archetypes):
+            common_patterns.append("elongation ratio (long, consistent)")
+        
+        # Check for segmentation/rhythm
+        if any("segmentation" in arch or "ribbing" in arch or "ridge" in arch for arch in obj_a_archetypes) and \
+           any("segmentation" in arch or "ribbing" in arch or "ridge" in arch for arch in obj_b_archetypes):
+            common_patterns.append("rhythm (dense, regular)")
+        
+        # Check for curvature
+        if any("curvature" in arch or "concave" in arch or "spiral" in arch for arch in obj_a_archetypes) and \
+           any("curvature" in arch or "concave" in arch or "spiral" in arch for arch in obj_b_archetypes):
+            common_patterns.append("curvature depth (pronounced, smooth)")
+        
+        features.extend(common_patterns)
+    
+    # Default features if nothing specific found
+    if not features:
+        features = ["morphological compatibility (matching proportions, rhythm, and edge character)"]
+    
+    return features
+
+
+def generate_instance_refinement_hints(
+    object_a_name: str,
+    object_b_name: str,
+    shared_archetype: Optional[str],
+    obj_a_archetypes: List[str],
+    obj_b_archetypes: List[str]
+) -> str:
+    """
+    Generate instance refinement hints for image generation prompt.
+    
+    After A/B selection, this refines the specific physical instance of each object
+    to maximize perceived shape similarity. Does NOT change categories, only selects
+    the most morphologically compatible instance.
+    
+    Args:
+        object_a_name: Name of Object A
+        object_b_name: Name of Object B
+        shared_archetype: Shared shape archetype (if any)
+        obj_a_archetypes: List of archetypes for Object A
+        obj_b_archetypes: List of archetypes for Object B
+    
+    Returns:
+        String with instance refinement instructions for the prompt
+    """
+    features = derive_morphological_features(shared_archetype, obj_a_archetypes, obj_b_archetypes)
+    features_str = ", ".join(features)
+    
+    hint = (
+        f"INSTANCE REFINEMENT LAW — MANDATORY: "
+        f"Depict a specific instance of Object A ({object_a_name}) whose morphology closely matches Object B ({object_b_name}) in the following features: {features_str}. "
+        f"Depict a specific instance of Object B ({object_b_name}) whose morphology closely matches Object A ({object_a_name}) in the following features: {features_str}. "
+        f"Avoid generic or average forms of Object A or Object B. "
+        f"Do NOT use a random or default instance. "
+        f"Do NOT depict an average or symbolic version of the object. "
+        f"Select the instance variant that maximizes morphological overlap across these shared features. "
+        f"The hybrid must feel 'inevitable', not approximate. "
+    )
+    
+    return hint
+
+
 def derive_environment_binding_mode(obj_name: str, obj_archetypes: List[str], world: str) -> str:
     """
     Derive ENVIRONMENT_BINDING_MODE from Object A's archetype/world.
@@ -1003,9 +1150,22 @@ def generate_real_image_bytes(
     # Derive ENVIRONMENT_BINDING_MODE (PHYSICAL CAUSAL LINK)
     # Get Object A's archetypes and world for binding mode determination
     obj_a_archetypes = map_object_to_shape_archetypes(object_a.name)
+    obj_b_archetypes = map_object_to_shape_archetypes(object_b.name)
     obj_a_world = map_association_to_world(object_a.association_key) if object_a.association_key else "abstract"
     binding_mode = derive_environment_binding_mode(object_a.name, obj_a_archetypes, obj_a_world)
     logger.info(f"ENV_BINDING_SELECTED A={object_a.name} mode={binding_mode} world={obj_a_world}")
+    
+    # INSTANCE REFINEMENT LAW: Refine specific physical instance to maximize morphological similarity
+    morphological_features = derive_morphological_features(shared_archetype, obj_a_archetypes, obj_b_archetypes)
+    instance_refinement_hint = generate_instance_refinement_hints(
+        object_a.name,
+        object_b.name,
+        shared_archetype,
+        obj_a_archetypes,
+        obj_b_archetypes
+    )
+    logger.info(f"INSTANCE_REFINEMENT_APPLIED A={object_a.name} B={object_b.name} features={morphological_features}")
+    logger.info(f"INSTANCE_VARIANT_HINTS features={morphological_features}")
     
     # Build PRE-INTENT block (deterministic, no API calls)
     pre_intent = build_pre_intent_block(product_name, product_description)
@@ -1089,6 +1249,7 @@ def generate_real_image_bytes(
             f"The connection must feel DISCOVERED, not designed. "
             f"Environment: {environment} (realistic physical context from {object_a.name}'s world where {object_b.name} would naturally exist embedded within). "
             f"ENV_BINDING_PROMPT_APPLIED mode={binding_mode} A={object_a.name} B={object_b.name}. "
+            f"{instance_refinement_hint}"
             f"CAMERA & SPATIAL RULES: "
             f"Straight frontal camera angle only. "
             f"The environment plane must be perpendicular to the viewer. "
