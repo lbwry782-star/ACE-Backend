@@ -842,6 +842,118 @@ def derive_morphological_features(shared_archetype: Optional[str], obj_a_archety
     return features
 
 
+def derive_primary_shape_reason(
+    shared_archetype: Optional[str],
+    morphological_features: List[str]
+) -> str:
+    """
+    Derive ONE primary shape explanation for A/B similarity.
+    
+    This ensures each ad is driven by one clear, dominant shape-based reason,
+    so the result feels inevitable and not over-designed.
+    
+    All other potential shape similarities must be suppressed.
+    
+    Args:
+        shared_archetype: The shared shape archetype between A and B (if any)
+        morphological_features: List of morphological features from instance refinement
+    
+    Returns:
+        Single primary shape reason string (e.g., "radial folding around a central axis")
+    """
+    # If we have a shared archetype, derive reason from it
+    if shared_archetype:
+        archetype_lower = shared_archetype.lower()
+        
+        # central_axis_branching: branching structure
+        if "central_axis_branching" in archetype_lower:
+            return "branching structure growing from a single trunk"
+        
+        # concave_half_circle: concave form
+        elif "concave_half_circle" in archetype_lower:
+            if "inner_fold" in archetype_lower:
+                return "concave form cradling an inner void with layered folds"
+            elif "spiral" in archetype_lower:
+                return "spiral concave form with radial folding"
+            else:
+                return "concave form cradling an inner void"
+        
+        # elongated_core_ridge_array: elongated body with protrusions
+        elif "elongated_core_ridge" in archetype_lower or "ridge_array" in archetype_lower:
+            return "elongated body with evenly spaced protrusions"
+        
+        # elongated_tapered_ribbing: elongated tapered form
+        elif "elongated_tapered" in archetype_lower or "ribbing" in archetype_lower:
+            return "elongated tapered form with parallel ribbing"
+        
+        # cylindrical_core_segmentation: cylindrical segmentation
+        elif "cylindrical_core" in archetype_lower or "segmentation" in archetype_lower:
+            return "cylindrical form with regular segmentation"
+        
+        # ring_spokes: radial spokes
+        elif "ring_spokes" in archetype_lower or "spokes" in archetype_lower:
+            return "radial structure with evenly distributed spokes"
+        
+        # shell_layered_wrap: layered shell
+        elif "shell_layered" in archetype_lower or "layered_wrap" in archetype_lower:
+            return "layered shell wrapping a protected core"
+        
+        # stacked_layers_strata: stacked layers
+        elif "stacked_layers" in archetype_lower or "strata" in archetype_lower:
+            return "vertically stacked layers with regular spacing"
+        
+        # spherical_core_pores: spherical porous form
+        elif "spherical_core" in archetype_lower or "pores" in archetype_lower:
+            return "spherical form with evenly distributed pores"
+        
+        # blade_serrated_edge: serrated edge
+        elif "blade_serrated" in archetype_lower or "serrated_edge" in archetype_lower:
+            return "elongated form with regular serrated edge"
+        
+        # bulb_narrow_neck: bulb with narrow neck
+        elif "bulb_narrow" in archetype_lower or "narrow_neck" in archetype_lower:
+            return "bulbous form with narrow neck transition"
+        
+        # grid_repeating_cells: repeating grid
+        elif "grid_repeating" in archetype_lower or "repeating_cells" in archetype_lower:
+            return "geometric grid with repeating cells"
+        
+        # spiral_tapering_cone: spiral taper
+        elif "spiral_tapering" in archetype_lower or "tapering_cone" in archetype_lower:
+            return "spiral form with continuous tapering"
+    
+    # If no shared archetype, derive from morphological features
+    if morphological_features:
+        # Look for dominant feature patterns
+        features_str = " ".join(morphological_features).lower()
+        
+        if "branching" in features_str or "branch" in features_str:
+            return "branching structure with radial growth pattern"
+        elif "protrusion" in features_str or "ridge" in features_str:
+            return "elongated form with evenly spaced protrusions"
+        elif "rib" in features_str:
+            return "elongated form with parallel ribbing"
+        elif "segment" in features_str:
+            return "cylindrical form with regular segmentation"
+        elif "spoke" in features_str:
+            return "radial structure with evenly distributed spokes"
+        elif "layer" in features_str:
+            return "layered structure with regular spacing"
+        elif "pore" in features_str:
+            return "spherical form with evenly distributed pores"
+        elif "serrat" in features_str:
+            return "elongated form with regular serrated edge"
+        elif "spiral" in features_str:
+            return "spiral form with continuous curvature"
+        elif "concave" in features_str or "curvature" in features_str:
+            return "concave form with pronounced curvature"
+        elif "elongation" in features_str:
+            return "elongated form with consistent proportions"
+    
+    # Default fallback
+    return "shared morphological structure with matching proportions and rhythm"
+
+
 def generate_instance_refinement_hints(
     object_a_name: str,
     object_b_name: str,
@@ -1167,6 +1279,10 @@ def generate_real_image_bytes(
     logger.info(f"INSTANCE_REFINEMENT_APPLIED A={object_a.name} B={object_b.name} features={morphological_features}")
     logger.info(f"INSTANCE_VARIANT_HINTS features={morphological_features}")
     
+    # SINGLE CAUSAL SHAPE EXPLANATION: Choose ONE primary shape reason for similarity
+    primary_shape_reason = derive_primary_shape_reason(shared_archetype, morphological_features)
+    logger.info(f"PRIMARY_SHAPE_REASON_SELECTED A={object_a.name} B={object_b.name} reason={primary_shape_reason}")
+    
     # Build PRE-INTENT block (deterministic, no API calls)
     pre_intent = build_pre_intent_block(product_name, product_description)
     
@@ -1250,6 +1366,11 @@ def generate_real_image_bytes(
             f"Environment: {environment} (realistic physical context from {object_a.name}'s world where {object_b.name} would naturally exist embedded within). "
             f"ENV_BINDING_PROMPT_APPLIED mode={binding_mode} A={object_a.name} B={object_b.name}. "
             f"{instance_refinement_hint}"
+            f"SINGLE CAUSAL SHAPE EXPLANATION — MANDATORY: "
+            f"The visual similarity between Object A ({object_a.name}) and Object B ({object_b.name}) must be explained ONLY by: {primary_shape_reason}. "
+            f"Do not introduce secondary or alternative visual reasons for similarity. "
+            f"Suppress all other potential shape similarities. "
+            f"The hybrid must feel visually inevitable based on this single dominant shape reason. "
             f"CAMERA & SPATIAL RULES: "
             f"Straight frontal camera angle only. "
             f"The environment plane must be perpendicular to the viewer. "
