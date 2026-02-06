@@ -456,6 +456,21 @@ def health():
     return 'ok', 200
 
 
+@app.route('/api/ipn/<token>', methods=['GET', 'POST'])
+def icount_ipn(token):
+    """
+    iCount IPN endpoint - receives webhook notifications from iCount payment system.
+    
+    Args:
+        token: The IPN token identifier
+    
+    Returns:
+        "OK", 200
+    """
+    logger.info(f"ICOUNT_IPN_RECEIVED token={token} method={request.method} args={request.args.to_dict()} form={request.form.to_dict()}")
+    return "OK", 200
+
+
 if __name__ == '__main__':
     import os
     port = int(os.environ.get('PORT', 5000))
