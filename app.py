@@ -842,7 +842,12 @@ def quota_status():
     If session has started (consumed >= 1), any generate/preview request without valid page_token will lock the session.
     
     Query parameters:
-        payment_session: The payment session ID to check
+        payment_session: The payment session ID to check (optional - will be derived from cookie if missing)
+    
+    Behavior:
+    - If cookie exists, derives payment_session from cookie mapping in DB
+    - If payment_session provided in query, validates it matches cookie session
+    - If no cookie, returns 401 not_authorized
     
     Returns:
         JSON: {
@@ -855,20 +860,43 @@ def quota_status():
             "can_generate": true/false,
             "page_token": "..." (only if paid=true)
         }
-        Error: 400 if payment_session parameter is missing
+        Error: 401 if no cookie, 403 if cookie doesn't match payment_session
         
     Headers:
         Cache-Control: no-store, no-cache, must-revalidate, max-age=0
         Pragma: no-cache
         Expires: 0
     """
-    payment_session = request.args.get('payment_session')
+    # Try to get payment_session from query parameter
+    payment_session_from_query = request.args.get('payment_session')
     
-    if not payment_session:
+    # Get payment_session from cookie (most reliable)
+    cookie_id = request.cookies.get('ace_pay_claim')
+    if not cookie_id:
         return jsonify({
             'status': 'error',
-            'message': 'payment_session parameter is required'
-        }), 400
+            'message': 'not_authorized'
+        }), 401
+    
+    # Derive payment_session from cookie mapping in DB
+    payment_session_from_cookie = db_session.get_payment_session_from_cookie(cookie_id)
+    if not payment_session_from_cookie:
+        return jsonify({
+            'status': 'error',
+            'message': 'not_authorized'
+        }), 401
+    
+    # If payment_session provided in query, validate it matches cookie session
+    if payment_session_from_query:
+        if payment_session_from_query != payment_session_from_cookie:
+            return jsonify({
+                'status': 'error',
+                'message': 'not_authorized'
+            }), 403
+        payment_session = payment_session_from_query
+    else:
+        # Use cookie-derived payment_session
+        payment_session = payment_session_from_cookie
     
     # Check payment status (persistent DB)
     paid = db_session.is_payment_paid(payment_session)
