@@ -582,7 +582,7 @@ def quota_status():
         payment_session: The payment session ID to check
     
     Returns:
-        JSON: {"payment_session": "...", "paid": true/false, "max": 3, "consumed": n, "remaining": max-consumed}
+        JSON: {"payment_session": "...", "paid": true/false, "max": 0 or 3, "consumed": n, "remaining": n}
         Error: 400 if payment_session parameter is missing
     """
     payment_session = request.args.get('payment_session')
@@ -593,24 +593,35 @@ def quota_status():
             'message': 'payment_session parameter is required'
         }), 400
     
-    # Check payment status
+    # Check payment status (same logic as /api/payment-status)
     payment_info = paid_sessions.get(payment_session)
     paid = payment_info.get('paid', False) if payment_info else False
     
-    # Check quota
+    # If not paid, return zeros
+    if not paid:
+        return jsonify({
+            "payment_session": payment_session,
+            "paid": False,
+            "max": 0,
+            "consumed": 0,
+            "remaining": 0
+        }), 200
+    
+    # If paid, check quota (lazy init if needed)
     quota_info = quota_by_session.get(payment_session)
-    if quota_info:
-        max_quota = quota_info.get('max', 3)
-        consumed = quota_info.get('consumed', 0)
-        remaining = max_quota - consumed
-    else:
-        max_quota = 3
-        consumed = 0
-        remaining = 0
+    if not quota_info:
+        # Lazy initialization for paid session without quota entry
+        quota_by_session[payment_session] = {"max": 3, "consumed": 0}
+        logger.info(f"QUOTA_LAZY_INIT payment_session={payment_session} max=3 consumed=0")
+        quota_info = quota_by_session[payment_session]
+    
+    max_quota = quota_info.get('max', 3)
+    consumed = quota_info.get('consumed', 0)
+    remaining = max_quota - consumed
     
     return jsonify({
         "payment_session": payment_session,
-        "paid": paid,
+        "paid": True,
         "max": max_quota,
         "consumed": consumed,
         "remaining": remaining
