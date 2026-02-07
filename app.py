@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 # Maps payment_session -> {"paid": bool, "docnum": str, "doctype": str, "at": datetime}
 paid_sessions = {}
 
+# Quota tracking (in-memory storage)
+# Maps payment_session -> {"max": 3, "consumed": int}
+quota_by_session = {}
+
 # Lazy import function for engine (avoids heavy initialization on startup)
 def get_engine_functions():
     """Lazy import of engine functions - only called when needed"""
@@ -52,7 +56,8 @@ def generate():
             "material_analogy_used": boolean,
             "structural_morphology_used": boolean,
             "structural_exception_used": boolean
-        }
+        },
+        "payment_session": string (required)
     }
     
     Success: Returns ZIP file (application/zip) with X-ACE-Batch-State header
@@ -78,6 +83,43 @@ def generate():
         ad_index = data.get('adIndex', 0)  # Get ad_index from request, default 0
         session_seed = data.get('sessionSeed')  # Optional session seed for deterministic window selection
         batch_state_dict = data.get('batchState')  # Optional
+        payment_session = data.get('payment_session')  # Required for quota check
+        
+        # Payment and quota validation (before engine import)
+        if not payment_session:
+            logger.warning(f"Request {request_id}: Missing payment_session")
+            return jsonify({
+                'error': 'payment_required'
+            }), 403
+        
+        # Check if payment_session is marked as paid
+        payment_info = paid_sessions.get(payment_session)
+        if not payment_info or not payment_info.get('paid', False):
+            logger.warning(f"Request {request_id}: Payment session not paid: {payment_session}")
+            return jsonify({
+                'error': 'payment_required'
+            }), 403
+        
+        # Check quota
+        quota_info = quota_by_session.get(payment_session)
+        if not quota_info:
+            logger.warning(f"Request {request_id}: Quota not found for payment_session: {payment_session}")
+            return jsonify({
+                'error': 'payment_required'
+            }), 403
+        
+        consumed = quota_info.get('consumed', 0)
+        max_quota = quota_info.get('max', 3)
+        
+        if consumed >= max_quota:
+            logger.warning(f"Request {request_id}: Quota exceeded for payment_session: {payment_session} (consumed={consumed}/{max_quota})")
+            return jsonify({
+                'error': 'quota_exceeded'
+            }), 403
+        
+        # Consume one quota
+        quota_info['consumed'] = consumed + 1
+        logger.info(f"QUOTA_CONSUME payment_session={payment_session} consumed={consumed + 1}/{max_quota}")
         
         # Load quota_state from X-ACE-Batch-State header if present, otherwise from request JSON
         batch_state_header = request.headers.get('X-ACE-Batch-State')
@@ -492,6 +534,11 @@ def icount_ipn(token):
             "at": timestamp
         }
         logger.info(f"PAYMENT_MARKED_PAID payment_session={payment_session} docnum={docnum} doctype={doctype}")
+        
+        # Initialize quota for new payment_session
+        if payment_session not in quota_by_session:
+            quota_by_session[payment_session] = {"max": 3, "consumed": 0}
+            logger.info(f"QUOTA_INIT payment_session={payment_session} max=3 consumed=0")
     
     return "OK", 200
 
@@ -523,6 +570,50 @@ def payment_status():
     return jsonify({
         "payment_session": payment_session,
         "paid": paid
+    }), 200
+
+
+@app.route('/api/quota-status', methods=['GET'])
+def quota_status():
+    """
+    Check quota status for a given payment_session.
+    
+    Query parameters:
+        payment_session: The payment session ID to check
+    
+    Returns:
+        JSON: {"payment_session": "...", "paid": true/false, "max": 3, "consumed": n, "remaining": max-consumed}
+        Error: 400 if payment_session parameter is missing
+    """
+    payment_session = request.args.get('payment_session')
+    
+    if not payment_session:
+        return jsonify({
+            'status': 'error',
+            'message': 'payment_session parameter is required'
+        }), 400
+    
+    # Check payment status
+    payment_info = paid_sessions.get(payment_session)
+    paid = payment_info.get('paid', False) if payment_info else False
+    
+    # Check quota
+    quota_info = quota_by_session.get(payment_session)
+    if quota_info:
+        max_quota = quota_info.get('max', 3)
+        consumed = quota_info.get('consumed', 0)
+        remaining = max_quota - consumed
+    else:
+        max_quota = 3
+        consumed = 0
+        remaining = 0
+    
+    return jsonify({
+        "payment_session": payment_session,
+        "paid": paid,
+        "max": max_quota,
+        "consumed": consumed,
+        "remaining": remaining
     }), 200
 
 
