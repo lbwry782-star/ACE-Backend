@@ -46,6 +46,15 @@ def init_db():
             )
         """)
         
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS page_tokens (
+                payment_session TEXT PRIMARY KEY,
+                page_token TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (payment_session) REFERENCES payment_sessions(payment_session)
+            )
+        """)
+        
         conn.commit()
         logger.info(f"Database initialized at {DB_PATH}")
     except Exception as e:
@@ -254,6 +263,63 @@ def get_cookie_from_payment_session(payment_session: str) -> Optional[str]:
         return row['cookie_id'] if row else None
     except Exception as e:
         logger.error(f"Error getting cookie from payment session: {e}", exc_info=True)
+        return None
+    finally:
+        conn.close()
+
+def create_page_token(payment_session: str) -> str:
+    """Create a new page token for a payment session."""
+    import uuid
+    conn = get_db_connection()
+    try:
+        page_token = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute("""
+            INSERT OR REPLACE INTO page_tokens (payment_session, page_token, created_at)
+            VALUES (?, ?, ?)
+        """, (payment_session, page_token, now))
+        conn.commit()
+        logger.info(f"Page token created for payment_session: {payment_session}")
+        return page_token
+    except Exception as e:
+        logger.error(f"Error creating page token: {e}", exc_info=True)
+        raise
+    finally:
+        conn.close()
+
+def validate_page_token(payment_session: str, page_token: Optional[str]) -> bool:
+    """Validate a page token for a payment session. Returns True if valid, False otherwise."""
+    if not page_token:
+        return False
+    
+    conn = get_db_connection()
+    try:
+        cursor = conn.execute(
+            "SELECT page_token FROM page_tokens WHERE payment_session = ?",
+            (payment_session,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return False
+        return row['page_token'] == page_token
+    except Exception as e:
+        logger.error(f"Error validating page token: {e}", exc_info=True)
+        return False
+    finally:
+        conn.close()
+
+def get_page_token(payment_session: str) -> Optional[str]:
+    """Get the current page token for a payment session."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.execute(
+            "SELECT page_token FROM page_tokens WHERE payment_session = ?",
+            (payment_session,)
+        )
+        row = cursor.fetchone()
+        return row['page_token'] if row else None
+    except Exception as e:
+        logger.error(f"Error getting page token: {e}", exc_info=True)
         return None
     finally:
         conn.close()
