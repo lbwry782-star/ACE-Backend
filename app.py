@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file, Response, redirect
+from flask import Flask, request, jsonify, send_file, Response
 from flask_cors import CORS
 import uuid
 import logging
@@ -6,28 +6,21 @@ import io
 import zipfile
 import json
 import base64
-from datetime import datetime, timezone
 # Lazy import: engine only loaded when needed (not for /health endpoint)
 # from engine.ace_engine import generate_ad, quota_state_from_dict, quota_state_to_dict
-# Persistent session storage
-import db_session
 
 app = Flask(__name__)
 
 # Configure CORS for specific origins only, expose X-ACE-Batch-State header
-# supports_credentials=True allows cookies to be sent with requests
 CORS(app, origins=[
     "https://ace-advertising.agency",
     "http://localhost:5173"
-], expose_headers=["X-ACE-Batch-State"], supports_credentials=True)
+], expose_headers=["X-ACE-Batch-State"])
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize persistent database
-db_session.init_db()
-logger.info("Persistent session storage initialized")
 
 # Lazy import function for engine (avoids heavy initialization on startup)
 def get_engine_functions():
@@ -55,8 +48,7 @@ def generate():
             "material_analogy_used": boolean,
             "structural_morphology_used": boolean,
             "structural_exception_used": boolean
-        },
-        "payment_session": string (required)
+        }
     }
     
     Success: Returns ZIP file (application/zip) with X-ACE-Batch-State header
@@ -82,63 +74,6 @@ def generate():
         ad_index = data.get('adIndex', 0)  # Get ad_index from request, default 0
         session_seed = data.get('sessionSeed')  # Optional session seed for deterministic window selection
         batch_state_dict = data.get('batchState')  # Optional
-        payment_session = data.get('payment_session')  # Required for quota check
-        
-        # Payment and quota validation (before engine import)
-        if not payment_session:
-            logger.warning(f"Request {request_id}: Missing payment_session")
-            return jsonify({
-                'error': 'payment_required'
-            }), 403
-        
-        # Check if payment_session is marked as paid (persistent DB)
-        if not db_session.is_payment_paid(payment_session):
-            logger.warning(f"Request {request_id}: Payment session not paid: {payment_session}")
-            return jsonify({
-                'error': 'payment_required'
-            }), 403
-        
-        # Get quota info from persistent DB
-        quota_info = db_session.get_quota_info(payment_session)
-        if not quota_info:
-            # Initialize quota if needed
-            quota_info = db_session.init_quota_if_needed(payment_session)
-        
-        consumed = quota_info['consumed']
-        max_quota = quota_info['max']
-        
-        if consumed >= max_quota:
-            logger.warning(f"Request {request_id}: Quota exceeded for payment_session: {payment_session} (consumed={consumed}/{max_quota})")
-            return jsonify({
-                'error': 'quota_exceeded'
-            }), 403
-        
-        # Cookie-based authorization check (persistent DB)
-        cookie_id = request.cookies.get('ace_pay_claim')
-        if not cookie_id:
-            logger.warning(f"Request {request_id}: Missing cookie ace_pay_claim")
-            return jsonify({
-                'error': 'not_authorized'
-            }), 403
-        
-        # Check if cookie_id is bound to a payment_session (persistent DB)
-        bound_payment_session = db_session.get_payment_session_from_cookie(cookie_id)
-        if not bound_payment_session:
-            logger.warning(f"Request {request_id}: Cookie {cookie_id} not found in database")
-            return jsonify({
-                'error': 'not_authorized'
-            }), 403
-        
-        # Check if cookie is bound to the correct payment_session
-        if bound_payment_session != payment_session:
-            logger.warning(f"Request {request_id}: Cookie {cookie_id} bound to {bound_payment_session}, but request has {payment_session}")
-            return jsonify({
-                'error': 'not_authorized'
-            }), 403
-        
-        # Consume one quota (persistent DB)
-        new_consumed = db_session.consume_quota(payment_session)
-        logger.info(f"QUOTA_CONSUME payment_session={payment_session} consumed={new_consumed}/{max_quota}")
         
         # Load quota_state from X-ACE-Batch-State header if present, otherwise from request JSON
         batch_state_header = request.headers.get('X-ACE-Batch-State')
@@ -331,12 +266,11 @@ def preview():
             "material_analogy_used": boolean,
             "structural_morphology_used": boolean,
             "structural_exception_used": boolean
-        },
-        "payment_session": string (required)
+        }
     }
     
     Success: Returns JSON with imageBase64, marketingText, batchState and X-ACE-Batch-State header
-    Error: Returns JSON with error message and batchState (HTTP 400, 403, or 500)
+    Error: Returns JSON with error message and batchState (HTTP 400 or 500)
     """
     request_id = str(uuid.uuid4())
     current_batch_state = None  # Track batch state for error responses
@@ -358,69 +292,6 @@ def preview():
         ad_index = data.get('adIndex', 0)  # Get ad_index from request, default 0
         session_seed = data.get('sessionSeed')  # Optional session seed for deterministic window selection
         batch_state_dict = data.get('batchState')  # Optional
-        payment_session = data.get('payment_session')  # Required for quota check
-        
-        # Payment and quota validation (before engine import) - same as /api/generate
-        if not payment_session:
-            logger.warning(f"Request {request_id}: Missing payment_session")
-            return jsonify({
-                'status': 'error',
-                'message': 'payment_required'
-            }), 403
-        
-        # Check if payment_session is marked as paid (persistent DB)
-        if not db_session.is_payment_paid(payment_session):
-            logger.warning(f"Request {request_id}: Payment session not paid: {payment_session}")
-            return jsonify({
-                'status': 'error',
-                'message': 'payment_required'
-            }), 403
-        
-        # Get quota info from persistent DB
-        quota_info = db_session.get_quota_info(payment_session)
-        if not quota_info:
-            # Initialize quota if needed
-            quota_info = db_session.init_quota_if_needed(payment_session)
-        
-        consumed = quota_info['consumed']
-        max_quota = quota_info['max']
-        
-        if consumed >= max_quota:
-            logger.warning(f"Request {request_id}: Quota exceeded for payment_session: {payment_session} (consumed={consumed}/{max_quota})")
-            return jsonify({
-                'status': 'error',
-                'message': 'quota_exceeded'
-            }), 403
-        
-        # Cookie-based authorization check (persistent DB)
-        cookie_id = request.cookies.get('ace_pay_claim')
-        if not cookie_id:
-            logger.warning(f"Request {request_id}: Missing cookie ace_pay_claim")
-            return jsonify({
-                'status': 'error',
-                'message': 'not_authorized'
-            }), 403
-        
-        # Check if cookie_id is bound to a payment_session (persistent DB)
-        bound_payment_session = db_session.get_payment_session_from_cookie(cookie_id)
-        if not bound_payment_session:
-            logger.warning(f"Request {request_id}: Cookie {cookie_id} not found in database")
-            return jsonify({
-                'status': 'error',
-                'message': 'not_authorized'
-            }), 403
-        
-        # Check if cookie is bound to the correct payment_session
-        if bound_payment_session != payment_session:
-            logger.warning(f"Request {request_id}: Cookie {cookie_id} bound to {bound_payment_session}, but request has {payment_session}")
-            return jsonify({
-                'status': 'error',
-                'message': 'not_authorized'
-            }), 403
-        
-        # Consume one quota (persistent DB)
-        new_consumed = db_session.consume_quota(payment_session)
-        logger.info(f"QUOTA_CONSUME payment_session={payment_session} consumed={new_consumed}/{max_quota}")
         
         # Load quota_state from X-ACE-Batch-State header if present, otherwise from request JSON
         batch_state_header = request.headers.get('X-ACE-Batch-State')
@@ -586,380 +457,6 @@ def health():
     return 'ok', 200
 
 
-@app.route('/api/claim-payment', methods=['POST'])
-def claim_payment():
-    """
-    Claim a payment_session by binding it to a browser cookie.
-    
-    Request JSON:
-    {
-        "payment_session": string (required)
-    }
-    
-    Returns:
-        Success: 200 {"ok": true} with Set-Cookie header
-        Error: 400 if payment_session missing, 403 if not paid or already claimed
-    """
-    data = request.get_json()
-    if not data:
-        return jsonify({
-            'status': 'error',
-            'message': 'JSON body required'
-        }), 400
-    
-    payment_session = data.get('payment_session')
-    if not payment_session:
-        return jsonify({
-            'status': 'error',
-            'message': 'payment_session is required'
-        }), 400
-    
-    # Check if payment_session is paid (persistent DB)
-    if not db_session.is_payment_paid(payment_session):
-        return jsonify({
-            'error': 'payment_required'
-        }), 403
-    
-    # Check if payment_session is already claimed by another cookie (persistent DB)
-    existing_cookie_id = db_session.get_cookie_from_payment_session(payment_session)
-    if existing_cookie_id:
-        return jsonify({
-            'error': 'already_claimed'
-        }), 403
-    
-    # Generate new cookie_id
-    cookie_id = str(uuid.uuid4())
-    
-    # Store mapping in persistent DB
-    db_session.bind_cookie_to_session(cookie_id, payment_session)
-    
-    logger.info(f"PAYMENT_CLAIMED payment_session={payment_session} cookie_id={cookie_id}")
-    
-    # Create response with cookie
-    response = jsonify({"ok": True})
-    response.set_cookie(
-        'ace_pay_claim',
-        cookie_id,
-        httponly=True,
-        secure=True,
-        samesite='Lax',
-        path='/'
-    )
-    
-    return response, 200
-
-
-@app.route('/api/ipn/<token>', methods=['GET', 'POST'])
-def icount_ipn(token):
-    """
-    iCount IPN endpoint - receives webhook notifications from iCount payment system.
-    
-    Args:
-        token: The IPN token identifier
-    
-    Returns:
-        "OK", 200
-    """
-    logger.info(f"ICOUNT_IPN_RECEIVED token={token} method={request.method} args={request.args.to_dict()} form={request.form.to_dict()}")
-    
-    # Extract payment_session from form data
-    form_data = request.form.to_dict()
-    payment_session = form_data.get('payment_session')
-    
-    if payment_session:
-        # Extract docnum and doctype from form
-        docnum = form_data.get('docnum', '')
-        doctype = form_data.get('doctype', '')
-        
-        # Mark payment as paid (persistent DB)
-        db_session.mark_payment_paid(payment_session, docnum, doctype)
-        logger.info(f"PAYMENT_MARKED_PAID payment_session={payment_session} docnum={docnum} doctype={doctype}")
-        
-        # Initialize quota for new payment_session (persistent DB)
-        quota_info = db_session.get_quota_info(payment_session)
-        if not quota_info:
-            db_session.init_quota_if_needed(payment_session)
-            logger.info(f"QUOTA_INIT payment_session={payment_session} max=3 consumed=0")
-    
-    return "OK", 200
-
-
-@app.route('/api/payment-status', methods=['GET'])
-def payment_status():
-    """
-    Check payment status for a given payment_session.
-    
-    Query parameters:
-        payment_session: The payment session ID to check
-    
-    Returns:
-        JSON: {"payment_session": "<id>", "paid": true/false}
-        Error: 400 if payment_session parameter is missing
-    """
-    payment_session = request.args.get('payment_session')
-    
-    if not payment_session:
-        return jsonify({
-            'status': 'error',
-            'message': 'payment_session parameter is required'
-        }), 400
-    
-    # Check if payment_session is paid (persistent DB)
-    paid = db_session.is_payment_paid(payment_session)
-    
-    return jsonify({
-        "payment_session": payment_session,
-        "paid": paid
-    }), 200
-
-
-@app.route('/api/payment-return', methods=['GET'])
-def payment_return():
-    """
-    Payment return endpoint - handles iCount success redirect.
-    
-    This endpoint receives payment_session from iCount, verifies payment,
-    sets the authorization cookie, and redirects to clean Builder URL.
-    
-    Query parameters:
-        payment_session: The payment session ID from iCount
-    
-    Behavior:
-    - Verifies payment_session is paid in DB
-    - If already claimed, reuses existing cookie
-    - If not claimed, creates new cookie and binds it
-    - Sets HttpOnly cookie and redirects to clean /builder URL
-    
-    Returns:
-        Redirect (302) to https://ace-advertising.agency/builder
-        Error: 400 if payment_session missing, 403 if not paid
-    """
-    payment_session = request.args.get('payment_session')
-    
-    if not payment_session:
-        return jsonify({
-            'status': 'error',
-            'message': 'payment_session parameter is required'
-        }), 400
-    
-    # Check if payment_session is paid (persistent DB)
-    if not db_session.is_payment_paid(payment_session):
-        return jsonify({
-            'status': 'error',
-            'message': 'payment_required'
-        }), 403
-    
-    # Check if payment_session is already claimed
-    existing_cookie_id = db_session.get_cookie_from_payment_session(payment_session)
-    
-    if existing_cookie_id:
-        # Reuse existing cookie
-        cookie_id = existing_cookie_id
-        logger.info(f"PAYMENT_RETURN_REUSE payment_session={payment_session} cookie_id={cookie_id}")
-    else:
-        # Create new cookie and bind it
-        cookie_id = str(uuid.uuid4())
-        db_session.bind_cookie_to_session(cookie_id, payment_session)
-        logger.info(f"PAYMENT_RETURN_NEW payment_session={payment_session} cookie_id={cookie_id}")
-    
-    # Create redirect response with cookie
-    response = redirect('https://ace-advertising.agency/builder', code=302)
-    response.set_cookie(
-        'ace_pay_claim',
-        cookie_id,
-        httponly=True,
-        secure=True,
-        samesite='Lax',
-        path='/'
-    )
-    
-    return response
-
-
-@app.route('/api/session-status', methods=['GET'])
-def session_status():
-    """
-    Get session status based on cookie only (no payment_session in URL required).
-    
-    This endpoint is used by the frontend to check if the current browser
-    has a valid paid+claimed session and remaining quota.
-    
-    Returns:
-        JSON: {
-            "has_session": true/false,
-            "paid": true/false,
-            "max": 0 or 3,
-            "consumed": n,
-            "remaining": n,
-            "locked": true/false,
-            "can_generate": true/false,
-            "payment_session": "..." (only if has_session=true)
-        }
-        Always returns 200 (no errors for missing cookie - just has_session=false)
-    """
-    # Get payment_session from cookie (cookie-based only)
-    cookie_id = request.cookies.get('ace_pay_claim')
-    
-    if not cookie_id:
-        return jsonify({
-            "has_session": False,
-            "paid": False,
-            "max": 0,
-            "consumed": 0,
-            "remaining": 0,
-            "locked": False,
-            "can_generate": False
-        }), 200
-    
-    # Derive payment_session from cookie mapping in DB
-    payment_session = db_session.get_payment_session_from_cookie(cookie_id)
-    
-    if not payment_session:
-        return jsonify({
-            "has_session": False,
-            "paid": False,
-            "max": 0,
-            "consumed": 0,
-            "remaining": 0,
-            "locked": False,
-            "can_generate": False
-        }), 200
-    
-    # Check payment status (persistent DB)
-    paid = db_session.is_payment_paid(payment_session)
-    
-    if not paid:
-        return jsonify({
-            "has_session": True,
-            "paid": False,
-            "max": 0,
-            "consumed": 0,
-            "remaining": 0,
-            "locked": False,
-            "can_generate": False,
-            "payment_session": payment_session
-        }), 200
-    
-    # If paid, check quota (lazy init if needed) - persistent DB
-    quota_info = db_session.get_quota_info(payment_session)
-    if not quota_info:
-        quota_info = db_session.init_quota_if_needed(payment_session)
-        logger.info(f"QUOTA_LAZY_INIT payment_session={payment_session} max=3 consumed=0")
-    
-    max_quota = quota_info['max']
-    consumed = quota_info['consumed']
-    
-    # Session is consumed only when consumed == max (original behavior)
-    is_consumed = consumed >= max_quota
-    remaining = max_quota - consumed
-    can_generate = not is_consumed and remaining > 0
-    
-    return jsonify({
-        "has_session": True,
-        "paid": True,
-        "max": max_quota,
-        "consumed": consumed,
-        "remaining": remaining,
-        "locked": is_consumed,
-        "can_generate": can_generate,
-        "payment_session": payment_session
-    }), 200
-
-
-@app.route('/api/quota-status', methods=['GET'])
-def quota_status():
-    """
-    Check quota status for a given payment_session.
-    
-    Query parameters:
-        payment_session: The payment session ID to check (optional - will be derived from cookie if missing)
-    
-    Behavior:
-    - If cookie exists, derives payment_session from cookie mapping in DB
-    - If payment_session provided in query, validates it matches cookie session
-    - If no cookie, returns 401 not_authorized
-    
-    Returns:
-        JSON: {
-            "payment_session": "...",
-            "paid": true/false,
-            "max": 0 or 3,
-            "consumed": n,
-            "remaining": n,
-            "locked": true/false,
-            "can_generate": true/false
-        }
-        Error: 401 if no cookie, 403 if cookie doesn't match payment_session
-    """
-    # Try to get payment_session from query parameter
-    payment_session_from_query = request.args.get('payment_session')
-    
-    # Get payment_session from cookie (most reliable)
-    cookie_id = request.cookies.get('ace_pay_claim')
-    if not cookie_id:
-        return jsonify({
-            'status': 'error',
-            'message': 'not_authorized'
-        }), 401
-    
-    # Derive payment_session from cookie mapping in DB
-    payment_session_from_cookie = db_session.get_payment_session_from_cookie(cookie_id)
-    if not payment_session_from_cookie:
-        return jsonify({
-            'status': 'error',
-            'message': 'not_authorized'
-        }), 401
-    
-    # If payment_session provided in query, validate it matches cookie session
-    if payment_session_from_query:
-        if payment_session_from_query != payment_session_from_cookie:
-            return jsonify({
-                'status': 'error',
-                'message': 'not_authorized'
-            }), 403
-        payment_session = payment_session_from_query
-    else:
-        # Use cookie-derived payment_session
-        payment_session = payment_session_from_cookie
-    
-    # Check payment status (persistent DB)
-    paid = db_session.is_payment_paid(payment_session)
-    
-    # If not paid, return zeros
-    if not paid:
-        return jsonify({
-            "payment_session": payment_session,
-            "paid": False,
-            "max": 0,
-            "consumed": 0,
-            "remaining": 0,
-            "locked": False,
-            "can_generate": False
-        }), 200
-    
-    # If paid, check quota (lazy init if needed) - persistent DB
-    quota_info = db_session.get_quota_info(payment_session)
-    if not quota_info:
-        quota_info = db_session.init_quota_if_needed(payment_session)
-        logger.info(f"QUOTA_LAZY_INIT payment_session={payment_session} max=3 consumed=0")
-    
-    max_quota = quota_info['max']
-    consumed = quota_info['consumed']
-    
-    # Session is consumed only when consumed == max (original behavior)
-    is_consumed = consumed >= max_quota
-    remaining = max_quota - consumed
-    can_generate = not is_consumed and remaining > 0
-    
-    return jsonify({
-        "payment_session": payment_session,
-        "paid": True,
-        "max": max_quota,
-        "consumed": consumed,
-        "remaining": remaining,
-        "locked": is_consumed,
-        "can_generate": can_generate
-    }), 200
 
 
 if __name__ == '__main__':

@@ -46,6 +46,22 @@ def init_db():
             )
         """)
         
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS fingerprint_bindings (
+                fingerprint_key TEXT PRIMARY KEY,
+                payment_session TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP NOT NULL,
+                FOREIGN KEY (payment_session) REFERENCES payment_sessions(payment_session)
+            )
+        """)
+        
+        # Create index on expires_at for cleanup queries
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_fingerprint_expires_at 
+            ON fingerprint_bindings(expires_at)
+        """)
+        
         conn.commit()
         logger.info(f"Database initialized at {DB_PATH}")
     except Exception as e:
@@ -224,6 +240,84 @@ def get_cookie_from_payment_session(payment_session: str) -> Optional[str]:
     except Exception as e:
         logger.error(f"Error getting cookie from payment session: {e}", exc_info=True)
         return None
+    finally:
+        conn.close()
+
+
+# Fingerprint-based bindings (weak security, IP + User-Agent based)
+def bind_fingerprint_to_session(fingerprint_key: str, payment_session: str, ttl_minutes: int = 45) -> None:
+    """
+    Bind a fingerprint key to a payment session with TTL.
+    
+    Args:
+        fingerprint_key: Derived from IP + User-Agent
+        payment_session: The payment session ID
+        ttl_minutes: Time to live in minutes (default 45)
+    """
+    conn = get_db_connection()
+    try:
+        now = datetime.now(timezone.utc)
+        expires_at = datetime.fromtimestamp(
+            now.timestamp() + (ttl_minutes * 60),
+            tz=timezone.utc
+        ).isoformat()
+        
+        conn.execute("""
+            INSERT OR REPLACE INTO fingerprint_bindings 
+            (fingerprint_key, payment_session, created_at, expires_at)
+            VALUES (?, ?, ?, ?)
+        """, (fingerprint_key, payment_session, now.isoformat(), expires_at))
+        conn.commit()
+        logger.info(f"Fingerprint bound: {fingerprint_key[:16]}... -> {payment_session}, expires_at={expires_at}")
+    except Exception as e:
+        logger.error(f"Error binding fingerprint: {e}", exc_info=True)
+        raise
+    finally:
+        conn.close()
+
+def get_payment_session_from_fingerprint(fingerprint_key: str) -> Optional[str]:
+    """
+    Get payment session from fingerprint key (if not expired).
+    
+    Returns None if fingerprint not found or expired.
+    """
+    conn = get_db_connection()
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = conn.execute("""
+            SELECT payment_session 
+            FROM fingerprint_bindings 
+            WHERE fingerprint_key = ? AND expires_at > ?
+        """, (fingerprint_key, now))
+        row = cursor.fetchone()
+        return row['payment_session'] if row else None
+    except Exception as e:
+        logger.error(f"Error getting payment session from fingerprint: {e}", exc_info=True)
+        return None
+    finally:
+        conn.close()
+
+def cleanup_expired_fingerprints() -> int:
+    """
+    Clean up expired fingerprint bindings.
+    
+    Returns the number of deleted rows.
+    """
+    conn = get_db_connection()
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = conn.execute("""
+            DELETE FROM fingerprint_bindings 
+            WHERE expires_at <= ?
+        """, (now,))
+        deleted = cursor.rowcount
+        conn.commit()
+        if deleted > 0:
+            logger.info(f"Cleaned up {deleted} expired fingerprint bindings")
+        return deleted
+    except Exception as e:
+        logger.error(f"Error cleaning up expired fingerprints: {e}", exc_info=True)
+        return 0
     finally:
         conn.close()
 
