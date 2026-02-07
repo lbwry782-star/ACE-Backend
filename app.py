@@ -736,6 +736,9 @@ def quota_status():
     """
     Check quota status for a given payment_session.
     
+    This endpoint automatically locks the session if consumed >= 1 (session started).
+    This ensures that any page refresh after the first ad generation permanently disables generation.
+    
     Query parameters:
         payment_session: The payment session ID to check
     
@@ -783,6 +786,14 @@ def quota_status():
     max_quota = quota_info['max']
     consumed = quota_info['consumed']
     locked = quota_info['locked']
+    
+    # Auto-lock session if it has started (consumed >= 1) and not already locked
+    # This ensures that any page refresh after first ad generation permanently disables generation
+    if consumed >= 1 and not locked:
+        db_session.lock_session(payment_session)
+        locked = True
+        logger.info(f"SESSION_AUTO_LOCKED payment_session={payment_session} consumed={consumed} (via quota-status check)")
+    
     remaining = max_quota - consumed if not locked else 0
     can_generate = not locked and remaining > 0
     
