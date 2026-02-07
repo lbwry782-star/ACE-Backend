@@ -30,6 +30,12 @@ paid_sessions = {}
 # Maps payment_session -> {"max": 3, "consumed": int}
 quota_by_session = {}
 
+# Cookie binding tracking (in-memory storage)
+# Maps cookie_id -> payment_session (for cookie-based authorization)
+bound_session_by_cookie = {}
+# Maps payment_session -> cookie_id (reverse lookup)
+cookie_by_payment_session = {}
+
 # Lazy import function for engine (avoids heavy initialization on startup)
 def get_engine_functions():
     """Lazy import of engine functions - only called when needed"""
@@ -115,6 +121,29 @@ def generate():
             logger.warning(f"Request {request_id}: Quota exceeded for payment_session: {payment_session} (consumed={consumed}/{max_quota})")
             return jsonify({
                 'error': 'quota_exceeded'
+            }), 403
+        
+        # Cookie-based authorization check
+        cookie_id = request.cookies.get('ace_pay_claim')
+        if not cookie_id:
+            logger.warning(f"Request {request_id}: Missing cookie ace_pay_claim")
+            return jsonify({
+                'error': 'not_authorized'
+            }), 403
+        
+        # Check if cookie_id is bound to a payment_session
+        bound_payment_session = bound_session_by_cookie.get(cookie_id)
+        if not bound_payment_session:
+            logger.warning(f"Request {request_id}: Cookie {cookie_id} not found in bound_session_by_cookie")
+            return jsonify({
+                'error': 'not_authorized'
+            }), 403
+        
+        # Check if cookie is bound to the correct payment_session
+        if bound_payment_session != payment_session:
+            logger.warning(f"Request {request_id}: Cookie {cookie_id} bound to {bound_payment_session}, but request has {payment_session}")
+            return jsonify({
+                'error': 'not_authorized'
             }), 403
         
         # Consume one quota
@@ -501,6 +530,71 @@ def health():
     This endpoint must NOT trigger any ACE/OpenAI initialization.
     """
     return 'ok', 200
+
+
+@app.route('/api/claim-payment', methods=['POST'])
+def claim_payment():
+    """
+    Claim a payment_session by binding it to a browser cookie.
+    
+    Request JSON:
+    {
+        "payment_session": string (required)
+    }
+    
+    Returns:
+        Success: 200 {"ok": true} with Set-Cookie header
+        Error: 400 if payment_session missing, 403 if not paid or already claimed
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({
+            'status': 'error',
+            'message': 'JSON body required'
+        }), 400
+    
+    payment_session = data.get('payment_session')
+    if not payment_session:
+        return jsonify({
+            'status': 'error',
+            'message': 'payment_session is required'
+        }), 400
+    
+    # Check if payment_session is paid
+    payment_info = paid_sessions.get(payment_session)
+    if not payment_info or not payment_info.get('paid', False):
+        return jsonify({
+            'error': 'payment_required'
+        }), 403
+    
+    # Check if payment_session is already claimed by another cookie
+    existing_cookie_id = cookie_by_payment_session.get(payment_session)
+    if existing_cookie_id:
+        return jsonify({
+            'error': 'already_claimed'
+        }), 403
+    
+    # Generate new cookie_id
+    cookie_id = str(uuid.uuid4())
+    
+    # Store mapping in both directions
+    bound_session_by_cookie[cookie_id] = payment_session
+    cookie_by_payment_session[payment_session] = cookie_id
+    
+    logger.info(f"PAYMENT_CLAIMED payment_session={payment_session} cookie_id={cookie_id}")
+    
+    # Create response with cookie
+    response = jsonify({"ok": True})
+    response.set_cookie(
+        'ace_pay_claim',
+        cookie_id,
+        httponly=True,
+        secure=True,
+        samesite='Lax',
+        path='/'
+    )
+    
+    return response, 200
 
 
 @app.route('/api/ipn/<token>', methods=['GET', 'POST'])
