@@ -6,6 +6,7 @@ import io
 import zipfile
 import json
 import base64
+from datetime import datetime, timezone
 # Lazy import: engine only loaded when needed (not for /health endpoint)
 # from engine.ace_engine import generate_ad, quota_state_from_dict, quota_state_to_dict
 
@@ -20,6 +21,10 @@ CORS(app, origins=[
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Payment status tracking (in-memory storage)
+# Maps payment_session -> {"paid": bool, "docnum": str, "doctype": str, "at": datetime}
+paid_sessions = {}
 
 # Lazy import function for engine (avoids heavy initialization on startup)
 def get_engine_functions():
@@ -468,7 +473,57 @@ def icount_ipn(token):
         "OK", 200
     """
     logger.info(f"ICOUNT_IPN_RECEIVED token={token} method={request.method} args={request.args.to_dict()} form={request.form.to_dict()}")
+    
+    # Extract payment_session from form data
+    form_data = request.form.to_dict()
+    payment_session = form_data.get('payment_session')
+    
+    if payment_session:
+        # Extract docnum and doctype from form
+        docnum = form_data.get('docnum', '')
+        doctype = form_data.get('doctype', '')
+        timestamp = datetime.now(timezone.utc)
+        
+        # Mark payment as paid
+        paid_sessions[payment_session] = {
+            "paid": True,
+            "docnum": docnum,
+            "doctype": doctype,
+            "at": timestamp
+        }
+        logger.info(f"PAYMENT_MARKED_PAID payment_session={payment_session} docnum={docnum} doctype={doctype}")
+    
     return "OK", 200
+
+
+@app.route('/api/payment-status', methods=['GET'])
+def payment_status():
+    """
+    Check payment status for a given payment_session.
+    
+    Query parameters:
+        payment_session: The payment session ID to check
+    
+    Returns:
+        JSON: {"payment_session": "<id>", "paid": true/false}
+        Error: 400 if payment_session parameter is missing
+    """
+    payment_session = request.args.get('payment_session')
+    
+    if not payment_session:
+        return jsonify({
+            'status': 'error',
+            'message': 'payment_session parameter is required'
+        }), 400
+    
+    # Check if payment_session exists in paid_sessions
+    payment_info = paid_sessions.get(payment_session)
+    paid = payment_info.get('paid', False) if payment_info else False
+    
+    return jsonify({
+        "payment_session": payment_session,
+        "paid": paid
+    }), 200
 
 
 if __name__ == '__main__':
