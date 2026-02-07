@@ -13,10 +13,11 @@ from datetime import datetime, timezone
 app = Flask(__name__)
 
 # Configure CORS for specific origins only, expose X-ACE-Batch-State header
+# supports_credentials=True allows cookies to be sent with requests
 CORS(app, origins=[
     "https://ace-advertising.agency",
     "http://localhost:5173"
-], expose_headers=["X-ACE-Batch-State"])
+], expose_headers=["X-ACE-Batch-State"], supports_credentials=True)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
