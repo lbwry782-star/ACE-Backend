@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 paid_sessions = {}
 
 # Quota tracking (in-memory storage)
-# Maps payment_session -> {"max": 3, "consumed": int}
+# Maps payment_session -> {"max": 3, "consumed": int, "locked": bool}
+# locked=True means session is permanently consumed (after refresh)
 quota_by_session = {}
 
 # Cookie binding tracking (in-memory storage)
@@ -145,6 +146,13 @@ def generate():
             logger.warning(f"Request {request_id}: Cookie {cookie_id} bound to {bound_payment_session}, but request has {payment_session}")
             return jsonify({
                 'error': 'not_authorized'
+            }), 403
+        
+        # Check if session is locked (permanently consumed after refresh)
+        if quota_info.get('locked', False):
+            logger.warning(f"Request {request_id}: Session locked for payment_session: {payment_session}")
+            return jsonify({
+                'error': 'session_consumed'
             }), 403
         
         # Consume one quota
@@ -632,8 +640,8 @@ def icount_ipn(token):
         
         # Initialize quota for new payment_session
         if payment_session not in quota_by_session:
-            quota_by_session[payment_session] = {"max": 3, "consumed": 0}
-            logger.info(f"QUOTA_INIT payment_session={payment_session} max=3 consumed=0")
+            quota_by_session[payment_session] = {"max": 3, "consumed": 0, "locked": False}
+            logger.info(f"QUOTA_INIT payment_session={payment_session} max=3 consumed=0 locked=False")
     
     return "OK", 200
 
@@ -668,6 +676,83 @@ def payment_status():
     }), 200
 
 
+@app.route('/api/lock-session', methods=['POST'])
+def lock_session():
+    """
+    Lock a session permanently (called when Builder page is reloaded after session started).
+    
+    Request JSON:
+    {
+        "payment_session": string (required)
+    }
+    
+    Behavior:
+    - If consumed >= 1, marks session as LOCKED/CONSUMED permanently
+    - If consumed == 0, does nothing (optional: do not lock)
+    
+    Returns:
+        Success: 200 {"ok": true, "locked": true/false}
+        Error: 400 if payment_session missing, 403 if not paid
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({
+            'status': 'error',
+            'message': 'JSON body required'
+        }), 400
+    
+    payment_session = data.get('payment_session')
+    if not payment_session:
+        return jsonify({
+            'status': 'error',
+            'message': 'payment_session is required'
+        }), 400
+    
+    # Check if payment_session is paid
+    payment_info = paid_sessions.get(payment_session)
+    if not payment_info or not payment_info.get('paid', False):
+        return jsonify({
+            'error': 'payment_required'
+        }), 403
+    
+    # Cookie-based authorization check
+    cookie_id = request.cookies.get('ace_pay_claim')
+    if not cookie_id:
+        return jsonify({
+            'error': 'not_authorized'
+        }), 403
+    
+    # Check if cookie_id is bound to the correct payment_session
+    bound_payment_session = bound_session_by_cookie.get(cookie_id)
+    if not bound_payment_session or bound_payment_session != payment_session:
+        return jsonify({
+            'error': 'not_authorized'
+        }), 403
+    
+    # Get or init quota info
+    quota_info = quota_by_session.get(payment_session)
+    if not quota_info:
+        quota_by_session[payment_session] = {"max": 3, "consumed": 0, "locked": False}
+        quota_info = quota_by_session[payment_session]
+    
+    consumed = quota_info.get('consumed', 0)
+    locked = quota_info.get('locked', False)
+    
+    # Lock session if it has started (consumed >= 1) and not already locked
+    if consumed >= 1 and not locked:
+        quota_info['locked'] = True
+        logger.info(f"SESSION_LOCKED payment_session={payment_session} consumed={consumed}")
+        return jsonify({
+            "ok": True,
+            "locked": True
+        }), 200
+    
+    return jsonify({
+        "ok": True,
+        "locked": locked
+    }), 200
+
+
 @app.route('/api/quota-status', methods=['GET'])
 def quota_status():
     """
@@ -677,7 +762,15 @@ def quota_status():
         payment_session: The payment session ID to check
     
     Returns:
-        JSON: {"payment_session": "...", "paid": true/false, "max": 0 or 3, "consumed": n, "remaining": n}
+        JSON: {
+            "payment_session": "...",
+            "paid": true/false,
+            "max": 0 or 3,
+            "consumed": n,
+            "remaining": n,
+            "locked": true/false,
+            "can_generate": true/false
+        }
         Error: 400 if payment_session parameter is missing
     """
     payment_session = request.args.get('payment_session')
@@ -706,20 +799,24 @@ def quota_status():
     quota_info = quota_by_session.get(payment_session)
     if not quota_info:
         # Lazy initialization for paid session without quota entry
-        quota_by_session[payment_session] = {"max": 3, "consumed": 0}
-        logger.info(f"QUOTA_LAZY_INIT payment_session={payment_session} max=3 consumed=0")
+        quota_by_session[payment_session] = {"max": 3, "consumed": 0, "locked": False}
+        logger.info(f"QUOTA_LAZY_INIT payment_session={payment_session} max=3 consumed=0 locked=False")
         quota_info = quota_by_session[payment_session]
     
     max_quota = quota_info.get('max', 3)
     consumed = quota_info.get('consumed', 0)
-    remaining = max_quota - consumed
+    locked = quota_info.get('locked', False)
+    remaining = max_quota - consumed if not locked else 0
+    can_generate = not locked and remaining > 0
     
     return jsonify({
         "payment_session": payment_session,
         "paid": True,
         "max": max_quota,
         "consumed": consumed,
-        "remaining": remaining
+        "remaining": remaining,
+        "locked": locked,
+        "can_generate": can_generate
     }), 200
 
 
