@@ -136,24 +136,6 @@ def generate():
                 'error': 'not_authorized'
             }), 403
         
-        # Check if session is locked (permanently consumed after refresh) - persistent DB
-        if quota_info['locked']:
-            logger.warning(f"Request {request_id}: Session locked for payment_session: {payment_session}")
-            return jsonify({
-                'error': 'session_consumed'
-            }), 403
-        
-        # Anti-refresh lock: If session started (consumed >= 1) and not locked, require valid page_token
-        if consumed >= 1 and not quota_info['locked']:
-            page_token = data.get('page_token')
-            if not db_session.validate_page_token(payment_session, page_token):
-                # Missing or invalid page_token after session started -> lock immediately
-                db_session.lock_session(payment_session)
-                logger.warning(f"Request {request_id}: Missing/invalid page_token for started session, locking: {payment_session}")
-                return jsonify({
-                    'error': 'session_consumed'
-                }), 403
-        
         # Consume one quota (persistent DB)
         new_consumed = db_session.consume_quota(payment_session)
         logger.info(f"QUOTA_CONSUME payment_session={payment_session} consumed={new_consumed}/{max_quota}")
@@ -350,15 +332,8 @@ def preview():
             "structural_morphology_used": boolean,
             "structural_exception_used": boolean
         },
-        "payment_session": string (required),
-        "page_token": string (required if consumed >= 1)
+        "payment_session": string (required)
     }
-    
-    Security:
-    - Requires valid claimed session (cookie) linked to paid payment_session
-    - Enforces quota and locked=true server-side
-    - Anti-refresh lock: if consumed >= 1, requires valid page_token
-    - Missing/invalid page_token → locks session immediately and returns 403
     
     Success: Returns JSON with imageBase64, marketingText, batchState and X-ACE-Batch-State header
     Error: Returns JSON with error message and batchState (HTTP 400, 403, or 500)
@@ -442,26 +417,6 @@ def preview():
                 'status': 'error',
                 'message': 'not_authorized'
             }), 403
-        
-        # Check if session is locked (permanently consumed after refresh) - persistent DB
-        if quota_info['locked']:
-            logger.warning(f"Request {request_id}: Session locked for payment_session: {payment_session}")
-            return jsonify({
-                'status': 'error',
-                'message': 'session_consumed'
-            }), 403
-        
-        # Anti-refresh lock: If session started (consumed >= 1) and not locked, require valid page_token
-        if consumed >= 1 and not quota_info['locked']:
-            page_token = data.get('page_token')
-            if not db_session.validate_page_token(payment_session, page_token):
-                # Missing or invalid page_token after session started -> lock immediately
-                db_session.lock_session(payment_session)
-                logger.warning(f"Request {request_id}: Missing/invalid page_token for started session, locking: {payment_session}")
-                return jsonify({
-                    'status': 'error',
-                    'message': 'session_consumed'
-                }), 403
         
         # Consume one quota (persistent DB)
         new_consumed = db_session.consume_quota(payment_session)
@@ -724,7 +679,7 @@ def icount_ipn(token):
         quota_info = db_session.get_quota_info(payment_session)
         if not quota_info:
             db_session.init_quota_if_needed(payment_session)
-            logger.info(f"QUOTA_INIT payment_session={payment_session} max=3 consumed=0 locked=False")
+            logger.info(f"QUOTA_INIT payment_session={payment_session} max=3 consumed=0")
     
     return "OK", 200
 
@@ -758,88 +713,10 @@ def payment_status():
     }), 200
 
 
-@app.route('/api/lock-session', methods=['POST'])
-def lock_session():
-    """
-    Lock a session permanently (called when Builder page is reloaded after session started).
-    
-    Request JSON:
-    {
-        "payment_session": string (required)
-    }
-    
-    Behavior:
-    - If consumed >= 1, marks session as LOCKED/CONSUMED permanently
-    - If consumed == 0, does nothing (optional: do not lock)
-    
-    Returns:
-        Success: 200 {"ok": true, "locked": true/false}
-        Error: 400 if payment_session missing, 403 if not paid
-    """
-    data = request.get_json()
-    if not data:
-        return jsonify({
-            'status': 'error',
-            'message': 'JSON body required'
-        }), 400
-    
-    payment_session = data.get('payment_session')
-    if not payment_session:
-        return jsonify({
-            'status': 'error',
-            'message': 'payment_session is required'
-        }), 400
-    
-    # Check if payment_session is paid (persistent DB)
-    if not db_session.is_payment_paid(payment_session):
-        return jsonify({
-            'error': 'payment_required'
-        }), 403
-    
-    # Cookie-based authorization check (persistent DB)
-    cookie_id = request.cookies.get('ace_pay_claim')
-    if not cookie_id:
-        return jsonify({
-            'error': 'not_authorized'
-        }), 403
-    
-    # Check if cookie_id is bound to the correct payment_session (persistent DB)
-    bound_payment_session = db_session.get_payment_session_from_cookie(cookie_id)
-    if not bound_payment_session or bound_payment_session != payment_session:
-        return jsonify({
-            'error': 'not_authorized'
-        }), 403
-    
-    # Get quota info from persistent DB
-    quota_info = db_session.get_quota_info(payment_session)
-    if not quota_info:
-        quota_info = db_session.init_quota_if_needed(payment_session)
-    
-    consumed = quota_info['consumed']
-    locked = quota_info['locked']
-    
-    # Lock session if it has started (consumed >= 1) and not already locked (persistent DB)
-    if consumed >= 1 and not locked:
-        db_session.lock_session(payment_session)
-        logger.info(f"SESSION_LOCKED payment_session={payment_session} consumed={consumed}")
-        return jsonify({
-            "ok": True,
-            "locked": True
-        }), 200
-    
-    return jsonify({
-        "ok": True,
-        "locked": locked
-    }), 200
-
-
 @app.route('/api/quota-status', methods=['GET'])
 def quota_status():
     """
     Check quota status for a given payment_session.
-    
-    This endpoint issues a new page_token for each page load (non-cacheable).
-    If session has started (consumed >= 1), any generate/preview request without valid page_token will lock the session.
     
     Query parameters:
         payment_session: The payment session ID to check (optional - will be derived from cookie if missing)
@@ -857,15 +734,9 @@ def quota_status():
             "consumed": n,
             "remaining": n,
             "locked": true/false,
-            "can_generate": true/false,
-            "page_token": "..." (only if paid=true)
+            "can_generate": true/false
         }
         Error: 401 if no cookie, 403 if cookie doesn't match payment_session
-        
-    Headers:
-        Cache-Control: no-store, no-cache, must-revalidate, max-age=0
-        Pragma: no-cache
-        Expires: 0
     """
     # Try to get payment_session from query parameter
     payment_session_from_query = request.args.get('payment_session')
@@ -917,35 +788,25 @@ def quota_status():
     quota_info = db_session.get_quota_info(payment_session)
     if not quota_info:
         quota_info = db_session.init_quota_if_needed(payment_session)
-        logger.info(f"QUOTA_LAZY_INIT payment_session={payment_session} max=3 consumed=0 locked=False")
+        logger.info(f"QUOTA_LAZY_INIT payment_session={payment_session} max=3 consumed=0")
     
     max_quota = quota_info['max']
     consumed = quota_info['consumed']
-    locked = quota_info['locked']
     
-    # Create/refresh page_token for this page load (non-cacheable, per-page-load token)
-    page_token = db_session.create_page_token(payment_session)
+    # Session is consumed only when consumed == max (original behavior)
+    is_consumed = consumed >= max_quota
+    remaining = max_quota - consumed
+    can_generate = not is_consumed and remaining > 0
     
-    remaining = max_quota - consumed if not locked else 0
-    can_generate = not locked and remaining > 0
-    
-    response = jsonify({
+    return jsonify({
         "payment_session": payment_session,
         "paid": True,
         "max": max_quota,
         "consumed": consumed,
         "remaining": remaining,
-        "locked": locked,
-        "can_generate": can_generate,
-        "page_token": page_token
-    })
-    
-    # Add non-cache headers to prevent refresh from reusing stale state
-    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-    response.headers['Pragma'] = 'no-cache'
-    response.headers['Expires'] = '0'
-    
-    return response, 200
+        "locked": is_consumed,
+        "can_generate": can_generate
+    }), 200
 
 
 if __name__ == '__main__':
