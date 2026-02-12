@@ -7,7 +7,7 @@ Backend API built with Flask.
 - Python 3.8+
 - pip
 
-## Installation
+## Instalation
 
 1. Create a virtual environment (recommended):
 
