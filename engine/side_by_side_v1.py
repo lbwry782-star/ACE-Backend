@@ -1949,31 +1949,15 @@ def create_image_prompt(
     if shape_hint:
         shape_instruction = f"\n- Both objects must share a similar outline: {shape_hint}. Emphasize comparable silhouettes."
     
-    # Build physical context extensions section
-    physical_context_section = ""
-    if physical_context:
-        ext_a = physical_context.get("physical_extension_a", {})
-        ext_b = physical_context.get("physical_extension_b", {})
-        if ext_a and ext_b:
-            physical_context_section = f"""
-PHYSICAL CONTEXT EXTENSIONS:
-- Object A ({object_a}): {ext_a.get("description", "")} (connection: {ext_a.get("connection_type", "")})
-- Object B ({object_b}): {ext_b.get("description", "")} (connection: {ext_b.get("connection_type", "")})
-- These extensions are physically connected to their objects and explain function/origin.
-- Extensions must stay attached and NOT cross the central gap between objects."""
-    
-    # Build composition rules section
+    # Build composition rules section (SIDE BY SIDE only - two full panels)
     composition_rules = f"""COMPOSITION RULES (CRITICAL):
-- Place both objects ({object_a} and {object_b}) extremely close together with minimal space between them.
-- The objects must be almost touching with a very small gap only.
+- Two panels: left panel shows FULL {object_a}, right panel shows FULL {object_b}.
+- Both objects are FULL objects, completely visible in their respective panels.
 - No overlap between the objects.
+- Clear separation between left and right panels.
 - Same vertical alignment (same baseline alignment).
 - Center of the composition is between the two objects.
 - Clear comparable outer contours.{shape_instruction}
-- Physical context extensions (if any) must:
-  * Stay attached to each object.
-  * NOT extend toward the center beyond the main shape boundary.
-  * NOT create overlap with the other object.
 - Maintain this exact compositional structure in all attempts (do not change positioning between retries)."""
 
     # Build visual style constraints section
@@ -1993,10 +1977,12 @@ PHYSICAL CONTEXT EXTENSIONS:
     if is_strict:
         return f"""Create a professional advertisement image with a SIDE BY SIDE layout.
 
-OBJECTS:
-- Left object: {object_a}
-- Right object: {object_b}
-{physical_context_section}
+LAYOUT:
+- Two panels side by side (left and right).
+- Left panel shows FULL {object_a}.
+- Right panel shows FULL {object_b}.
+- Both objects are completely visible, no overlap.
+- Clear separation between panels.
 
 {composition_rules}
 
@@ -2026,10 +2012,12 @@ STYLE:
     else:
         return f"""Create a professional advertisement image with a SIDE BY SIDE layout.
 
-OBJECTS:
-- Left object: {object_a}
-- Right object: {object_b}
-{physical_context_section}
+LAYOUT:
+- Two panels side by side (left and right).
+- Left panel shows FULL {object_a}.
+- Right panel shows FULL {object_b}.
+- Both objects are completely visible, no overlap.
+- Clear separation between panels.
 
 {composition_rules}
 
@@ -2110,25 +2098,14 @@ def generate_image_with_dalle(
     model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
     image_size = f"{width}x{height}"
     
-    # Log before image generation
+    # Log before image generation (SIDE BY SIDE only)
     image_prompt_includes_shape_hint = shape_hint is not None and shape_hint != ""
-    is_hybrid = hybrid_plan and ("hero_object" in hybrid_plan or hybrid_plan.get("mode") == "HYBRID_SINGLE_OBJECT")
-    mode = "HYBRID_SINGLE_OBJECT" if is_hybrid else "SIDE_BY_SIDE"
+    mode = "SIDE_BY_SIDE"  # Always SIDE BY SIDE
+    logger.info(f"ACE_LAYOUT_MODE={ACE_LAYOUT_MODE}")
+    logger.info(f"STEP3_MODE={mode}")
     logger.info(f"STEP 3 - IMAGE GENERATION: image_model={model}, image_size={image_size}, object_a={object_a}, object_b={object_b}, headline={headline}, image_prompt_includes_shape_hint={image_prompt_includes_shape_hint}, shape_hint=\"{shape_hint or ''}\", mode={mode}")
     logger.info(f"STEP 3 VISUAL_RULES_APPLIED: no_logos=true, photorealistic_only=true")
-    if mode == "SIDE_BY_SIDE":
-        logger.info(f"STEP 3 COMPOSITION: near_touching=true, overlap=false_expected")
-    else:
-        hero_name = hybrid_plan.get("hero_object", object_a)
-        environment_name = hybrid_plan.get("environment_from", object_b)
-        env_description = hybrid_plan.get("environment_description", "")
-        logger.info(f"STEP 3 HYBRID_MODE_ACTIVE=true")
-        logger.info(f"STEP 3 HERO={hero_name}")
-        logger.info(f"STEP 3 ENVIRONMENT_FROM={environment_name}")
-        logger.info(f"STEP 3 ENVIRONMENT_DESCRIPTION=\"{env_description}\"")
-        logger.info(f"STEP 3 SINGLE_OBJECT_CONFIRMED=true")
-        logger.info(f"STEP 3 NO_LOGOS_RULE=true")
-        logger.info(f"STEP 3 PHOTO_REALISM_RULE=true")
+    logger.info(f"STEP 3 COMPOSITION: two_full_panels=true, overlap=false_expected")
     
     for attempt in range(max_retries):
         is_strict = attempt > 0  # Use stricter prompt on retries
@@ -2254,6 +2231,7 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     
     # Optional fields
     session_id = payload_dict.get("sessionId")
+    session_seed = session_id  # Use session_id as session_seed for cache key
     history = payload_dict.get("history", [])
     object_list = payload_dict.get("objectList")
     
@@ -2282,7 +2260,7 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     step0_cache_hit = False
     if not object_list or len(object_list) < 120:
         if ad_goal:
-            step0_cache_key = _get_cache_key_step0(ad_goal, product_name, language)
+            step0_cache_key = _get_cache_key_step0(ad_goal, product_name, language, ad_index=ad_index, session_seed=session_seed)
             cached_step0_list = _get_from_step0_cache(step0_cache_key)
             if cached_step0_list:
                 step0_cache_hit = True
@@ -2308,7 +2286,7 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     cached_plan = None
     
     if PREVIEW_USE_CACHE:
-        preview_cache_key = _get_cache_key_preview(product_name, message, ad_goal, ad_index, object_list)
+        preview_cache_key = _get_cache_key_preview(product_name, message, ad_goal, ad_index, object_list, language=language, session_seed=session_seed, engine_mode=ENGINE_MODE, preview_mode=PREVIEW_MODE)
         cached_plan = _get_from_preview_cache(preview_cache_key)
         if cached_plan:
             preview_cache_hit = True
@@ -2341,7 +2319,7 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     plan_cache_key = None
     plan_cache_hit = False
     if ENABLE_PLAN_CACHE and not preview_cache_hit:
-        plan_cache_key = _get_cache_key_plan(product_name, message, ad_goal, ad_index, object_list, ENGINE_MODE, "ENV_SWAP")
+        plan_cache_key = _get_cache_key_plan(product_name, message, ad_goal, ad_index, object_list, ENGINE_MODE, "SIDE_BY_SIDE", language=language, session_seed=session_seed)
         cached_plan = _get_from_plan_cache(plan_cache_key)
         if cached_plan:
             plan_cache_hit = True
@@ -2385,76 +2363,27 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
         # Use PREVIEW_PLANNER_MODEL for preview
         planner_model = PREVIEW_PLANNER_MODEL
         
-        if ENGINE_MODE == "optimized":
-            # OPTIMIZED MODE: Combined shape selection + environment swap plan
-            # Note: select_shape_and_environment_plan_optimized uses OPENAI_SHAPE_MODEL internally
-            # We'll need to update it to accept model_name, but for now it uses the default
-            t_shape_start = time.time()
-            try:
-                combined_result = select_shape_and_environment_plan_optimized(
-                    object_list=object_list,
-                    used_objects=used_objects,
-                    ad_goal=ad_goal,
-                    message=message,
-                    image_size=image_size_str,
-                    max_retries=2
-                )
-                t_shape_ms = int((time.time() - t_shape_start) * 1000)
-                
-                shape_sel = combined_result["shape_selection"]
-                object_a = shape_sel["object_a"]
-                object_b = shape_sel["object_b"]
-                shape_hint = shape_sel.get("shape_hint", "")
-                shape_score = shape_sel.get("shape_similarity_score", 0)
-                
-                env_plan = combined_result["environment_plan"]
-                hybrid_plan = {
-                    "hero_object": env_plan.get("hero_object"),
-                    "environment_from": env_plan.get("environment_from"),
-                    "environment_description": env_plan.get("environment_description"),
-                    "headline_placement": combined_result.get("headline_placement_suggestion", "BOTTOM")
-                }
-                
-                logger.info(f"[{request_id}] OPTIMIZED MODE - COMBINED PLAN SUCCESS: shape_pair=[{object_a}, {object_b}], score={shape_score}, hero={hybrid_plan['hero_object']}")
-                
-                # Skip STEP 1.5 in preview if PREVIEW_SKIP_PHYSICAL_CONTEXT=1
-                if PREVIEW_SKIP_PHYSICAL_CONTEXT:
-                    physical_context = None
-                    logger.info(f"[{request_id}] STEP 1.5 SKIPPED: PREVIEW_SKIP_PHYSICAL_CONTEXT=1")
-                else:
-                    # Generate physical context (but this shouldn't happen in optimized mode usually)
-                    physical_context = None
-                
-            except Exception as e:
-                error_msg = str(e)
-                if "rate_limited" in error_msg:
-                    logger.error(f"[{request_id}] OPTIMIZED MODE - COMBINED PLAN FAILED: Rate limited")
-                    raise Exception("rate_limited")
-                else:
-                    logger.error(f"[{request_id}] OPTIMIZED MODE - COMBINED PLAN FAILED: {error_msg}")
-                    raise
-        else:
-            # LEGACY MODE: Separate calls
-            # STEP 1 - SHAPE SELECTION (using PREVIEW_PLANNER_MODEL)
-            # Check STEP 1 cache before calling
-            if PREVIEW_MODE in ["plan_only", "image"]:
-                min_shape_score = 85 if len(object_list) >= 10 else 80
-                min_env_diff_score = 60
-                step1_cache_key = _get_cache_key_step1(object_list, min_shape_score, min_env_diff_score, used_objects)
-                cached_step1_result = _get_from_step1_cache(step1_cache_key)
-                if cached_step1_result:
-                    step1_cache_hit = True
-                    shape_result = cached_step1_result
-                    t_shape_ms = 0  # Cache hit, no time spent
-                else:
-                    t_shape_start = time.time()
-                    shape_result = select_similar_pair_shape_only(
-                        object_list=object_list,
-                        used_objects=used_objects,
-                        max_retries=2,
-                        model_name=planner_model
-                    )
-                    t_shape_ms = int((time.time() - t_shape_start) * 1000)
+        # Force SIDE BY SIDE mode only (ignore ENGINE_MODE optimized/hybrid)
+        # STEP 1 - SHAPE SELECTION (using PREVIEW_PLANNER_MODEL)
+        # Check STEP 1 cache before calling
+        t_envswap_ms = 0  # No environment swap in SIDE BY SIDE mode
+        physical_context = None  # No physical context in SIDE BY SIDE mode
+        hybrid_plan = None  # No hybrid plan in SIDE BY SIDE mode
+        
+        if PREVIEW_MODE in ["plan_only", "image"]:
+            min_shape_score = 85 if len(object_list) >= 10 else 80
+            min_env_diff_score = 60
+            step1_cache_key = _get_cache_key_step1(
+                object_list, min_shape_score, min_env_diff_score, used_objects,
+                product_name=product_name, ad_goal=ad_goal, language=language,
+                ad_index=ad_index, session_seed=session_seed,
+                engine_mode=ENGINE_MODE, preview_mode=PREVIEW_MODE
+            )
+            cached_step1_result = _get_from_step1_cache(step1_cache_key)
+            if cached_step1_result:
+                step1_cache_hit = True
+                shape_result = cached_step1_result
+                t_shape_ms = 0  # Cache hit, no time spent
             else:
                 t_shape_start = time.time()
                 shape_result = select_similar_pair_shape_only(
@@ -2464,81 +2393,47 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                     model_name=planner_model
                 )
                 t_shape_ms = int((time.time() - t_shape_start) * 1000)
+                # Save to cache
+                if ENABLE_STEP1_CACHE:
+                    _set_to_step1_cache(step1_cache_key, shape_result)
+        else:
+            t_shape_start = time.time()
+            shape_result = select_similar_pair_shape_only(
+                object_list=object_list,
+                used_objects=used_objects,
+                max_retries=2,
+                model_name=planner_model
+            )
+            t_shape_ms = int((time.time() - t_shape_start) * 1000)
+        
+        try:
+            object_a = shape_result["object_a"]
+            object_b = shape_result["object_b"]
+            shape_hint = shape_result.get("shape_hint", "")
+            shape_score = shape_result.get("shape_similarity_score", 0)
             
-            try:
-                object_a = shape_result["object_a"]
-                object_b = shape_result["object_b"]
-                shape_hint = shape_result.get("shape_hint", "")
-                shape_score = shape_result.get("shape_similarity_score", 0)
-                
-                if step1_cache_hit:
-                    logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}, model={planner_model} (from cache)")
-                else:
-                    logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}, model={planner_model}")
-            except Exception as e:
-                error_msg = str(e)
-                if "rate_limited" in error_msg:
-                    logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection rate limited")
-                    raise Exception("rate_limited")
-                else:
-                    logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection error: {error_msg}")
-                    raise
-            
-            # STEP 1.5 - PHYSICAL CONTEXT EXTENSION (skip if PREVIEW_SKIP_PHYSICAL_CONTEXT=1)
-            if PREVIEW_SKIP_PHYSICAL_CONTEXT:
-                physical_context = None
-                logger.info(f"[{request_id}] STEP 1.5 SKIPPED: PREVIEW_SKIP_PHYSICAL_CONTEXT=1")
+            if step1_cache_hit:
+                logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}, model={planner_model} (from cache)")
             else:
-                try:
-                    physical_context = generate_physical_context_extensions(
-                        object_a=object_a,
-                        object_b=object_b,
-                        ad_goal=ad_goal,
-                        max_retries=2
-                    )
-                    logger.info(f"[{request_id}] STEP 1.5 SUCCESS: physical_context_extensions generated")
-                except Exception as e:
-                    error_msg = str(e)
-                    if "rate_limited" in error_msg:
-                        logger.error(f"[{request_id}] STEP 1.5 FAILED: Physical context extension rate limited")
-                        raise Exception("rate_limited")
-                    else:
-                        logger.error(f"[{request_id}] STEP 1.5 FAILED: Physical context extension error: {error_msg}")
-                        raise
-            
-            # STEP 1.75 - ENVIRONMENT SWAP PLAN (using PREVIEW_PLANNER_MODEL)
-            t_envswap_start = time.time()
-            try:
-                hybrid_plan = generate_hybrid_context_plan(
-                    object_a=object_a,
-                    object_b=object_b,
-                    ad_goal=ad_goal,
-                    message=message,
-                    image_size=image_size_str,
-                    max_retries=2,
-                    model_name=planner_model
-                )
-                t_envswap_ms = int((time.time() - t_envswap_start) * 1000)
-                logger.info(f"[{request_id}] STEP 1.75 SUCCESS: hybrid_context_plan generated, model={planner_model}")
-            except Exception as e:
-                error_msg = str(e)
-                if "rate_limited" in error_msg:
-                    logger.error(f"[{request_id}] STEP 1.75 FAILED: Hybrid context plan rate limited")
-                    raise Exception("rate_limited")
-                else:
-                    logger.error(f"[{request_id}] STEP 1.75 FAILED: Hybrid context plan error: {error_msg}")
-                    raise
+                logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}, model={planner_model}")
+        except Exception as e:
+            error_msg = str(e)
+            if "rate_limited" in error_msg:
+                logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection rate limited")
+                raise Exception("rate_limited")
+            else:
+                logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection error: {error_msg}")
+                raise
         
         # STEP 2 - HEADLINE GENERATION
         t_headline_start = time.time()
-        headline_placement = hybrid_plan.get("headline_placement") if hybrid_plan else None
         try:
             headline = generate_headline_only(
                 product_name=product_name,
                 message=message,
                 object_a=object_a,
                 object_b=object_b,
-                headline_placement=headline_placement,
+                headline_placement=None,  # No headline_placement in SIDE BY SIDE mode
                 max_retries=3
             )
             t_headline_ms = int((time.time() - t_headline_start) * 1000)
@@ -2552,14 +2447,11 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                 logger.error(f"[{request_id}] STEP 2 FAILED: Headline generation error: {error_msg}")
                 raise
         
-        # Save to preview cache and plan cache
+        # Save to preview cache and plan cache (SIDE BY SIDE mode only)
         plan_data = {
-            "mode": "ENV_SWAP",
-            "hero_object": hybrid_plan.get("hero_object"),
-            "environment_from": hybrid_plan.get("environment_from"),
-            "environment_description": hybrid_plan.get("environment_description"),
+            "mode": "SIDE_BY_SIDE",
+            "layout": "SIDE_BY_SIDE",
             "headline": headline,
-            "headline_placement": hybrid_plan.get("headline_placement", "BOTTOM"),
             "shape_similarity_score": shape_score,
             "shape_hint": shape_hint,
             "chosen_objects": [object_a, object_b]
@@ -2619,8 +2511,8 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                 object_a=object_a,
                 object_b=object_b,
                 shape_hint=shape_hint,
-                physical_context=physical_context,
-                hybrid_plan=hybrid_plan,
+                physical_context=None,  # No physical context in SIDE BY SIDE mode
+                hybrid_plan=None,  # No hybrid plan in SIDE BY SIDE mode
                 headline=headline,
                 width=width,
                 height=height,
@@ -2691,6 +2583,7 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     
     # Optional fields
     session_id = payload_dict.get("sessionId")
+    session_seed = session_id  # Use session_id as session_seed for cache key
     history = payload_dict.get("history", [])
     object_list = payload_dict.get("objectList")
     
@@ -2728,7 +2621,7 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     cached_plan = None
     
     if ENABLE_PLAN_CACHE:
-        plan_cache_key = _get_cache_key_plan(product_name, message, ad_goal, ad_index, object_list, ENGINE_MODE, "ENV_SWAP")
+        plan_cache_key = _get_cache_key_plan(product_name, message, ad_goal, ad_index, object_list, ENGINE_MODE, "SIDE_BY_SIDE", language=language, session_seed=session_seed)
         cached_plan = _get_from_plan_cache(plan_cache_key)
         if cached_plan:
             plan_cache_hit = True
@@ -2760,129 +2653,48 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     if not plan_cache_hit:
         used_objects = get_used_objects(history)
         
-        if ENGINE_MODE == "optimized":
-            # OPTIMIZED MODE: Combined shape selection + environment swap plan
-            t_shape_start = time.time()
-            try:
-                combined_result = select_shape_and_environment_plan_optimized(
-                    object_list=object_list,
-                    used_objects=used_objects,
-                    ad_goal=ad_goal,
-                    message=message,
-                    image_size=image_size_str,
-                    max_retries=2
-                )
-                t_shape_ms = int((time.time() - t_shape_start) * 1000)
-                
-                shape_sel = combined_result["shape_selection"]
-                object_a = shape_sel["object_a"]
-                object_b = shape_sel["object_b"]
-                shape_hint = shape_sel.get("shape_hint", "")
-                shape_score = shape_sel.get("shape_similarity_score", 0)
-                
-                env_plan = combined_result["environment_plan"]
-                hybrid_plan = {
-                    "hero_object": env_plan.get("hero_object"),
-                    "environment_from": env_plan.get("environment_from"),
-                    "environment_description": env_plan.get("environment_description"),
-                    "headline_placement": combined_result.get("headline_placement_suggestion", "BOTTOM")
-                }
-                
-                logger.info(f"[{request_id}] OPTIMIZED MODE - COMBINED PLAN SUCCESS: shape_pair=[{object_a}, {object_b}], score={shape_score}, hero={hybrid_plan['hero_object']}")
-                
-                # Skip STEP 1.5 in optimized mode (physical context not needed)
-                physical_context = None
-                
-            except Exception as e:
-                error_msg = str(e)
-                if "rate_limited" in error_msg:
-                    logger.error(f"[{request_id}] OPTIMIZED MODE - COMBINED PLAN FAILED: Rate limited")
-                    raise Exception("rate_limited")
-                else:
-                    logger.error(f"[{request_id}] OPTIMIZED MODE - COMBINED PLAN FAILED: {error_msg}")
-                    raise
-        else:
-            # LEGACY MODE: Separate calls
-            # Use GENERATE_PLANNER_MODEL for generate
-            planner_model = GENERATE_PLANNER_MODEL
+        # Force SIDE BY SIDE mode only (ignore ENGINE_MODE optimized/hybrid)
+        # Use GENERATE_PLANNER_MODEL for generate
+        planner_model = GENERATE_PLANNER_MODEL
+        t_envswap_ms = 0  # No environment swap in SIDE BY SIDE mode
+        physical_context = None  # No physical context in SIDE BY SIDE mode
+        hybrid_plan = None  # No hybrid plan in SIDE BY SIDE mode
+        
+        # STEP 1 - SHAPE SELECTION (using GENERATE_PLANNER_MODEL)
+        t_shape_start = time.time()
+        try:
+            shape_result = select_similar_pair_shape_only(
+                object_list=object_list,
+                used_objects=used_objects,
+                max_retries=2,
+                model_name=planner_model
+            )
+            t_shape_ms = int((time.time() - t_shape_start) * 1000)
             
-            # STEP 1 - SHAPE SELECTION (using GENERATE_PLANNER_MODEL)
-            t_shape_start = time.time()
-            try:
-                shape_result = select_similar_pair_shape_only(
-                    object_list=object_list,
-                    used_objects=used_objects,
-                    max_retries=2,
-                    model_name=planner_model
-                )
-                t_shape_ms = int((time.time() - t_shape_start) * 1000)
-                
-                object_a = shape_result["object_a"]
-                object_b = shape_result["object_b"]
-                shape_hint = shape_result.get("shape_hint", "")
-                shape_score = shape_result.get("shape_similarity_score", 0)
-                
-                logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}, model={planner_model}")
-            except Exception as e:
-                error_msg = str(e)
-                if "rate_limited" in error_msg:
-                    logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection rate limited")
-                    raise Exception("rate_limited")
-                else:
-                    logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection error: {error_msg}")
-                    raise
+            object_a = shape_result["object_a"]
+            object_b = shape_result["object_b"]
+            shape_hint = shape_result.get("shape_hint", "")
+            shape_score = shape_result.get("shape_similarity_score", 0)
             
-            # STEP 1.5 - PHYSICAL CONTEXT EXTENSION (always run for generate)
-            try:
-                physical_context = generate_physical_context_extensions(
-                    object_a=object_a,
-                    object_b=object_b,
-                    ad_goal=ad_goal,
-                    max_retries=2
-                )
-                logger.info(f"[{request_id}] STEP 1.5 SUCCESS: physical_context_extensions generated")
-            except Exception as e:
-                error_msg = str(e)
-                if "rate_limited" in error_msg:
-                    logger.error(f"[{request_id}] STEP 1.5 FAILED: Physical context extension rate limited")
-                    raise Exception("rate_limited")
-                else:
-                    logger.error(f"[{request_id}] STEP 1.5 FAILED: Physical context extension error: {error_msg}")
-                    raise
-            
-            # STEP 1.75 - ENVIRONMENT SWAP PLAN (using GENERATE_PLANNER_MODEL)
-            t_envswap_start = time.time()
-            try:
-                hybrid_plan = generate_hybrid_context_plan(
-                    object_a=object_a,
-                    object_b=object_b,
-                    ad_goal=ad_goal,
-                    message=message,
-                    image_size=image_size_str,
-                    max_retries=2,
-                    model_name=planner_model
-                )
-                t_envswap_ms = int((time.time() - t_envswap_start) * 1000)
-                logger.info(f"[{request_id}] STEP 1.75 SUCCESS: hybrid_context_plan generated, model={planner_model}")
-            except Exception as e:
-                error_msg = str(e)
-                if "rate_limited" in error_msg:
-                    logger.error(f"[{request_id}] STEP 1.75 FAILED: Hybrid context plan rate limited")
-                    raise Exception("rate_limited")
-                else:
-                    logger.error(f"[{request_id}] STEP 1.75 FAILED: Hybrid context plan error: {error_msg}")
-                    raise
+            logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}, model={planner_model}")
+        except Exception as e:
+            error_msg = str(e)
+            if "rate_limited" in error_msg:
+                logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection rate limited")
+                raise Exception("rate_limited")
+            else:
+                logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection error: {error_msg}")
+                raise
         
         # STEP 2 - HEADLINE GENERATION
         t_headline_start = time.time()
-        headline_placement = hybrid_plan.get("headline_placement") if hybrid_plan else None
         try:
             headline = generate_headline_only(
                 product_name=product_name,
                 message=message,
                 object_a=object_a,
                 object_b=object_b,
-                headline_placement=headline_placement,
+                headline_placement=None,  # No headline_placement in SIDE BY SIDE mode
                 max_retries=3
             )
             t_headline_ms = int((time.time() - t_headline_start) * 1000)
@@ -2896,14 +2708,11 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
                 logger.error(f"[{request_id}] STEP 2 FAILED: Headline generation error: {error_msg}")
                 raise
         
-        # Save to plan cache
+        # Save to plan cache (SIDE BY SIDE mode only)
         plan_data = {
-            "mode": "ENV_SWAP",
-            "hero_object": hybrid_plan.get("hero_object"),
-            "environment_from": hybrid_plan.get("environment_from"),
-            "environment_description": hybrid_plan.get("environment_description"),
+            "mode": "SIDE_BY_SIDE",
+            "layout": "SIDE_BY_SIDE",
             "headline": headline,
-            "headline_placement": hybrid_plan.get("headline_placement", "BOTTOM"),
             "shape_similarity_score": shape_score,
             "shape_hint": shape_hint,
             "chosen_objects": [object_a, object_b]
@@ -2961,8 +2770,8 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
                 object_a=object_a,
                 object_b=object_b,
                 shape_hint=shape_hint,
-                physical_context=physical_context,
-                hybrid_plan=hybrid_plan,
+                physical_context=None,  # No physical context in SIDE BY SIDE mode
+                hybrid_plan=None,  # No hybrid plan in SIDE BY SIDE mode
                 headline=headline,
                 width=width,
                 height=height,
