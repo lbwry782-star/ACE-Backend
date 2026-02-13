@@ -41,6 +41,12 @@ PREVIEW_SKIP_PHYSICAL_CONTEXT = os.environ.get("PREVIEW_SKIP_PHYSICAL_CONTEXT", 
 PREVIEW_USE_CACHE = os.environ.get("PREVIEW_USE_CACHE", "1") == "1"  # Use cache for preview
 CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "900"))  # Cache TTL for preview
 
+# Step-level caching flags
+ENABLE_STEP0_CACHE = os.environ.get("ENABLE_STEP0_CACHE", "1") == "1"  # Cache STEP 0 (objectList building)
+STEP0_CACHE_TTL_SECONDS = int(os.environ.get("STEP0_CACHE_TTL_SECONDS", "3600"))  # STEP 0 cache TTL
+ENABLE_STEP1_CACHE = os.environ.get("ENABLE_STEP1_CACHE", "1") == "1"  # Cache STEP 1 (shape match)
+STEP1_CACHE_TTL_SECONDS = int(os.environ.get("STEP1_CACHE_TTL_SECONDS", "1800"))  # STEP 1 cache TTL
+
 # ============================================================================
 # In-Memory Caches (with TTL)
 # ============================================================================
@@ -56,6 +62,14 @@ _preview_cache_lock = Lock()
 # Image cache: key -> (value_bytes, timestamp)
 _image_cache: Dict[str, Tuple[bytes, float]] = {}
 _image_cache_lock = Lock()
+
+# STEP 0 cache: key -> (objectList, timestamp)
+_step0_cache: Dict[str, Tuple[List[str], float]] = {}
+_step0_cache_lock = Lock()
+
+# STEP 1 cache: key -> (shape_result_dict, timestamp)
+_step1_cache: Dict[str, Tuple[Dict, float]] = {}
+_step1_cache_lock = Lock()
 
 
 def _get_cache_key_plan(product_name: str, message: str, ad_goal: str, ad_index: int, object_list: Optional[List[str]], engine_mode: str, mode: str) -> str:
@@ -152,6 +166,81 @@ def _set_to_image_cache(key: str, value_bytes: bytes):
     with _image_cache_lock:
         _image_cache[key] = (value_bytes, time.time())
 
+
+def _get_cache_key_step0(ad_goal: str, product_name: Optional[str], language: str = "en") -> str:
+    """Generate cache key for STEP 0 (objectList building)."""
+    key_str = f"{ad_goal}|{product_name or ''}|{language}|STEP0_V1"
+    return hashlib.md5(key_str.encode()).hexdigest()
+
+
+def _get_from_step0_cache(key: str) -> Optional[List[str]]:
+    """Get from STEP 0 cache if valid."""
+    if not ENABLE_STEP0_CACHE:
+        return None
+    
+    with _step0_cache_lock:
+        if key in _step0_cache:
+            value, timestamp = _step0_cache[key]
+            if time.time() - timestamp < STEP0_CACHE_TTL_SECONDS:
+                ttl_remaining = int(STEP0_CACHE_TTL_SECONDS - (time.time() - timestamp))
+                logger.info(f"STEP0_CACHE hit=true ttl={ttl_remaining}s key={key[:16]}...")
+                return value
+            else:
+                # Expired, remove
+                del _step0_cache[key]
+                logger.info(f"STEP0_CACHE hit=false (expired) ttl=0s key={key[:16]}...")
+        else:
+            logger.info(f"STEP0_CACHE hit=false ttl={STEP0_CACHE_TTL_SECONDS}s key={key[:16]}...")
+    return None
+
+
+def _set_to_step0_cache(key: str, value: List[str]):
+    """Set to STEP 0 cache."""
+    if not ENABLE_STEP0_CACHE:
+        return
+    
+    with _step0_cache_lock:
+        _step0_cache[key] = (value, time.time())
+
+
+def _get_cache_key_step1(object_list: List[str], min_shape_score: int, min_env_diff_score: int, used_objects: set) -> str:
+    """Generate cache key for STEP 1 (shape match)."""
+    # Include objectList hash, gate parameters, and used_objects
+    object_list_hash = hashlib.md5(json.dumps(sorted(object_list), sort_keys=True).encode()).hexdigest()[:16]
+    used_objects_str = "|".join(sorted(used_objects)) if used_objects else ""
+    key_str = f"{object_list_hash}|PAIR_GATE(min_shape={min_shape_score},min_env_diff={min_env_diff_score})|{used_objects_str}|STEP1_V2"
+    return hashlib.md5(key_str.encode()).hexdigest()
+
+
+def _get_from_step1_cache(key: str) -> Optional[Dict]:
+    """Get from STEP 1 cache if valid."""
+    if not ENABLE_STEP1_CACHE:
+        return None
+    
+    with _step1_cache_lock:
+        if key in _step1_cache:
+            value, timestamp = _step1_cache[key]
+            if time.time() - timestamp < STEP1_CACHE_TTL_SECONDS:
+                ttl_remaining = int(STEP1_CACHE_TTL_SECONDS - (time.time() - timestamp))
+                logger.info(f"STEP1_CACHE hit=true ttl={ttl_remaining}s key={key[:16]}...")
+                return value
+            else:
+                # Expired, remove
+                del _step1_cache[key]
+                logger.info(f"STEP1_CACHE hit=false (expired) ttl=0s key={key[:16]}...")
+        else:
+            logger.info(f"STEP1_CACHE hit=false ttl={STEP1_CACHE_TTL_SECONDS}s key={key[:16]}...")
+    return None
+
+
+def _set_to_step1_cache(key: str, value: Dict):
+    """Set to STEP 1 cache."""
+    if not ENABLE_STEP1_CACHE:
+        return
+    
+    with _step1_cache_lock:
+        _step1_cache[key] = (value, time.time())
+
 # Default object list - concrete nouns in English (for shape similarity)
 DEFAULT_OBJECT_LIST = [
     "leaf", "shell", "ear", "mask", "bottle", "candle", "banana", "crescent",
@@ -188,7 +277,8 @@ def parse_image_size(image_size: str) -> Tuple[int, int]:
 def build_object_list_from_ad_goal(
     ad_goal: str,
     product_name: Optional[str] = None,
-    max_retries: int = 2
+    max_retries: int = 2,
+    language: str = "en"
 ) -> List[str]:
     """
     STEP 0 - BUILD_OBJECT_LIST_FROM_AD_GOAL
@@ -199,6 +289,7 @@ def build_object_list_from_ad_goal(
         ad_goal: The advertising goal (e.g., "protect nature", "climate action")
         product_name: Optional product name for context
         max_retries: Maximum retry attempts
+        language: Language (default: "en")
     
     Returns:
         List[str]: List of 200 concrete nouns (visual objects)
@@ -209,6 +300,13 @@ def build_object_list_from_ad_goal(
     - NO generic shapes: circle, cylinder, square, triangle, sphere, etc.
     - English only, single words or short noun phrases
     """
+    # Check STEP 0 cache first
+    step0_cache_key = _get_cache_key_step0(ad_goal, product_name, language)
+    cached_object_list = _get_from_step0_cache(step0_cache_key)
+    if cached_object_list:
+        logger.info(f"STEP 0 - BUILD_OBJECT_LIST: Using cached objectList (size={len(cached_object_list)})")
+        return cached_object_list
+    
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     model_name = os.environ.get("OPENAI_TEXT_MODEL", "o4-mini")
     
@@ -313,6 +411,9 @@ JSON:"""
             sample = filtered_list[:sample_size]
             logger.info(f"STEP 0 OBJECTLIST: size={len(filtered_list)}, sample10={sample}")
             
+            # Save to STEP 0 cache
+            _set_to_step0_cache(step0_cache_key, filtered_list)
+            
             return filtered_list
             
         except json.JSONDecodeError as e:
@@ -383,7 +484,7 @@ JSON:"""
     raise Exception("Failed to build object list from ad_goal")
 
 
-def validate_object_list(object_list: Optional[List[str]], ad_goal: Optional[str] = None, product_name: Optional[str] = None) -> List[str]:
+def validate_object_list(object_list: Optional[List[str]], ad_goal: Optional[str] = None, product_name: Optional[str] = None, language: str = "en") -> List[str]:
     """
     Validate and return object list.
     If None or too small, and ad_goal is provided, use STEP 0 to build list.
@@ -393,7 +494,7 @@ def validate_object_list(object_list: Optional[List[str]], ad_goal: Optional[str
         # If ad_goal is provided, use STEP 0 to build list
         if ad_goal:
             logger.info(f"objectList missing or too small (size={len(object_list) if object_list else 0}), building from ad_goal using STEP 0")
-            return build_object_list_from_ad_goal(ad_goal=ad_goal, product_name=product_name)
+            return build_object_list_from_ad_goal(ad_goal=ad_goal, product_name=product_name, language=language)
         else:
             logger.info(f"objectList missing or too small (size={len(object_list) if object_list else 0}), using default concrete objects list (size={len(DEFAULT_OBJECT_LIST)})")
             return DEFAULT_OBJECT_LIST
@@ -401,7 +502,7 @@ def validate_object_list(object_list: Optional[List[str]], ad_goal: Optional[str
     # If object_list is provided but small (<120), and ad_goal is provided, use STEP 0
     if len(object_list) < 120 and ad_goal:
         logger.info(f"objectList too small (size={len(object_list)}), building from ad_goal using STEP 0")
-        return build_object_list_from_ad_goal(ad_goal=ad_goal, product_name=product_name)
+        return build_object_list_from_ad_goal(ad_goal=ad_goal, product_name=product_name, language=language)
     
     logger.info(f"objectList provided with {len(object_list)} items")
     return object_list
@@ -766,6 +867,14 @@ Requirements:
             }
             
             logger.info(f"STEP 1 - SHAPE SELECTION SUCCESS: selected_pair=[{object_a}, {object_b}], shape_score={shape_score}, env_diff_score={env_diff_score}, combined_score={combined_score:.1f}, shape_hint={shape_hint}, validation_passed=true")
+            
+            # Save to STEP 1 cache (only for preview mode)
+            if PREVIEW_MODE in ["plan_only", "image"]:
+                min_shape_score = 85 if len(available_objects) >= 10 else 80
+                min_env_diff_score = 60
+                step1_cache_key = _get_cache_key_step1(object_list, min_shape_score, min_env_diff_score, used_objects)
+                _set_to_step1_cache(step1_cache_key, result)
+            
             return result
             
         except Exception as e:
@@ -2163,7 +2272,23 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     
     # STEP 0 - BUILD_OBJECT_LIST_FROM_AD_GOAL (if needed)
     # Use validate_object_list which will call STEP 0 if object_list is missing/small and ad_goal exists
-    object_list = validate_object_list(object_list, ad_goal=ad_goal, product_name=product_name)
+    # STEP 0 - Check cache before calling validate_object_list
+    step0_cache_hit = False
+    if not object_list or len(object_list) < 120:
+        if ad_goal:
+            step0_cache_key = _get_cache_key_step0(ad_goal, product_name, language)
+            cached_step0_list = _get_from_step0_cache(step0_cache_key)
+            if cached_step0_list:
+                step0_cache_hit = True
+                object_list = cached_step0_list
+                logger.info(f"[{request_id}] STEP 0 - Using cached objectList (size={len(object_list)})")
+            else:
+                # Will be called by validate_object_list, and will cache there
+                object_list = validate_object_list(object_list, ad_goal=ad_goal, product_name=product_name, language=language)
+        else:
+            object_list = validate_object_list(object_list, ad_goal=ad_goal, product_name=product_name, language=language)
+    else:
+        object_list = validate_object_list(object_list, ad_goal=ad_goal, product_name=product_name, language=language)
     
     # Log request with preview flags
     logger.info(f"[{request_id}] generate_preview_data called: sessionId={session_id}, adIndex={ad_index}, "
@@ -2244,6 +2369,8 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     t_headline_ms = 0
     t_image_ms = 0
     image_cache_hit = False
+    step0_cache_hit = False
+    step1_cache_hit = False
     
     # If not cached, generate plan
     if not preview_cache_hit and not plan_cache_hit:
@@ -2303,8 +2430,27 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
         else:
             # LEGACY MODE: Separate calls
             # STEP 1 - SHAPE SELECTION (using PREVIEW_PLANNER_MODEL)
-            t_shape_start = time.time()
-            try:
+            # Check STEP 1 cache before calling
+            if PREVIEW_MODE in ["plan_only", "image"]:
+                min_shape_score = 85 if len(object_list) >= 10 else 80
+                min_env_diff_score = 60
+                step1_cache_key = _get_cache_key_step1(object_list, min_shape_score, min_env_diff_score, used_objects)
+                cached_step1_result = _get_from_step1_cache(step1_cache_key)
+                if cached_step1_result:
+                    step1_cache_hit = True
+                    shape_result = cached_step1_result
+                    t_shape_ms = 0  # Cache hit, no time spent
+                else:
+                    t_shape_start = time.time()
+                    shape_result = select_similar_pair_shape_only(
+                        object_list=object_list,
+                        used_objects=used_objects,
+                        max_retries=2,
+                        model_name=planner_model
+                    )
+                    t_shape_ms = int((time.time() - t_shape_start) * 1000)
+            else:
+                t_shape_start = time.time()
                 shape_result = select_similar_pair_shape_only(
                     object_list=object_list,
                     used_objects=used_objects,
@@ -2312,13 +2458,17 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                     model_name=planner_model
                 )
                 t_shape_ms = int((time.time() - t_shape_start) * 1000)
-                
+            
+            try:
                 object_a = shape_result["object_a"]
                 object_b = shape_result["object_b"]
                 shape_hint = shape_result.get("shape_hint", "")
                 shape_score = shape_result.get("shape_similarity_score", 0)
                 
-                logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}, model={planner_model}")
+                if step1_cache_hit:
+                    logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}, model={planner_model} (from cache)")
+                else:
+                    logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}, model={planner_model}")
             except Exception as e:
                 error_msg = str(e)
                 if "rate_limited" in error_msg:
@@ -2490,7 +2640,7 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     t_total_ms = int((time.time() - t_start) * 1000)
     cache_hit = preview_cache_hit or plan_cache_hit
     logger.info(f"[{request_id}] STEP 3 SUCCESS: image_model={image_model}, image_size={image_size_str}, preview_success=true")
-    logger.info(f"[{request_id}] PERF_PREVIEW total_ms={t_total_ms} shape_ms={t_shape_ms} env_ms={t_envswap_ms} headline_ms={t_headline_ms} image_ms={t_image_ms} cache_hit={cache_hit} cache_image_hit={image_cache_hit}")
+    logger.info(f"[{request_id}] PERF_PREVIEW total_ms={t_total_ms} shape_ms={t_shape_ms} env_ms={t_envswap_ms} headline_ms={t_headline_ms} image_ms={t_image_ms} cache_hit={cache_hit} cache_image_hit={image_cache_hit} cache_step0_hit={step0_cache_hit} cache_step1_hit={step1_cache_hit}")
     
     # Return only imageBase64 (all text is in the image)
     return {
