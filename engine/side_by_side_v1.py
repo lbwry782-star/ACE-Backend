@@ -444,7 +444,7 @@ def generate_image_with_dalle(
         bytes: JPEG image
     """
     model = os.environ.get("OPENAI_IMAGE_MODEL", "dall-e-3")
-    quality = "hd" if width >= 1024 or height >= 1024 else "standard"
+    image_size = f"{width}x{height}"
     
     for attempt in range(max_retries):
         is_strict = attempt > 0  # Use stricter prompt on retries
@@ -458,28 +458,17 @@ def generate_image_with_dalle(
         )
         
         try:
-            logger.info(f"Generating image with DALL-E (attempt {attempt + 1}/{max_retries}), strict={is_strict}")
+            logger.info(f"Generating image (attempt {attempt + 1}/{max_retries}), image_model={model}, image_size={image_size}, strict={is_strict}")
             
-            if model == "dall-e-3":
-                response = client.images.generate(
-                    model=model,
-                    prompt=prompt,
-                    size=f"{width}x{height}",
-                    quality=quality,
-                    n=1,
-                    response_format="b64_json"
-                )
-                image_base64 = response.data[0].b64_json
-            else:
-                # dall-e-2
-                response = client.images.generate(
-                    model=model,
-                    prompt=prompt,
-                    size=f"{width}x{height}",
-                    n=1,
-                    response_format="b64_json"
-                )
-                image_base64 = response.data[0].b64_json
+            # Simple call without response_format for gpt-image-1.5 compatibility
+            response = client.images.generate(
+                model=model,
+                prompt=prompt,
+                size=image_size
+            )
+            
+            # Extract base64 from response
+            image_base64 = response.data[0].b64_json
             
             # Basic quality check
             if attempt < max_retries - 1:
@@ -490,7 +479,7 @@ def generate_image_with_dalle(
             
             # Decode base64 to bytes
             image_bytes = base64.b64decode(image_base64)
-            logger.info(f"Image generated successfully (attempt {attempt + 1})")
+            logger.info(f"Image generated successfully (attempt {attempt + 1}), image_model={model}, image_size={image_size}")
             return image_bytes
             
         except Exception as e:
@@ -628,7 +617,12 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     # Convert image to base64 (without data URI header)
     image_base64 = base64.b64encode(image_bytes).decode('utf-8')
     
-    logger.info(f"[{request_id}] Preview data created successfully: imageBase64 length={len(image_base64)}")
+    # Get image model and size for logging
+    image_model = os.environ.get("OPENAI_IMAGE_MODEL", "dall-e-3")
+    image_size_str = payload_dict.get("imageSize", "1536x1024")
+    
+    logger.info(f"[{request_id}] Preview data created successfully: imageBase64 length={len(image_base64)}, "
+               f"image_model={image_model}, image_size={image_size_str}, preview_success=true")
     
     # Return only imageBase64 (all text is in the image)
     return {
