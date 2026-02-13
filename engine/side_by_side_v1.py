@@ -747,6 +747,219 @@ Headline:"""
     raise Exception("Failed to get valid response from OpenAI")
 
 
+def generate_physical_context_extensions(
+    object_a: str,
+    object_b: str,
+    ad_goal: str,
+    max_retries: int = 2
+) -> Dict:
+    """
+    STEP 1.5 - PHYSICAL CONTEXT EXTENSION
+    
+    Enrich two objects with natural physical causal context.
+    
+    Args:
+        object_a: First object (from STEP 1)
+        object_b: Second object (from STEP 1)
+        ad_goal: Advertising goal (to ensure context doesn't contradict message)
+        max_retries: Maximum retry attempts
+    
+    Returns:
+        dict: {
+            "object_a": str (same),
+            "physical_extension_a": {
+                "description": str,
+                "connection_type": str
+            },
+            "object_b": str (same),
+            "physical_extension_b": {
+                "description": str,
+                "connection_type": str
+            },
+            "silhouette_integrity_confirmed": bool
+        }
+    
+    Rules:
+    - Natural physical extension or interaction
+    - Must be physically connected or directly interacting
+    - Must explain object's function or origin
+    - No decorative background
+    - No abstract ideas
+    - No full human figures
+    - A hand is allowed only if necessary
+    - Must not drastically change object's core silhouette
+    """
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    model_name = os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
+    
+    prompt = f"""You are enriching two objects with physical causal context.
+
+Objects:
+- Object A: {object_a}
+- Object B: {object_b}
+- Advertising goal: {ad_goal}
+
+For EACH object:
+- Add a natural physical extension or interaction.
+- The extension must be physically connected or directly interacting.
+- It must explain the object's function or origin.
+- No decorative background.
+- No abstract ideas.
+- No full human figures.
+- A hand is allowed only if necessary.
+- The extension must not drastically change the object's core silhouette.
+
+The context must feel physically real and minimal.
+
+Return JSON only:
+
+{{
+  "object_a": "{object_a}",
+  "physical_extension_a": {{
+    "description": "short phrase describing the connected physical element",
+    "connection_type": "attached | inserted | held | growing_from | emitting | interacting_with"
+  }},
+  "object_b": "{object_b}",
+  "physical_extension_b": {{
+    "description": "short phrase describing the connected physical element",
+    "connection_type": "attached | inserted | held | growing_from | emitting | interacting_with"
+  }},
+  "silhouette_integrity_confirmed": true
+}}
+
+Rules:
+- Do NOT modify object names.
+- Do NOT add background scenery.
+- Focus on minimal, physically connected extensions only.
+
+JSON:"""
+
+    # Check if model is o* type - these use Responses API
+    is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
+    using_responses_api = is_o_model
+    
+    logger.info(f"STEP 1.5 - PHYSICAL CONTEXT EXTENSION: shape_model={model_name}, object_a={object_a}, object_b={object_b}, ad_goal={ad_goal[:50]}, using_responses_api={using_responses_api}")
+    
+    for attempt in range(max_retries):
+        try:
+            if using_responses_api:
+                # Use Responses API for o* models
+                response = client.responses.create(
+                    model=model_name,
+                    input=prompt
+                )
+                response_text = response.output_text.strip()
+            else:
+                # Use Chat Completions for other models (fallback)
+                request_params = {
+                    "model": model_name,
+                    "messages": [
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.7
+                }
+                response = client.chat.completions.create(**request_params)
+                response_text = response.choices[0].message.content.strip()
+            
+            # Parse JSON response
+            response_text = response_text.strip()
+            if response_text.startswith("```"):
+                lines = response_text.split('\n')
+                response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+            if response_text.startswith("```json"):
+                lines = response_text.split('\n')
+                response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+            
+            # Parse JSON
+            data = json.loads(response_text)
+            
+            # Validate response structure
+            if "object_a" not in data or "object_b" not in data:
+                raise ValueError("Missing object_a or object_b in response")
+            if "physical_extension_a" not in data or "physical_extension_b" not in data:
+                raise ValueError("Missing physical extensions in response")
+            if data["object_a"] != object_a or data["object_b"] != object_b:
+                raise ValueError("Object names were modified")
+            
+            # Validate connection types
+            valid_connection_types = {"attached", "inserted", "held", "growing_from", "emitting", "interacting_with"}
+            if data["physical_extension_a"]["connection_type"] not in valid_connection_types:
+                raise ValueError(f"Invalid connection_type for object_a: {data['physical_extension_a']['connection_type']}")
+            if data["physical_extension_b"]["connection_type"] not in valid_connection_types:
+                raise ValueError(f"Invalid connection_type for object_b: {data['physical_extension_b']['connection_type']}")
+            
+            logger.info(f"STEP 1.5 - PHYSICAL CONTEXT EXTENSION SUCCESS: object_a={object_a}, extension_a={data['physical_extension_a']['description']}, connection_a={data['physical_extension_a']['connection_type']}, object_b={object_b}, extension_b={data['physical_extension_b']['description']}, connection_b={data['physical_extension_b']['connection_type']}")
+            
+            return data
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"STEP 1.5 - PHYSICAL CONTEXT EXTENSION: JSON parse error: {e}")
+            if attempt < max_retries - 1:
+                continue
+            raise ValueError(f"Failed to parse physical context JSON: {e}")
+        except Exception as e:
+            error_str = str(e)
+            error_lower = error_str.lower()
+            
+            # Check for 400 errors - DO NOT RETRY
+            is_400_error = (
+                "400" in error_str or 
+                "invalid_request" in error_lower or 
+                "unsupported_value" in error_lower or
+                "bad_request" in error_lower
+            )
+            
+            if is_400_error:
+                logger.error(f"STEP 1.5 - PHYSICAL CONTEXT EXTENSION: OpenAI 400 error (no retry): {error_str}")
+                raise ValueError(f"invalid_request: {error_str}")
+            
+            # Check for rate limit (429) - RETRY with backoff
+            is_rate_limit = (
+                "429" in error_str or 
+                "rate_limit" in error_lower or 
+                "quota" in error_lower or
+                "rate limit" in error_lower
+            )
+            
+            if is_rate_limit:
+                if attempt < max_retries - 1:
+                    base_delay = 2 ** attempt
+                    jitter = random.uniform(0, 1)
+                    delay = base_delay + jitter
+                    logger.warning(f"STEP 1.5 - PHYSICAL CONTEXT EXTENSION: Rate limit hit (attempt {attempt + 1}/{max_retries}), retrying in {delay:.2f}s")
+                    time.sleep(delay)
+                    continue
+                else:
+                    logger.error(f"STEP 1.5 - PHYSICAL CONTEXT EXTENSION: Rate limit exceeded after {max_retries} attempts")
+                    raise Exception("rate_limited")
+            
+            # Check for server errors - RETRY
+            is_server_error = (
+                "500" in error_str or 
+                "502" in error_str or 
+                "503" in error_str or
+                "504" in error_str or
+                "timeout" in error_lower or
+                "connection" in error_lower or
+                "network" in error_lower
+            )
+            
+            if is_server_error:
+                if attempt < max_retries - 1:
+                    logger.warning(f"STEP 1.5 - PHYSICAL CONTEXT EXTENSION: Server/connection error (attempt {attempt + 1}/{max_retries}): {error_str}, retrying...")
+                    time.sleep(1 + attempt)
+                    continue
+                else:
+                    logger.error(f"STEP 1.5 - PHYSICAL CONTEXT EXTENSION: Server/connection error after {max_retries} attempts: {error_str}")
+                    raise
+            
+            # Other errors - don't retry, raise immediately
+            logger.error(f"STEP 1.5 - PHYSICAL CONTEXT EXTENSION: OpenAI call failed (non-retryable, attempt {attempt + 1}): {error_str}")
+            raise
+    
+    raise Exception("Failed to generate physical context extensions")
+
+
 def generate_short_phrase(product_name: str) -> str:
     """
     Generate short headline from product name.
@@ -817,6 +1030,7 @@ def create_image_prompt(
     object_b: str,
     headline: str,
     shape_hint: Optional[str] = None,
+    physical_context: Optional[Dict] = None,
     is_strict: bool = False
 ) -> str:
     """
@@ -835,6 +1049,19 @@ def create_image_prompt(
     shape_instruction = ""
     if shape_hint:
         shape_instruction = f"\n- Both objects must share a similar outline: {shape_hint}. Emphasize comparable silhouettes."
+    
+    # Build physical context extensions section
+    physical_context_section = ""
+    if physical_context:
+        ext_a = physical_context.get("physical_extension_a", {})
+        ext_b = physical_context.get("physical_extension_b", {})
+        if ext_a and ext_b:
+            physical_context_section = f"""
+PHYSICAL CONTEXT EXTENSIONS:
+- Object A ({object_a}): {ext_a.get("description", "")} (connection: {ext_a.get("connection_type", "")})
+- Object B ({object_b}): {ext_b.get("description", "")} (connection: {ext_b.get("connection_type", "")})
+- These extensions are physically connected to their objects and explain function/origin.
+- Extensions must stay attached and NOT cross the central gap between objects."""
     
     # Build composition rules section
     composition_rules = f"""COMPOSITION RULES (CRITICAL):
@@ -856,6 +1083,7 @@ def create_image_prompt(
 OBJECTS:
 - Left object: {object_a}
 - Right object: {object_b}
+{physical_context_section}
 
 {composition_rules}
 
@@ -886,6 +1114,7 @@ STYLE:
 OBJECTS:
 - Left object: {object_a}
 - Right object: {object_b}
+{physical_context_section}
 
 {composition_rules}
 
@@ -934,6 +1163,7 @@ def generate_image_with_dalle(
     width: int,
     height: int,
     shape_hint: Optional[str] = None,
+    physical_context: Optional[Dict] = None,
     max_retries: int = 3
 ) -> bytes:
     """
@@ -975,6 +1205,7 @@ def generate_image_with_dalle(
             object_b=object_b,
             headline=headline,
             shape_hint=shape_hint,
+            physical_context=physical_context,
             is_strict=is_strict
         )
         
@@ -1126,6 +1357,24 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
             logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection error: {error_msg}")
             raise
     
+    # STEP 1.5 - PHYSICAL CONTEXT EXTENSION
+    try:
+        physical_context = generate_physical_context_extensions(
+            object_a=object_a,
+            object_b=object_b,
+            ad_goal=ad_goal,
+            max_retries=2
+        )
+        logger.info(f"[{request_id}] STEP 1.5 SUCCESS: physical_context_extensions generated")
+    except Exception as e:
+        error_msg = str(e)
+        if "rate_limited" in error_msg:
+            logger.error(f"[{request_id}] STEP 1.5 FAILED: Physical context extension rate limited")
+            raise Exception("rate_limited")
+        else:
+            logger.error(f"[{request_id}] STEP 1.5 FAILED: Physical context extension error: {error_msg}")
+            raise
+    
     # STEP 2 - HEADLINE GENERATION
     # Use productDescription as message (pre-determined message)
     message = product_description if product_description else "Make a difference"
@@ -1163,6 +1412,7 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
             object_a=object_a,
             object_b=object_b,
             shape_hint=shape_hint,
+            physical_context=physical_context,
             headline=headline,
             width=width,
             height=height,
@@ -1269,6 +1519,24 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
             logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection error: {error_msg}")
             raise
     
+    # STEP 1.5 - PHYSICAL CONTEXT EXTENSION
+    try:
+        physical_context = generate_physical_context_extensions(
+            object_a=object_a,
+            object_b=object_b,
+            ad_goal=ad_goal,
+            max_retries=2
+        )
+        logger.info(f"[{request_id}] STEP 1.5 SUCCESS: physical_context_extensions generated")
+    except Exception as e:
+        error_msg = str(e)
+        if "rate_limited" in error_msg:
+            logger.error(f"[{request_id}] STEP 1.5 FAILED: Physical context extension rate limited")
+            raise Exception("rate_limited")
+        else:
+            logger.error(f"[{request_id}] STEP 1.5 FAILED: Physical context extension error: {error_msg}")
+            raise
+    
     # STEP 2 - HEADLINE GENERATION
     # Use productDescription as message (pre-determined message)
     message = product_description if product_description else "Make a difference"
@@ -1306,6 +1574,7 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
             object_a=object_a,
             object_b=object_b,
             shape_hint=shape_hint,
+            physical_context=physical_context,
             headline=headline,
             width=width,
             height=height,
