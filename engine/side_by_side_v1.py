@@ -34,6 +34,13 @@ PLAN_CACHE_TTL_SECONDS = int(os.environ.get("PLAN_CACHE_TTL_SECONDS", "900"))
 ENABLE_IMAGE_CACHE = os.environ.get("ENABLE_IMAGE_CACHE", "0") == "1"
 IMAGE_CACHE_TTL_SECONDS = int(os.environ.get("IMAGE_CACHE_TTL_SECONDS", "900"))
 
+# Preview optimization flags
+PREVIEW_PLANNER_MODEL = os.environ.get("PREVIEW_PLANNER_MODEL", "o4-mini")  # Model for preview planning
+GENERATE_PLANNER_MODEL = os.environ.get("GENERATE_PLANNER_MODEL", "o3-pro")  # Model for generate planning
+PREVIEW_SKIP_PHYSICAL_CONTEXT = os.environ.get("PREVIEW_SKIP_PHYSICAL_CONTEXT", "1") == "1"  # Skip STEP 1.5 in preview
+PREVIEW_USE_CACHE = os.environ.get("PREVIEW_USE_CACHE", "1") == "1"  # Use cache for preview
+CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "900"))  # Cache TTL for preview
+
 # ============================================================================
 # In-Memory Caches (with TTL)
 # ============================================================================
@@ -41,6 +48,10 @@ IMAGE_CACHE_TTL_SECONDS = int(os.environ.get("IMAGE_CACHE_TTL_SECONDS", "900"))
 # Plan cache: key -> (value, timestamp)
 _plan_cache: Dict[str, Tuple[Dict, float]] = {}
 _plan_cache_lock = Lock()
+
+# Preview cache: key -> (value, timestamp)
+_preview_cache: Dict[str, Tuple[Dict, float]] = {}
+_preview_cache_lock = Lock()
 
 # Image cache: key -> (value_bytes, timestamp)
 _image_cache: Dict[str, Tuple[bytes, float]] = {}
@@ -51,6 +62,39 @@ def _get_cache_key_plan(product_name: str, message: str, ad_goal: str, ad_index:
     """Generate cache key for plan."""
     key_str = f"{product_name}|{message}|{ad_goal}|{ad_index}|{json.dumps(object_list or [], sort_keys=True)}|{engine_mode}|{mode}"
     return hashlib.md5(key_str.encode()).hexdigest()
+
+
+def _get_cache_key_preview(product_name: str, message: str, ad_goal: str, ad_index: int, object_list: Optional[List[str]]) -> str:
+    """Generate cache key for preview plan."""
+    # Include objectList version (hash of sorted list) for cache invalidation
+    object_list_version = hashlib.md5(json.dumps(object_list or [], sort_keys=True).encode()).hexdigest()[:8]
+    key_str = f"{product_name}|{message}|{ad_goal}|{ad_index}|{object_list_version}|preview"
+    return hashlib.md5(key_str.encode()).hexdigest()
+
+
+def _get_from_preview_cache(key: str) -> Optional[Dict]:
+    """Get from preview cache if valid."""
+    if not PREVIEW_USE_CACHE:
+        return None
+    
+    with _preview_cache_lock:
+        if key in _preview_cache:
+            value, timestamp = _preview_cache[key]
+            if time.time() - timestamp < CACHE_TTL_SECONDS:
+                return value
+            else:
+                # Expired, remove
+                del _preview_cache[key]
+    return None
+
+
+def _set_to_preview_cache(key: str, value: Dict):
+    """Set to preview cache."""
+    if not PREVIEW_USE_CACHE:
+        return
+    
+    with _preview_cache_lock:
+        _preview_cache[key] = (value, time.time())
 
 
 def _get_cache_key_image(prompt: str, image_size: str, model: str) -> str:
@@ -396,13 +440,14 @@ def get_used_ad_goals(history: Optional[List[Dict]]) -> set:
 def select_similar_pair_shape_only(
     object_list: List[str],
     used_objects: set,
-    max_retries: int = 2
+    max_retries: int = 2,
+    model_name: Optional[str] = None
 ) -> Dict:
     """
     STEP 1 - SHAPE SELECTION (ONLY SHAPE)
     
     Select two objects based ONLY on geometric shape similarity.
-    Uses OPENAI_SHAPE_MODEL (default: o3-pro).
+    Uses model_name if provided, otherwise OPENAI_SHAPE_MODEL (default: o3-pro).
     
     Rules:
     - NO productName
@@ -422,7 +467,8 @@ def select_similar_pair_shape_only(
     }
     """
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-    model_name = os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
+    if model_name is None:
+        model_name = os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
     
     # Filter out used objects
     available_objects = [obj for obj in object_list if obj not in used_objects]
@@ -442,10 +488,12 @@ def select_similar_pair_shape_only(
         # Build full prompt (include system instruction in prompt for Responses API)
         system_instruction = "You are a shape similarity analyzer. Output must be in English only. Return JSON only without additional text.\n\n"
         
-        # Request list of candidates (12 pairs, minimum 5)
-        prompt = f"""{system_instruction}Task: Find pairs of items from the provided list with similar geometric shapes (outer contour/outline).
+        # Request list of candidates (12 pairs, minimum 5) with environment difference scoring
+        prompt = f"""{system_instruction}Task: Find pairs of items from the provided list with similar geometric shapes (outer contour/outline) BUT with clearly different classic natural environments.
 
-ONLY criterion: geometric shape similarity of the objects' outer contour (outline).
+CRITERIA:
+1. Shape similarity: geometric shape similarity of the objects' outer contour (outline).
+2. Environment difference: the classic natural environments where each object is normally found must be clearly different.
 
 Ignore meaning, category, theme, symbolism, relevance, marketing, color, material, texture.
 
@@ -458,14 +506,26 @@ GLOBAL VISUAL RULES (MANDATORY):
 - Must be photographable in real life.
 - Exception: objects where text is an integral structural part (e.g., playing cards, compass dial, measuring scale) are allowed.
 
+ENVIRONMENT RULES (CRITICAL):
+- For each object, identify its classic natural environment (where it is normally found in real life).
+- Penalize pairs from same category where environments match (e.g., coin/plate both in "flat surface", ring/wheel both in "circular mechanism").
+- Prefer pairs where environments are clearly different (e.g., leaf in "forest floor" vs. shell in "ocean beach").
+
 Available object list:
 {json.dumps(available_objects, ensure_ascii=False, indent=2)}
 
 Output JSON only with a list of candidate pairs:
 {{
   "candidates": [
-    {{"a": "OBJECT_1", "b": "OBJECT_2", "score": 0-100, "hint": "short shape hint"}},
-    {{"a": "OBJECT_3", "b": "OBJECT_4", "score": 0-100, "hint": "short shape hint"}},
+    {{
+      "a": "OBJECT_1",
+      "b": "OBJECT_2",
+      "shape_score": 0-100,
+      "env_difference_score": 0-100,
+      "env_a": "2-5 words classic environment",
+      "env_b": "2-5 words classic environment",
+      "hint": "short shape hint"
+    }},
     ...
   ]
 }}
@@ -473,14 +533,18 @@ Output JSON only with a list of candidate pairs:
 Requirements:
 - Return 12 candidate pairs if possible, minimum 5
 - Each a/b must be EXACT match from the object list
-- Score based ONLY on shape similarity (outer contour/outline)
-- No meaning, no concept, only geometric shape
+- shape_score: based ONLY on shape similarity (outer contour/outline)
+- env_a/env_b: classic natural environment for each object (2-5 words, concrete and specific)
+- env_difference_score: how different env_a and env_b are (0=almost same, 100=completely different)
+- Penalize pairs from same category where environments match
 - Exclude objects with visible text or branding"""
         
         if is_strict:
-            prompt = f"""{system_instruction}Task: Find pairs of items from the provided list with similar geometric shapes (outer contour/outline).
+            prompt = f"""{system_instruction}Task: Find pairs of items from the provided list with similar geometric shapes (outer contour/outline) BUT with clearly different classic natural environments.
 
-ONLY criterion: geometric shape similarity of the objects' outer contour (outline).
+CRITERIA:
+1. Shape similarity: geometric shape similarity of the objects' outer contour (outline).
+2. Environment difference: the classic natural environments where each object is normally found must be clearly different.
 
 Ignore meaning, category, theme, symbolism, relevance, marketing, color, material, texture.
 
@@ -493,14 +557,26 @@ GLOBAL VISUAL RULES (MANDATORY):
 - Must be photographable in real life.
 - Exception: objects where text is an integral structural part (e.g., playing cards, compass dial, measuring scale) are allowed.
 
+ENVIRONMENT RULES (CRITICAL):
+- For each object, identify its classic natural environment (where it is normally found in real life).
+- Penalize pairs from same category where environments match.
+- Prefer pairs where environments are clearly different.
+
 Available object list:
 {json.dumps(available_objects, ensure_ascii=False, indent=2)}
 
 Output JSON only with a list of candidate pairs:
 {{
   "candidates": [
-    {{"a": "OBJECT_1", "b": "OBJECT_2", "score": 0-100, "hint": "short shape hint"}},
-    {{"a": "OBJECT_3", "b": "OBJECT_4", "score": 0-100, "hint": "short shape hint"}},
+    {{
+      "a": "OBJECT_1",
+      "b": "OBJECT_2",
+      "shape_score": 0-100,
+      "env_difference_score": 0-100,
+      "env_a": "2-5 words classic environment",
+      "env_b": "2-5 words classic environment",
+      "hint": "short shape hint"
+    }},
     ...
   ]
 }}
@@ -508,8 +584,10 @@ Output JSON only with a list of candidate pairs:
 Requirements:
 - Return 12 candidate pairs if possible, minimum 5
 - Each a/b must be EXACT match from the object list
-- Score based ONLY on shape similarity (outer contour/outline)
-- No meaning, no concept, only geometric shape"""
+- shape_score: based ONLY on shape similarity (outer contour/outline)
+- env_a/env_b: classic natural environment for each object (2-5 words, concrete and specific)
+- env_difference_score: how different env_a and env_b are (0=almost same, 100=completely different)
+- Penalize pairs from same category where environments match"""
         
         try:
             if attempt == 0:
@@ -568,20 +646,46 @@ Requirements:
                 if obj_a == obj_b:
                     continue
                 
-                # Normalize score
-                score = c.get("score") or c.get("shape_similarity_score", 0)
-                if not isinstance(score, (int, float)):
+                # Normalize shape_score (support both "score" and "shape_score")
+                shape_score = c.get("shape_score") or c.get("score") or c.get("shape_similarity_score", 0)
+                if not isinstance(shape_score, (int, float)):
                     try:
-                        score = int(score)
+                        shape_score = int(shape_score)
                     except:
-                        score = 0
+                        shape_score = 0
+                
+                # Get environment difference score and environments
+                env_diff_score = c.get("env_difference_score", 0)
+                if not isinstance(env_diff_score, (int, float)):
+                    try:
+                        env_diff_score = int(env_diff_score)
+                    except:
+                        env_diff_score = 0
+                
+                env_a = c.get("env_a", "").strip().lower()
+                env_b = c.get("env_b", "").strip().lower()
+                
+                # Guardrail: reject if environments are too similar (same or almost same)
+                if env_a and env_b:
+                    # Simple similarity check: if environments are identical or very similar
+                    if env_a == env_b:
+                        logger.debug(f"Rejecting pair {obj_a}~{obj_b}: identical environments ({env_a})")
+                        continue
+                    # Check if one environment contains the other (very similar)
+                    if env_a in env_b or env_b in env_a:
+                        if len(env_a) > 5 and len(env_b) > 5:  # Only for longer descriptions
+                            logger.debug(f"Rejecting pair {obj_a}~{obj_b}: very similar environments ({env_a} vs {env_b})")
+                            continue
                 
                 hint = c.get("hint") or c.get("shape_hint", "")
                 
                 valid_candidates.append({
                     "a": obj_a,
                     "b": obj_b,
-                    "score": score,
+                    "shape_score": shape_score,
+                    "env_difference_score": env_diff_score,
+                    "env_a": env_a,
+                    "env_b": env_b,
                     "hint": hint
                 })
             
@@ -593,38 +697,75 @@ Requirements:
                 else:
                     raise ValueError(f"Too few valid candidates after filtering: {len(valid_candidates)}")
             
-            # Sort by score descending
-            valid_candidates.sort(key=lambda x: x["score"], reverse=True)
+            # Apply filters: min_shape_score and min_env_difference_score
+            min_shape_score = 85 if len(valid_candidates) >= 10 else 80
+            min_env_diff_score = 60
             
-            # Calculate similar_pairs_found (score >= 80)
-            similar_pairs_found = sum(1 for c in valid_candidates if c["score"] >= 80)
+            logger.info(f"STEP 1 PAIR_GATE: min_shape={min_shape_score} min_env_diff={min_env_diff_score}")
             
-            # Select best pair (highest score)
-            best_pair = valid_candidates[0]
+            # Filter by thresholds
+            filtered_candidates = []
+            for c in valid_candidates:
+                if c["shape_score"] >= min_shape_score and c["env_difference_score"] >= min_env_diff_score:
+                    filtered_candidates.append(c)
+            
+            # If no candidates pass filters, fallback to best shape_score with WARNING
+            if len(filtered_candidates) == 0:
+                logger.warning(f"STEP 1 PAIR_GATE: No candidates passed filters, falling back to best shape_score")
+                # Sort by shape_score descending
+                valid_candidates.sort(key=lambda x: x["shape_score"], reverse=True)
+                filtered_candidates = [valid_candidates[0]]  # Take best by shape only
+            
+            # Calculate weighted combined score: (0.65*shape_score) + (0.35*env_difference_score)
+            for c in filtered_candidates:
+                c["combined_score"] = (0.65 * c["shape_score"]) + (0.35 * c["env_difference_score"])
+            
+            # Sort by combined_score descending
+            filtered_candidates.sort(key=lambda x: x["combined_score"], reverse=True)
+            
+            # Select best pair
+            best_pair = filtered_candidates[0]
             object_a = best_pair["a"]
             object_b = best_pair["b"]
-            score = best_pair["score"]
+            shape_score = best_pair["shape_score"]
+            env_diff_score = best_pair["env_difference_score"]
+            combined_score = best_pair["combined_score"]
+            env_a = best_pair.get("env_a", "")
+            env_b = best_pair.get("env_b", "")
             shape_hint = best_pair["hint"]
             
+            # Calculate similar_pairs_found (shape_score >= 80)
+            similar_pairs_found = sum(1 for c in valid_candidates if c["shape_score"] >= 80)
+            
             # Log summary
-            logger.info(f"STEP 1 SHAPE_MATCH summary: objectList_size={len(object_list)}, candidates_returned={len(candidates)}, candidates_valid={len(valid_candidates)}, similar_pairs_found(score>=80)={similar_pairs_found}, best_pair=\"{object_a} ~ {object_b}\" score={score} hint=\"{shape_hint}\"")
+            logger.info(f"STEP 1 SHAPE_MATCH summary: objectList_size={len(object_list)}, candidates_returned={len(candidates)}, candidates_valid={len(valid_candidates)}, similar_pairs_found(score>=80)={similar_pairs_found}, best_pair=\"{object_a} ~ {object_b}\" shape_score={shape_score} env_diff_score={env_diff_score} combined_score={combined_score:.1f} hint=\"{shape_hint}\"")
+            
+            # Log environment details
+            if env_a and env_b:
+                logger.info(f"STEP 1 PAIR_SELECT_ENV: env_a=\"{env_a}\" env_b=\"{env_b}\"")
+            
+            # Log selection
+            logger.info(f"STEP 1 PAIR_SELECT: chosen=\"{object_a}~{object_b}\" shape={shape_score} env_diff={env_diff_score} combined={combined_score:.1f}")
             
             # Log top 5 (max 10 lines to avoid flooding)
-            top5 = valid_candidates[:5]
-            top5_str = " | ".join([f"{i+1}) {c['a']}~{c['b']} score={c['score']} hint={c['hint']}" for i, c in enumerate(top5)])
+            top5 = filtered_candidates[:5]
+            top5_str = " | ".join([f"{i+1}) {c['a']}~{c['b']} shape={c['shape_score']} env_diff={c['env_difference_score']} combined={c['combined_score']:.1f}" for i, c in enumerate(top5)])
             logger.info(f"STEP 1 SHAPE_MATCH top5: {top5_str}")
             
             # Return result in expected format
             result = {
                 "object_a": object_a,
                 "object_b": object_b,
-                "shape_similarity_score": score,
+                "shape_similarity_score": shape_score,
                 "shape_hint": shape_hint,
-                "why": f"Selected from {len(valid_candidates)} valid candidates, {similar_pairs_found} with score>=80",
-                "_similar_pairs_found": similar_pairs_found  # Internal variable for future use
+                "why": f"Selected from {len(valid_candidates)} valid candidates, {similar_pairs_found} with shape_score>=80, combined_score={combined_score:.1f}",
+                "_similar_pairs_found": similar_pairs_found,  # Internal variable for future use
+                "_env_difference_score": env_diff_score,  # Internal variable
+                "_env_a": env_a,  # Internal variable
+                "_env_b": env_b  # Internal variable
             }
             
-            logger.info(f"STEP 1 - SHAPE SELECTION SUCCESS: selected_pair=[{object_a}, {object_b}], score={score}, shape_hint={shape_hint}, validation_passed=true")
+            logger.info(f"STEP 1 - SHAPE SELECTION SUCCESS: selected_pair=[{object_a}, {object_b}], shape_score={shape_score}, env_diff_score={env_diff_score}, combined_score={combined_score:.1f}, shape_hint={shape_hint}, validation_passed=true")
             return result
             
         except Exception as e:
@@ -1088,10 +1229,15 @@ def select_shape_and_environment_plan_optimized(
     
     prompt = f"""You are planning an advertisement composition with shape selection and environment swap.
 
-Task 1 - SHAPE SELECTION:
-Find a pair of items from the provided list with similar geometric shapes (outer contour/outline).
-ONLY criterion: geometric shape similarity of the objects' outer contour (outline).
+Task 1 - SHAPE SELECTION WITH ENVIRONMENT DIFFERENCE:
+Find a pair of items from the provided list with similar geometric shapes (outer contour/outline) BUT with clearly different classic natural environments.
+
+CRITERIA:
+1. Shape similarity: geometric shape similarity of the objects' outer contour (outline).
+2. Environment difference: the classic natural environments where each object is normally found must be clearly different.
+
 Ignore meaning, category, theme, symbolism, relevance, marketing, color, material, texture.
+
 Return EXACT strings from the list (no synonyms, no new words).
 
 GLOBAL VISUAL RULES (MANDATORY):
@@ -1100,6 +1246,11 @@ GLOBAL VISUAL RULES (MANDATORY):
 - Only physical objects without visible text surfaces.
 - Must be photographable in real life.
 - Exception: objects where text is an integral structural part (e.g., playing cards, compass dial, measuring scale) are allowed.
+
+ENVIRONMENT RULES (CRITICAL):
+- For each object, identify its classic natural environment (where it is normally found in real life).
+- Penalize pairs from same category where environments match (e.g., coin/plate both in "flat surface", ring/wheel both in "circular mechanism").
+- Prefer pairs where environments are clearly different (e.g., leaf in "forest floor" vs. shell in "ocean beach").
 
 Available object list:
 {json.dumps(available_objects, ensure_ascii=False, indent=2)}
@@ -1133,8 +1284,11 @@ Return JSON only:
     "object_a": "OBJECT_NAME",
     "object_b": "OBJECT_NAME",
     "shape_similarity_score": 0-100,
+    "env_difference_score": 0-100,
+    "env_a": "2-5 words classic environment",
+    "env_b": "2-5 words classic environment",
     "shape_hint": "short shape hint",
-    "why": "one short sentence focused on shape"
+    "why": "one short sentence focused on shape and environment difference"
   }},
   "environment_plan": {{
     "hero_object": "<selected_object_a>" | "<selected_object_b>",
@@ -1148,6 +1302,10 @@ Return JSON only:
 
 Rules:
 - shape_selection.object_a and object_b must be EXACT matches from the object list.
+- shape_selection.shape_similarity_score: based ONLY on shape similarity (outer contour/outline).
+- shape_selection.env_a/env_b: classic natural environment for each object (2-5 words, concrete and specific).
+- shape_selection.env_difference_score: how different env_a and env_b are (0=almost same, 100=completely different).
+- Penalize pairs from same category where environments match.
 - environment_plan.hero_object and environment_from must be different.
 - environment_description must be concrete and natural (max 15 words).
 - environment_is_classic and single_object_confirmed must be true.
@@ -1287,7 +1445,8 @@ def generate_hybrid_context_plan(
     ad_goal: str,
     message: str,
     image_size: str,
-    max_retries: int = 2
+    max_retries: int = 2,
+    model_name: Optional[str] = None
 ) -> Dict:
     """
     STEP 1.75 - HYBRID CONTEXT PLAN
@@ -1301,6 +1460,7 @@ def generate_hybrid_context_plan(
         message: Pre-determined message
         image_size: Image size (e.g., "1536x1024")
         max_retries: Maximum retry attempts
+        model_name: Model to use (if None, uses OPENAI_SHAPE_MODEL)
     
     Returns:
         dict: {
@@ -1320,7 +1480,8 @@ def generate_hybrid_context_plan(
     - English only
     """
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-    model_name = os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
+    if model_name is None:
+        model_name = os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
     
     prompt = f"""You are planning an ENVIRONMENT SWAP advertisement composition.
 
@@ -2004,17 +2165,51 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     # Use validate_object_list which will call STEP 0 if object_list is missing/small and ad_goal exists
     object_list = validate_object_list(object_list, ad_goal=ad_goal, product_name=product_name)
     
-    # Log request
+    # Log request with preview flags
     logger.info(f"[{request_id}] generate_preview_data called: sessionId={session_id}, adIndex={ad_index}, "
                 f"productName={product_name[:50]}, language={language}, ad_goal={ad_goal[:50]}, "
                 f"ENGINE_MODE={ENGINE_MODE}, PREVIEW_MODE={PREVIEW_MODE}")
+    logger.info(f"[{request_id}] PREVIEW_FLAGS planner_model={PREVIEW_PLANNER_MODEL} skip_physical={PREVIEW_SKIP_PHYSICAL_CONTEXT} cache={PREVIEW_USE_CACHE}")
     
-    # Check plan cache (if enabled)
-    plan_cache_key = None
-    plan_cache_hit = False
+    # Check preview cache (if enabled)
+    preview_cache_key = None
+    preview_cache_hit = False
     cached_plan = None
     
-    if ENABLE_PLAN_CACHE:
+    if PREVIEW_USE_CACHE:
+        preview_cache_key = _get_cache_key_preview(product_name, message, ad_goal, ad_index, object_list)
+        cached_plan = _get_from_preview_cache(preview_cache_key)
+        if cached_plan:
+            preview_cache_hit = True
+            ttl_remaining = int(CACHE_TTL_SECONDS - (time.time() - _preview_cache[preview_cache_key][1]))
+            logger.info(f"[{request_id}] PREVIEW_CACHE hit=true ttl={ttl_remaining}s key={preview_cache_key[:16]}...")
+            
+            # If plan_only mode, return cached plan immediately
+            if PREVIEW_MODE == "plan_only":
+                t_total_ms = int((time.time() - t_start) * 1000)
+                logger.info(f"[{request_id}] PERF_PREVIEW total_ms={t_total_ms} shape_ms=0 env_ms=0 headline_ms=0 image_ms=0 cache_hit=true")
+                return cached_plan
+            
+            # If image mode, use cached plan data
+            object_a = cached_plan.get("chosen_objects", [None, None])[0]
+            object_b = cached_plan.get("chosen_objects", [None, None])[1]
+            shape_hint = cached_plan.get("shape_hint", "")
+            shape_score = cached_plan.get("shape_similarity_score", 0)
+            headline = cached_plan.get("headline", "")
+            hybrid_plan = {
+                "hero_object": cached_plan.get("hero_object"),
+                "environment_from": cached_plan.get("environment_from"),
+                "environment_description": cached_plan.get("environment_description"),
+                "headline_placement": cached_plan.get("headline_placement")
+            }
+            physical_context = None  # Not cached for now
+        else:
+            logger.info(f"[{request_id}] PREVIEW_CACHE hit=false ttl={CACHE_TTL_SECONDS}s key={preview_cache_key[:16]}...")
+    
+    # Also check legacy plan cache (if enabled)
+    plan_cache_key = None
+    plan_cache_hit = False
+    if ENABLE_PLAN_CACHE and not preview_cache_hit:
         plan_cache_key = _get_cache_key_plan(product_name, message, ad_goal, ad_index, object_list, ENGINE_MODE, "ENV_SWAP")
         cached_plan = _get_from_plan_cache(plan_cache_key)
         if cached_plan:
@@ -2023,6 +2218,8 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
             
             # If plan_only mode, return cached plan immediately
             if PREVIEW_MODE == "plan_only":
+                t_total_ms = int((time.time() - t_start) * 1000)
+                logger.info(f"[{request_id}] PERF_PREVIEW total_ms={t_total_ms} shape_ms=0 env_ms=0 headline_ms=0 image_ms=0 cache_hit=true")
                 return cached_plan
             
             # If image mode, use cached plan data
@@ -2049,11 +2246,16 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     image_cache_hit = False
     
     # If not cached, generate plan
-    if not plan_cache_hit:
+    if not preview_cache_hit and not plan_cache_hit:
         used_objects = get_used_objects(history)
+        
+        # Use PREVIEW_PLANNER_MODEL for preview
+        planner_model = PREVIEW_PLANNER_MODEL
         
         if ENGINE_MODE == "optimized":
             # OPTIMIZED MODE: Combined shape selection + environment swap plan
+            # Note: select_shape_and_environment_plan_optimized uses OPENAI_SHAPE_MODEL internally
+            # We'll need to update it to accept model_name, but for now it uses the default
             t_shape_start = time.time()
             try:
                 combined_result = select_shape_and_environment_plan_optimized(
@@ -2082,8 +2284,13 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                 
                 logger.info(f"[{request_id}] OPTIMIZED MODE - COMBINED PLAN SUCCESS: shape_pair=[{object_a}, {object_b}], score={shape_score}, hero={hybrid_plan['hero_object']}")
                 
-                # Skip STEP 1.5 in optimized mode (physical context not needed for plan_only)
-                physical_context = None
+                # Skip STEP 1.5 in preview if PREVIEW_SKIP_PHYSICAL_CONTEXT=1
+                if PREVIEW_SKIP_PHYSICAL_CONTEXT:
+                    physical_context = None
+                    logger.info(f"[{request_id}] STEP 1.5 SKIPPED: PREVIEW_SKIP_PHYSICAL_CONTEXT=1")
+                else:
+                    # Generate physical context (but this shouldn't happen in optimized mode usually)
+                    physical_context = None
                 
             except Exception as e:
                 error_msg = str(e)
@@ -2095,13 +2302,14 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                     raise
         else:
             # LEGACY MODE: Separate calls
-            # STEP 1 - SHAPE SELECTION
+            # STEP 1 - SHAPE SELECTION (using PREVIEW_PLANNER_MODEL)
             t_shape_start = time.time()
             try:
                 shape_result = select_similar_pair_shape_only(
                     object_list=object_list,
                     used_objects=used_objects,
-                    max_retries=2
+                    max_retries=2,
+                    model_name=planner_model
                 )
                 t_shape_ms = int((time.time() - t_shape_start) * 1000)
                 
@@ -2110,7 +2318,7 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                 shape_hint = shape_result.get("shape_hint", "")
                 shape_score = shape_result.get("shape_similarity_score", 0)
                 
-                logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}")
+                logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}, model={planner_model}")
             except Exception as e:
                 error_msg = str(e)
                 if "rate_limited" in error_msg:
@@ -2120,25 +2328,29 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                     logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection error: {error_msg}")
                     raise
             
-            # STEP 1.5 - PHYSICAL CONTEXT EXTENSION
-            try:
-                physical_context = generate_physical_context_extensions(
-                    object_a=object_a,
-                    object_b=object_b,
-                    ad_goal=ad_goal,
-                    max_retries=2
-                )
-                logger.info(f"[{request_id}] STEP 1.5 SUCCESS: physical_context_extensions generated")
-            except Exception as e:
-                error_msg = str(e)
-                if "rate_limited" in error_msg:
-                    logger.error(f"[{request_id}] STEP 1.5 FAILED: Physical context extension rate limited")
-                    raise Exception("rate_limited")
-                else:
-                    logger.error(f"[{request_id}] STEP 1.5 FAILED: Physical context extension error: {error_msg}")
-                    raise
+            # STEP 1.5 - PHYSICAL CONTEXT EXTENSION (skip if PREVIEW_SKIP_PHYSICAL_CONTEXT=1)
+            if PREVIEW_SKIP_PHYSICAL_CONTEXT:
+                physical_context = None
+                logger.info(f"[{request_id}] STEP 1.5 SKIPPED: PREVIEW_SKIP_PHYSICAL_CONTEXT=1")
+            else:
+                try:
+                    physical_context = generate_physical_context_extensions(
+                        object_a=object_a,
+                        object_b=object_b,
+                        ad_goal=ad_goal,
+                        max_retries=2
+                    )
+                    logger.info(f"[{request_id}] STEP 1.5 SUCCESS: physical_context_extensions generated")
+                except Exception as e:
+                    error_msg = str(e)
+                    if "rate_limited" in error_msg:
+                        logger.error(f"[{request_id}] STEP 1.5 FAILED: Physical context extension rate limited")
+                        raise Exception("rate_limited")
+                    else:
+                        logger.error(f"[{request_id}] STEP 1.5 FAILED: Physical context extension error: {error_msg}")
+                        raise
             
-            # STEP 1.75 - ENVIRONMENT SWAP PLAN
+            # STEP 1.75 - ENVIRONMENT SWAP PLAN (using PREVIEW_PLANNER_MODEL)
             t_envswap_start = time.time()
             try:
                 hybrid_plan = generate_hybrid_context_plan(
@@ -2147,10 +2359,11 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                     ad_goal=ad_goal,
                     message=message,
                     image_size=image_size_str,
-                    max_retries=2
+                    max_retries=2,
+                    model_name=planner_model
                 )
                 t_envswap_ms = int((time.time() - t_envswap_start) * 1000)
-                logger.info(f"[{request_id}] STEP 1.75 SUCCESS: hybrid_context_plan generated")
+                logger.info(f"[{request_id}] STEP 1.75 SUCCESS: hybrid_context_plan generated, model={planner_model}")
             except Exception as e:
                 error_msg = str(e)
                 if "rate_limited" in error_msg:
@@ -2183,7 +2396,7 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                 logger.error(f"[{request_id}] STEP 2 FAILED: Headline generation error: {error_msg}")
                 raise
         
-        # Save to plan cache
+        # Save to preview cache and plan cache
         plan_data = {
             "mode": "ENV_SWAP",
             "hero_object": hybrid_plan.get("hero_object"),
@@ -2196,14 +2409,20 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
             "chosen_objects": [object_a, object_b]
         }
         
+        # Save to preview cache (if enabled)
+        if PREVIEW_USE_CACHE and preview_cache_key:
+            _set_to_preview_cache(preview_cache_key, plan_data)
+        
+        # Also save to legacy plan cache (if enabled)
         if ENABLE_PLAN_CACHE and plan_cache_key:
             _set_to_plan_cache(plan_cache_key, plan_data)
     
     # If plan_only mode, return plan immediately (no image generation)
     if PREVIEW_MODE == "plan_only":
         t_total_ms = int((time.time() - t_start) * 1000)
-        logger.info(f"[{request_id}] PERF total_ms={t_total_ms} shape_ms={t_shape_ms} env_ms={t_envswap_ms} headline_ms={t_headline_ms} image_ms=0 cache_plan_hit={plan_cache_hit} cache_image_hit=false")
-        return plan_data if not plan_cache_hit else cached_plan
+        cache_hit = preview_cache_hit or plan_cache_hit
+        logger.info(f"[{request_id}] PERF_PREVIEW total_ms={t_total_ms} shape_ms={t_shape_ms} env_ms={t_envswap_ms} headline_ms={t_headline_ms} image_ms=0 cache_hit={cache_hit}")
+        return plan_data if not cache_hit else cached_plan
     
     # STEP 3 - IMAGE GENERATION (only if PREVIEW_MODE=image)
     t_image_start = time.time()
@@ -2269,8 +2488,9 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     image_model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
     
     t_total_ms = int((time.time() - t_start) * 1000)
+    cache_hit = preview_cache_hit or plan_cache_hit
     logger.info(f"[{request_id}] STEP 3 SUCCESS: image_model={image_model}, image_size={image_size_str}, preview_success=true")
-    logger.info(f"[{request_id}] PERF total_ms={t_total_ms} shape_ms={t_shape_ms} env_ms={t_envswap_ms} headline_ms={t_headline_ms} image_ms={t_image_ms} cache_plan_hit={plan_cache_hit} cache_image_hit={image_cache_hit}")
+    logger.info(f"[{request_id}] PERF_PREVIEW total_ms={t_total_ms} shape_ms={t_shape_ms} env_ms={t_envswap_ms} headline_ms={t_headline_ms} image_ms={t_image_ms} cache_hit={cache_hit} cache_image_hit={image_cache_hit}")
     
     # Return only imageBase64 (all text is in the image)
     return {
@@ -2344,7 +2564,7 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     # Log request
     logger.info(f"[{request_id}] generate_zip called: sessionId={session_id}, adIndex={ad_index}, "
                 f"productName={product_name[:50]}, language={language}, is_preview={is_preview}, ad_goal={ad_goal[:50]}, "
-                f"ENGINE_MODE={ENGINE_MODE}")
+                f"ENGINE_MODE={ENGINE_MODE}, GENERATE_PLANNER_MODEL={GENERATE_PLANNER_MODEL}")
     
     # Check plan cache (if enabled)
     plan_cache_key = None
@@ -2427,13 +2647,17 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
                     raise
         else:
             # LEGACY MODE: Separate calls
-            # STEP 1 - SHAPE SELECTION
+            # Use GENERATE_PLANNER_MODEL for generate
+            planner_model = GENERATE_PLANNER_MODEL
+            
+            # STEP 1 - SHAPE SELECTION (using GENERATE_PLANNER_MODEL)
             t_shape_start = time.time()
             try:
                 shape_result = select_similar_pair_shape_only(
                     object_list=object_list,
                     used_objects=used_objects,
-                    max_retries=2
+                    max_retries=2,
+                    model_name=planner_model
                 )
                 t_shape_ms = int((time.time() - t_shape_start) * 1000)
                 
@@ -2442,7 +2666,7 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
                 shape_hint = shape_result.get("shape_hint", "")
                 shape_score = shape_result.get("shape_similarity_score", 0)
                 
-                logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}")
+                logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}, model={planner_model}")
             except Exception as e:
                 error_msg = str(e)
                 if "rate_limited" in error_msg:
@@ -2452,7 +2676,7 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
                     logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection error: {error_msg}")
                     raise
             
-            # STEP 1.5 - PHYSICAL CONTEXT EXTENSION
+            # STEP 1.5 - PHYSICAL CONTEXT EXTENSION (always run for generate)
             try:
                 physical_context = generate_physical_context_extensions(
                     object_a=object_a,
@@ -2470,7 +2694,7 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
                     logger.error(f"[{request_id}] STEP 1.5 FAILED: Physical context extension error: {error_msg}")
                     raise
             
-            # STEP 1.75 - ENVIRONMENT SWAP PLAN
+            # STEP 1.75 - ENVIRONMENT SWAP PLAN (using GENERATE_PLANNER_MODEL)
             t_envswap_start = time.time()
             try:
                 hybrid_plan = generate_hybrid_context_plan(
@@ -2479,10 +2703,11 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
                     ad_goal=ad_goal,
                     message=message,
                     image_size=image_size_str,
-                    max_retries=2
+                    max_retries=2,
+                    model_name=planner_model
                 )
                 t_envswap_ms = int((time.time() - t_envswap_start) * 1000)
-                logger.info(f"[{request_id}] STEP 1.75 SUCCESS: hybrid_context_plan generated")
+                logger.info(f"[{request_id}] STEP 1.75 SUCCESS: hybrid_context_plan generated, model={planner_model}")
             except Exception as e:
                 error_msg = str(e)
                 if "rate_limited" in error_msg:
