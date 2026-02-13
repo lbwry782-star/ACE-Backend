@@ -98,11 +98,22 @@ def get_used_ad_goals(history: Optional[List[Dict]]) -> set:
 def select_similar_pair_shape_only(
     object_list: List[str],
     used_objects: set,
-    max_retries: int = 3
+    max_retries: int = 2
 ) -> Dict:
     """
+    STEP 1 - SHAPE SELECTION (ONLY SHAPE)
+    
     Select two objects based ONLY on geometric shape similarity.
     Uses OPENAI_SHAPE_MODEL (default: o3-pro).
+    
+    Rules:
+    - NO productName
+    - NO productDescription
+    - NO message
+    - NO headline
+    - NO composition
+    - NO SIDE BY SIDE
+    - ONLY criterion: geometric shape similarity
     
     Returns: {
         "object_a": str,
@@ -121,16 +132,19 @@ def select_similar_pair_shape_only(
         available_objects = object_list
         logger.warning("Not enough unused objects for shape selection, allowing reuse")
     
-    logger.info(f"select_similar_pair_shape_only: objectList_size={len(object_list)}, available={len(available_objects)}")
+    logger.info(f"STEP 1 - SHAPE SELECTION: shape_model={model_name}, objectList_size={len(object_list)}, available={len(available_objects)}")
     
-    # Check if model is o* type - these don't support temperature
+    # Check if model is o* type - these use Responses API, not Chat Completions
     is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
-    use_temperature = not is_o_model
+    using_responses_api = is_o_model
     
     for attempt in range(max_retries):
         is_strict = attempt > 0
         
-        prompt = f"""Task: Choose TWO items from the provided list.
+        # Build full prompt (include system instruction in prompt for Responses API)
+        system_instruction = "You are a shape similarity analyzer. Output must be in English only. Return JSON only without additional text.\n\n"
+        
+        prompt = f"""{system_instruction}Task: Choose TWO items from the provided list.
 
 ONLY criterion: geometric shape similarity of the objects' outer contour (outline).
 
@@ -151,7 +165,7 @@ Output JSON only:
 }}"""
         
         if is_strict:
-            prompt = f"""Task: Choose TWO items from the provided list.
+            prompt = f"""{system_instruction}Task: Choose TWO items from the provided list.
 
 ONLY criterion: geometric shape similarity of the objects' outer contour (outline).
 
@@ -171,26 +185,31 @@ Output JSON only:
   "why": "one short sentence focused on shape"
 }}"""
         
-        # Build request parameters
-        request_params = {
-            "model": model_name,
-            "messages": [
-                {"role": "system", "content": "You are a shape similarity analyzer. Output must be in English only. Return JSON only without additional text."},
-                {"role": "user", "content": prompt}
-            ],
-            "response_format": {"type": "json_object"}
-        }
-        
-        if use_temperature:
-            request_params["temperature"] = 0.7
-        
         try:
             if attempt == 0:
-                logger.info(f"Shape selection: using model={model_name}, temperature={'0.7' if use_temperature else 'omitted'}")
+                logger.info(f"Shape selection: using model={model_name}, using_responses_api={using_responses_api}, shape_model={model_name}")
             
-            response = client.chat.completions.create(**request_params)
+            if using_responses_api:
+                # Use Responses API for o* models
+                response = client.responses.create(
+                    model=model_name,
+                    input=prompt
+                )
+                content = response.output_text
+            else:
+                # Use Chat Completions for other models
+                request_params = {
+                    "model": model_name,
+                    "messages": [
+                        {"role": "system", "content": "You are a shape similarity analyzer. Output must be in English only. Return JSON only without additional text."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.7
+                }
+                response = client.chat.completions.create(**request_params)
+                content = response.choices[0].message.content
             
-            content = response.choices[0].message.content
             result = json.loads(content)
             
             # Validate result structure
@@ -227,7 +246,7 @@ Output JSON only:
             # Guardrail: If score < 80, ask for 5 candidates
             if score < 80 and attempt < max_retries - 1:
                 logger.warning(f"Shape similarity score too low ({score} < 80), requesting 5 candidates...")
-                candidates_prompt = f"""Task: Choose FIVE candidate pairs from the provided list, ranked by shape similarity.
+                candidates_prompt = f"""{system_instruction}Task: Choose FIVE candidate pairs from the provided list, ranked by shape similarity.
 
 ONLY criterion: geometric shape similarity of the objects' outer contour (outline).
 
@@ -249,20 +268,27 @@ Output JSON only:
   ]
 }}"""
                 
-                candidates_params = {
-                    "model": model_name,
-                    "messages": [
-                        {"role": "system", "content": "You are a shape similarity analyzer. Output must be in English only. Return JSON only without additional text."},
-                        {"role": "user", "content": candidates_prompt}
-                    ],
-                    "response_format": {"type": "json_object"}
-                }
+                if using_responses_api:
+                    # Use Responses API for o* models
+                    candidates_response = client.responses.create(
+                        model=model_name,
+                        input=candidates_prompt
+                    )
+                    candidates_content = candidates_response.output_text
+                else:
+                    # Use Chat Completions for other models
+                    candidates_params = {
+                        "model": model_name,
+                        "messages": [
+                            {"role": "system", "content": "You are a shape similarity analyzer. Output must be in English only. Return JSON only without additional text."},
+                            {"role": "user", "content": candidates_prompt}
+                        ],
+                        "response_format": {"type": "json_object"},
+                        "temperature": 0.7
+                    }
+                    candidates_response = client.chat.completions.create(**candidates_params)
+                    candidates_content = candidates_response.choices[0].message.content
                 
-                if use_temperature:
-                    candidates_params["temperature"] = 0.7
-                
-                candidates_response = client.chat.completions.create(**candidates_params)
-                candidates_content = candidates_response.choices[0].message.content
                 candidates_result = json.loads(candidates_content)
                 
                 if "candidates" in candidates_result and isinstance(candidates_result["candidates"], list):
@@ -286,7 +312,7 @@ Output JSON only:
                         }
                         logger.info(f"Selected best candidate from 5: {result['object_a']} + {result['object_b']}, score={result['shape_similarity_score']}")
             
-            logger.info(f"Shape selection succeeded: object_a={object_a}, object_b={object_b}, score={score}, validation_passed=true")
+            logger.info(f"STEP 1 - SHAPE SELECTION SUCCESS: selected_pair=[{object_a}, {object_b}], score={score}, shape_hint={result.get('shape_hint', '')}, validation_passed=true")
             return result
             
         except Exception as e:
@@ -337,95 +363,101 @@ Output JSON only:
     raise Exception("Failed to select shape pair after retries")
 
 
-def call_openai_model(
+def generate_headline_only(
     product_name: str,
-    product_description: str,
-    language: str,
-    chosen_objects: List[str],  # Already selected objects (from shape selection)
-    history: Optional[List[Dict]],
-    model_name: str,
+    message: str,
+    object_a: str,
+    object_b: str,
     max_retries: int = 3
-) -> Dict:
+) -> str:
     """
-    Call OpenAI model to generate ad content (headline and ad_goal).
-    Objects are already selected by select_similar_pair_shape_only.
-    Returns: {"ad_goal": str, "headline": str}
+    STEP 2 - HEADLINE GENERATION
     
-    Implements retry logic with exponential backoff + jitter for 429 errors.
+    Generate headline ONLY using OPENAI_TEXT_MODEL (default: o4-mini).
+    
+    Input:
+    - productName
+    - message (pre-determined)
+    - object_a (from STEP 1)
+    - object_b (from STEP 1)
+    
+    Output:
+    - headline (string only)
+    
+    Rules:
+    - English only
+    - ALL CAPS
+    - Max 7 words INCLUDING productName
+    - Do NOT change the pair
+    - Do NOT re-select objects
     """
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    model_name = os.environ.get("OPENAI_TEXT_MODEL", "o4-mini")
     
-    used_goals = get_used_ad_goals(history)
+    logger.info(f"STEP 2 - HEADLINE GENERATION: text_model={model_name}, productName={product_name[:50]}, message={message[:50]}, object_a={object_a}, object_b={object_b}")
     
-    # Build prompt in English only (objects already chosen)
-    history_context = ""
-    if history:
-        history_context = f"\n\nPrevious ads:\n"
-        for i, item in enumerate(history, 1):
-            goal = item.get("ad_goal", "")
-            objs = item.get("chosen_objects", [])
-            history_context += f"{i}. ad_goal: {goal}, chosen_objects: {', '.join(objs) if isinstance(objs, list) else str(objs)}\n"
-        history_context += "\nImportant: Give a different ad_goal from previous ones."
-    
-    prompt = f"""You are creating an advertisement for a product.
+    prompt = f"""Generate a headline for an advertisement.
 
-Product: {product_name}
-Description: {product_description}
-Language: English only (output must be in English only)
-
-Selected objects (already chosen based on shape similarity):
-- {chosen_objects[0]}
-- {chosen_objects[1]}
-{history_context}
+Product name: {product_name}
+Message: {message}
+Objects (already selected, do not change): {object_a} and {object_b}
 
 Requirements:
-1. Write a headline in English (5-8 words) that includes the product name or brand name.
-2. Give a clear and compelling ad_goal.
-3. Layout is always SIDE_BY_SIDE (do not mention layout in response).
+- English only
+- ALL CAPS
+- Maximum 7 words INCLUDING the product name
+- Include the product name in the headline
+- Do NOT change or re-select the objects
+- Return ONLY the headline text, no JSON, no quotes
 
-Return JSON only in this format:
-{{
-  "ad_goal": "...",
-  "headline": "..."
-}}"""
+Headline:"""
 
-    # Check if model is o* type (o4-mini, o3, o1-mini, etc.) - these don't support temperature
+    # Check if model is o* type - these use Responses API, not Chat Completions
     is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
-    use_temperature = not is_o_model
+    using_responses_api = is_o_model
     
     for attempt in range(max_retries):
-        # Build request parameters
-        request_params = {
-            "model": model_name,
-            "messages": [
-                {"role": "system", "content": "You are an assistant for creating advertisements. Output must be in English only. Return JSON only without additional text."},
-                {"role": "user", "content": prompt}
-            ],
-            "response_format": {"type": "json_object"}
-        }
-        
-        # Only add temperature for non-o* models
-        if use_temperature:
-            request_params["temperature"] = 0.7
-        
         try:
             if attempt == 0:
-                logger.info(f"Text generation: using model={model_name}, temperature={'0.7' if use_temperature else 'omitted'}")
+                logger.info(f"STEP 2 - HEADLINE GENERATION: using_responses_api={using_responses_api}")
             
-            response = client.chat.completions.create(**request_params)
+            if using_responses_api:
+                # Use Responses API for o* models
+                response = client.responses.create(
+                    model=model_name,
+                    input=prompt
+                )
+                headline = response.output_text.strip()
+            else:
+                # Use Chat Completions for other models
+                request_params = {
+                    "model": model_name,
+                    "messages": [
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.7
+                }
+                response = client.chat.completions.create(**request_params)
+                headline = response.choices[0].message.content.strip()
             
-            content = response.choices[0].message.content
-            result = json.loads(content)
+            # Clean headline (remove quotes, ensure ALL CAPS, validate length)
+            headline = headline.strip('"\'')
+            headline = headline.upper()
             
-            # Validate result
-            if not isinstance(result, dict):
-                raise ValueError("Response is not a dict")
+            # Validate: max 7 words including productName
+            words = headline.split()
+            product_words = product_name.upper().split()
+            if len(words) > 7:
+                # Try to keep product name + first words
+                if len(product_words) <= 7:
+                    remaining = 7 - len(product_words)
+                    other_words = [w for w in words if w not in product_words][:remaining]
+                    headline = " ".join(product_words + other_words)
+                else:
+                    headline = " ".join(words[:7])
             
-            if not result.get("headline") or not result.get("ad_goal"):
-                raise ValueError("Missing headline or ad_goal")
-            
-            logger.info(f"Text generation succeeded on attempt {attempt + 1}")
-            return result
+            logger.info(f"STEP 2 - HEADLINE GENERATION SUCCESS: headline={headline}")
+            return headline
             
         except Exception as e:
             error_str = str(e)
@@ -558,43 +590,45 @@ def generate_short_phrase(product_name: str) -> str:
 
 
 def create_image_prompt(
-    product_name: str,
     object_a: str,
     object_b: str,
+    shape_hint: str,
     headline: str,
     is_strict: bool = False
 ) -> str:
     """
+    STEP 3 - IMAGE GENERATION PROMPT
+    
     Create DALL-E prompt for SIDE_BY_SIDE image with text.
     
     Args:
-        product_name: Product name
-        object_a: Left panel object/concept
-        object_b: Right panel object/concept
-        headline: Single headline (max 7 words INCLUDING product name, ALL CAPS)
+        object_a: Left panel object (from STEP 1)
+        object_b: Right panel object (from STEP 1)
+        shape_hint: Shape hint from STEP 1 (e.g., "tall-vertical", "round-flat")
+        headline: Headline from STEP 2 (ALL CAPS, max 7 words)
         is_strict: If True, use stricter prompt for retry
     """
     if is_strict:
-        # Stricter prompt for retry
         return f"""Create a professional advertisement image with a SIDE BY SIDE layout.
 
 LAYOUT:
-- Two distinct objects side by side (left and right).
+- Two distinct objects side by side (left and right): {object_a} (left) and {object_b} (right).
 - No overlap.
 - Clean composition.
+- Shape similarity hint: {shape_hint}
 - The headline must be integrated into the design as a strong central visual element.
 - The headline must have the same visual importance as the objects.
 
 TEXT RULES (CRITICAL):
 - Only one headline: "{headline}"
 - Use fewer letters. Use one short headline. Make text extremely large and bold.
-- Maximum 7 words INCLUDING the product name.
 - ALL CAPS.
 - English only.
 - Perfectly legible.
 - No paragraphs.
 - No small print.
 - No separate CTA.
+- No extra text.
 
 STYLE:
 - Bold, modern, minimal.
@@ -603,25 +637,25 @@ STYLE:
 - Professional advertising aesthetic."""
 
     else:
-        # Standard prompt
         return f"""Create a professional advertisement image with a SIDE BY SIDE layout.
 
 LAYOUT:
-- Two distinct objects side by side (left and right).
+- Two distinct objects side by side (left and right): {object_a} (left) and {object_b} (right).
 - No overlap.
 - Clean composition.
+- Shape similarity hint: {shape_hint}
 - The headline must be integrated into the design as a strong central visual element.
 - The headline must have the same visual importance as the objects.
 
 TEXT RULES (CRITICAL):
 - Only one headline: "{headline}"
-- Maximum 7 words INCLUDING the product name.
 - ALL CAPS.
 - English only.
 - Perfectly legible.
 - No paragraphs.
 - No small print.
 - No separate CTA.
+- No extra text.
 
 STYLE:
 - Bold, modern, minimal.
@@ -657,27 +691,46 @@ def generate_image_with_dalle(
     max_retries: int = 3
 ) -> bytes:
     """
-    Generate image using DALL-E with retry logic for text quality.
+    STEP 3 - IMAGE GENERATION
+    
+    Generate image using OPENAI_IMAGE_MODEL (default: gpt-image-1.5).
+    
+    Input:
+    - object_a (from STEP 1)
+    - object_b (from STEP 1)
+    - shape_hint (from STEP 1)
+    - headline (from STEP 2)
+    - imageSize
+    
+    Rules:
+    - SIDE BY SIDE
+    - no overlap
+    - headline prominent
+    - no extra text
+    - no CTA
+    - English only
     
     Returns:
         bytes: JPEG image
     """
-    model = os.environ.get("OPENAI_IMAGE_MODEL", "dall-e-3")
+    model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
     image_size = f"{width}x{height}"
+    
+    logger.info(f"STEP 3 - IMAGE GENERATION: image_model={model}, image_size={image_size}, object_a={object_a}, object_b={object_b}, shape_hint={shape_hint}, headline={headline}")
     
     for attempt in range(max_retries):
         is_strict = attempt > 0  # Use stricter prompt on retries
         
         prompt = create_image_prompt(
-            product_name=product_name,
             object_a=object_a,
             object_b=object_b,
+            shape_hint=shape_hint,
             headline=headline,
             is_strict=is_strict
         )
         
         try:
-            logger.info(f"Generating image (attempt {attempt + 1}/{max_retries}), image_model={model}, image_size={image_size}, strict={is_strict}")
+            logger.info(f"STEP 3 - IMAGE GENERATION: attempt={attempt + 1}/{max_retries}, image_model={model}, image_size={image_size}")
             
             # Simple call without response_format for gpt-image-1.5 compatibility
             response = client.images.generate(
@@ -784,84 +837,83 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     logger.info(f"[{request_id}] generate_preview_data called: sessionId={session_id}, adIndex={ad_index}, "
                 f"productName={product_name[:50]}, language={language}")
     
-    # Step 1: Select objects based on shape similarity only
+    # STEP 1 - SHAPE SELECTION (ONLY SHAPE)
     used_objects = get_used_objects(history)
     try:
         shape_result = select_similar_pair_shape_only(
             object_list=object_list,
             used_objects=used_objects,
-            max_retries=3
+            max_retries=2
         )
-        chosen_objects = [shape_result["object_a"], shape_result["object_b"]]
-        logger.info(f"[{request_id}] Shape selection: object_a={chosen_objects[0]}, object_b={chosen_objects[1]}, score={shape_result.get('shape_similarity_score', 0)}")
+        object_a = shape_result["object_a"]
+        object_b = shape_result["object_b"]
+        shape_hint = shape_result.get("shape_hint", "")
+        shape_score = shape_result.get("shape_similarity_score", 0)
+        
+        logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}")
     except Exception as e:
         error_msg = str(e)
         if "rate_limited" in error_msg:
-            logger.error(f"[{request_id}] Shape selection rate limited after retries")
+            logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection rate limited")
             raise Exception("rate_limited")
         else:
-            logger.error(f"[{request_id}] Shape selection failed: {error_msg}")
+            logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection error: {error_msg}")
             raise
     
-    # Step 2: Generate headline and ad_goal using selected objects
-    text_model_name = os.environ.get("OPENAI_TEXT_MODEL", "o1-mini")
+    # STEP 2 - HEADLINE GENERATION
+    # Use productDescription as message (pre-determined message)
+    message = product_description if product_description else "Make a difference"
     try:
-        text_result = call_openai_model(
+        headline = generate_headline_only(
             product_name=product_name,
-            product_description=product_description,
-            language=language,
-            chosen_objects=chosen_objects,
-            history=history,
-            model_name=text_model_name,
+            message=message,
+            object_a=object_a,
+            object_b=object_b,
             max_retries=3
         )
+        logger.info(f"[{request_id}] STEP 2 SUCCESS: headline={headline}")
     except Exception as e:
         error_msg = str(e)
         if "rate_limited" in error_msg:
-            logger.error(f"[{request_id}] Text generation rate limited after retries")
+            logger.error(f"[{request_id}] STEP 2 FAILED: Headline generation rate limited")
             raise Exception("rate_limited")
         else:
-            logger.error(f"[{request_id}] Text generation failed: {error_msg}")
+            logger.error(f"[{request_id}] STEP 2 FAILED: Headline generation error: {error_msg}")
             raise
     
-    ad_goal = text_result["ad_goal"]
-    headline = text_result["headline"]
+    # STEP 4 - FINAL VALIDATION
+    # Ensure objects haven't changed
+    if object_a != shape_result["object_a"] or object_b != shape_result["object_b"]:
+        logger.error(f"[{request_id}] STEP 4 VALIDATION FAILED: Objects changed after STEP 1")
+        raise ValueError("Objects changed after shape selection")
     
-    # Log result
-    logger.info(f"[{request_id}] Model response: ad_goal={ad_goal[:50]}, "
-                f"headline={headline[:50]}, chosen_objects={chosen_objects}, "
-                f"model={model_name}")
+    logger.info(f"[{request_id}] STEP 4 VALIDATION PASSED: object_a={object_a}, object_b={object_b} (unchanged)")
     
-    # Generate short headline from product name (for image text)
-    product_name = payload_dict.get("productName", "")
-    image_headline = generate_short_phrase(product_name)
-    
-    # Create image using DALL-E
+    # STEP 3 - IMAGE GENERATION
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     try:
         image_bytes = generate_image_with_dalle(
             client=client,
-            product_name=product_name,
-            object_a=chosen_objects[0],
-            object_b=chosen_objects[1],
-            headline=image_headline,
+            object_a=object_a,
+            object_b=object_b,
+            shape_hint=shape_hint,
+            headline=headline,
             width=width,
             height=height,
             max_retries=3
         )
     except Exception as e:
-        logger.error(f"[{request_id}] Image generation failed: {str(e)}")
+        logger.error(f"[{request_id}] STEP 3 FAILED: Image generation error: {str(e)}")
         raise
     
     # Convert image to base64 (without data URI header)
     image_base64 = base64.b64encode(image_bytes).decode('utf-8')
     
     # Get image model and size for logging
-    image_model = os.environ.get("OPENAI_IMAGE_MODEL", "dall-e-3")
+    image_model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
     image_size_str = payload_dict.get("imageSize", "1536x1024")
     
-    logger.info(f"[{request_id}] Preview data created successfully: imageBase64 length={len(image_base64)}, "
-               f"image_model={image_model}, image_size={image_size_str}, preview_success=true")
+    logger.info(f"[{request_id}] STEP 3 SUCCESS: image_model={image_model}, image_size={image_size_str}, preview_success=true")
     
     # Return only imageBase64 (all text is in the image)
     return {
@@ -911,71 +963,73 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     logger.info(f"[{request_id}] generate_zip called: sessionId={session_id}, adIndex={ad_index}, "
                 f"productName={product_name[:50]}, language={language}, is_preview={is_preview}")
     
-    # Step 1: Select objects based on shape similarity only
+    # STEP 1 - SHAPE SELECTION (ONLY SHAPE)
     used_objects = get_used_objects(history)
     try:
         shape_result = select_similar_pair_shape_only(
             object_list=object_list,
             used_objects=used_objects,
-            max_retries=3
+            max_retries=2
         )
-        chosen_objects = [shape_result["object_a"], shape_result["object_b"]]
-        logger.info(f"[{request_id}] Shape selection: object_a={chosen_objects[0]}, object_b={chosen_objects[1]}, score={shape_result.get('shape_similarity_score', 0)}")
+        object_a = shape_result["object_a"]
+        object_b = shape_result["object_b"]
+        shape_hint = shape_result.get("shape_hint", "")
+        shape_score = shape_result.get("shape_similarity_score", 0)
+        
+        logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}")
     except Exception as e:
         error_msg = str(e)
         if "rate_limited" in error_msg:
-            logger.error(f"[{request_id}] Shape selection rate limited after retries")
+            logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection rate limited")
             raise Exception("rate_limited")
         else:
-            logger.error(f"[{request_id}] Shape selection failed: {error_msg}")
+            logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection error: {error_msg}")
             raise
     
-    # Step 2: Generate headline and ad_goal using selected objects
-    text_model_name = os.environ.get("OPENAI_TEXT_MODEL", "o1-mini")
+    # STEP 2 - HEADLINE GENERATION
+    # Use productDescription as message (pre-determined message)
+    message = product_description if product_description else "Make a difference"
     try:
-        text_result = call_openai_model(
+        headline = generate_headline_only(
             product_name=product_name,
-            product_description=product_description,
-            language=language,
-            chosen_objects=chosen_objects,
-            history=history,
-            model_name=text_model_name,
+            message=message,
+            object_a=object_a,
+            object_b=object_b,
             max_retries=3
         )
+        logger.info(f"[{request_id}] STEP 2 SUCCESS: headline={headline}")
     except Exception as e:
         error_msg = str(e)
         if "rate_limited" in error_msg:
-            logger.error(f"[{request_id}] Text generation rate limited after retries")
+            logger.error(f"[{request_id}] STEP 2 FAILED: Headline generation rate limited")
             raise Exception("rate_limited")
         else:
-            logger.error(f"[{request_id}] Text generation failed: {error_msg}")
+            logger.error(f"[{request_id}] STEP 2 FAILED: Headline generation error: {error_msg}")
             raise
     
-    ad_goal = text_result["ad_goal"]
-    headline = text_result["headline"]
+    # STEP 4 - FINAL VALIDATION
+    # Ensure objects haven't changed
+    if object_a != shape_result["object_a"] or object_b != shape_result["object_b"]:
+        logger.error(f"[{request_id}] STEP 4 VALIDATION FAILED: Objects changed after STEP 1")
+        raise ValueError("Objects changed after shape selection")
     
-    # Log result
-    logger.info(f"[{request_id}] Text generation: ad_goal={ad_goal[:50]}, "
-                f"headline={headline[:50]}, model={text_model_name}")
+    logger.info(f"[{request_id}] STEP 4 VALIDATION PASSED: object_a={object_a}, object_b={object_b} (unchanged)")
     
-    # Generate short headline from product name (for image text)
-    image_headline = generate_short_phrase(product_name)
-    
-    # Create image using DALL-E
+    # STEP 3 - IMAGE GENERATION
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     try:
         image_bytes = generate_image_with_dalle(
             client=client,
-            product_name=product_name,
-            object_a=chosen_objects[0],
-            object_b=chosen_objects[1],
-            headline=image_headline,
+            object_a=object_a,
+            object_b=object_b,
+            shape_hint=shape_hint,
+            headline=headline,
             width=width,
             height=height,
             max_retries=3
         )
     except Exception as e:
-        logger.error(f"[{request_id}] Image generation failed: {str(e)}")
+        logger.error(f"[{request_id}] STEP 3 FAILED: Image generation error: {str(e)}")
         raise
     
     # Create minimal text file (optional, for documentation)
@@ -983,9 +1037,9 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
         session_id=session_id,
         ad_index=ad_index,
         product_name=product_name,
-        ad_goal=ad_goal,
-        headline=image_headline,  # Use image headline
-        chosen_objects=chosen_objects
+        ad_goal="",  # No ad_goal in new architecture
+        headline=headline,  # Use headline from STEP 2
+        chosen_objects=[object_a, object_b]
     )
     
     # Create ZIP with image.jpg only (text.txt is optional)
