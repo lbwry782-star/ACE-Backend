@@ -1022,6 +1022,16 @@ def generate_hybrid_context_plan(
     
     prompt = f"""You are planning a HYBRID_SINGLE_OBJECT advertisement composition.
 
+CORE RULE:
+"Show ONE object placed inside the CLASSIC ENVIRONMENT of the other object."
+
+Definition of classic environment:
+- The natural, iconic, immediately recognizable setting where the second object is normally found.
+- Not decorative.
+- Not symbolic.
+- Physically plausible.
+- Real-world photographable context.
+
 Objects:
 - Object A: {object_a}
 - Object B: {object_b}
@@ -1029,44 +1039,50 @@ Objects:
 - Message: {message}
 - Image size: {image_size}
 
-Task: Show ONE object in the PHYSICAL CONTEXT of the other object.
-
-GLOBAL VISUAL RULES (MANDATORY):
-- Do NOT select objects that inherently contain printed text or branding.
-- Avoid packaging, labels, posters, signs, billboards.
-- Only physical objects without visible text surfaces.
-- Must be photographable in real life.
-- Exception: objects where text is an integral structural part (e.g., playing cards, compass dial, measuring scale) are allowed.
-
 Rules:
-- In the image, we see ONLY the hero_object as a full object.
-- The context_object does NOT appear as a full object in any situation.
-- The context must be physical and tangible: connected/touching/stuck/replaced/wrapped/filled.
-- No decorative background, no extra elements.
+- Only one full object (hero_object) may be visible.
+- The second object must NOT appear as a full object.
+- Only its classic environment may be shown.
+- The environment must feel natural and physically real.
+- No decorative background elements.
+- No logos.
+- No text on objects.
+- Photorealistic only.
+
+Instructions:
+- Identify the classic environment of environment_based_on.
+- Place hero_object inside that environment.
+- Do NOT show environment_based_on object itself.
+- Ensure the result is physically believable.
 - English only.
 
-Examples:
-- "A soda can WITH a can-opener lodged in the lid" (inserted)
-- "A globe WHERE the sphere is a real Earth photo texture" (replaced)
-- "A tree GROWING FROM soil with visible roots" (growing_from)
-- "A plastic bottle WRAPPED BY a leaf label" (wrapped_by)
+VISUAL RULES (apply always):
+- Photorealistic photography only.
+- No illustration.
+- No drawing.
+- No 3D render look.
+- No painterly texture.
+- No logos.
+- No branding.
+- No printed text on objects.
+- No packaging with labels.
+- The only readable text allowed in the entire image is the generated headline.
 
 Return JSON only:
 
 {{
-  "mode": "HYBRID_SINGLE_OBJECT",
-  "hero_object": "object_a" | "object_b",
-  "context_object": "object_a" | "object_b",
-  "context_mechanic": "attached" | "inserted" | "replaced" | "held" | "growing_from" | "wrapped_by" | "filled_with",
-  "context_description": "short concrete physical description (max 10 words)",
-  "do_not_show_full_context_object": true,
-  "headline_placement": "BOTTOM" | "SIDE"
+  "hero_object": "{object_a}" | "{object_b}",
+  "environment_based_on": "{object_a}" | "{object_b}",
+  "classic_environment_description": "short concrete description (max 12 words)",
+  "environment_is_iconic": true,
+  "single_object_confirmed": true
 }}
 
 Rules:
-- hero_object and context_object must be different (one is object_a, the other is object_b).
-- context_description must be concrete and physical (max 10 words).
-- headline_placement: BOTTOM for vertical/portrait, SIDE for landscape/wide images.
+- hero_object and environment_based_on must be different.
+- classic_environment_description must be concrete and describe the natural/iconic setting (max 12 words).
+- environment_is_iconic must be true.
+- single_object_confirmed must be true.
 
 JSON:"""
 
@@ -1074,7 +1090,7 @@ JSON:"""
     is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
     using_responses_api = is_o_model
     
-    logger.info(f"STEP 1.75 - HYBRID CONTEXT PLAN: shape_model={model_name}, object_a={object_a}, object_b={object_b}, ad_goal={ad_goal[:50]}, using_responses_api={using_responses_api}")
+    logger.info(f"STEP 1.75 - HYBRID CLASSIC ENVIRONMENT PLAN: shape_model={model_name}, object_a={object_a}, object_b={object_b}, ad_goal={ad_goal[:50]}, using_responses_api={using_responses_api}")
     
     for attempt in range(max_retries):
         try:
@@ -1110,35 +1126,32 @@ JSON:"""
             data = json.loads(response_text)
             
             # Validate response structure
-            if data.get("mode") != "HYBRID_SINGLE_OBJECT":
-                raise ValueError("Mode must be HYBRID_SINGLE_OBJECT")
-            if data.get("hero_object") not in ["object_a", "object_b"]:
-                raise ValueError("hero_object must be 'object_a' or 'object_b'")
-            if data.get("context_object") not in ["object_a", "object_b"]:
-                raise ValueError("context_object must be 'object_a' or 'object_b'")
-            if data.get("hero_object") == data.get("context_object"):
-                raise ValueError("hero_object and context_object must be different")
+            if data.get("hero_object") not in [object_a, object_b]:
+                raise ValueError(f"hero_object must be '{object_a}' or '{object_b}'")
+            if data.get("environment_based_on") not in [object_a, object_b]:
+                raise ValueError(f"environment_based_on must be '{object_a}' or '{object_b}'")
+            if data.get("hero_object") == data.get("environment_based_on"):
+                raise ValueError("hero_object and environment_based_on must be different")
             
-            valid_mechanics = {"attached", "inserted", "replaced", "held", "growing_from", "wrapped_by", "filled_with"}
-            if data.get("context_mechanic") not in valid_mechanics:
-                raise ValueError(f"Invalid context_mechanic: {data.get('context_mechanic')}")
-            
-            if data.get("headline_placement") not in ["BOTTOM", "SIDE"]:
-                raise ValueError("headline_placement must be 'BOTTOM' or 'SIDE'")
+            if not data.get("environment_is_iconic", False):
+                raise ValueError("environment_is_iconic must be true")
+            if not data.get("single_object_confirmed", False):
+                raise ValueError("single_object_confirmed must be true")
             
             # Determine actual object names
-            hero_name = object_a if data["hero_object"] == "object_a" else object_b
-            context_name = object_a if data["context_object"] == "object_a" else object_b
+            hero_name = data["hero_object"]
+            environment_name = data["environment_based_on"]
+            env_description = data.get("classic_environment_description", "")
             
-            logger.info(f"STEP 1.75 - HYBRID CONTEXT PLAN SUCCESS: hero={hero_name}, context={context_name}, mechanic={data.get('context_mechanic')}, desc=\"{data.get('context_description', '')}\", placement={data.get('headline_placement')}")
+            logger.info(f"STEP 1.75 - HYBRID CLASSIC ENVIRONMENT PLAN SUCCESS: hero={hero_name}, environment_based_on={environment_name}, classic_environment=\"{env_description}\"")
             
             return data
             
         except json.JSONDecodeError as e:
-            logger.error(f"STEP 1.75 - HYBRID CONTEXT PLAN: JSON parse error: {e}")
+            logger.error(f"STEP 1.75 - HYBRID CLASSIC ENVIRONMENT PLAN: JSON parse error: {e}")
             if attempt < max_retries - 1:
                 continue
-            raise ValueError(f"Failed to parse hybrid context plan JSON: {e}")
+            raise ValueError(f"Failed to parse hybrid classic environment plan JSON: {e}")
         except Exception as e:
             error_str = str(e)
             error_lower = error_str.lower()
@@ -1152,7 +1165,7 @@ JSON:"""
             )
             
             if is_400_error:
-                logger.error(f"STEP 1.75 - HYBRID CONTEXT PLAN: OpenAI 400 error (no retry): {error_str}")
+                logger.error(f"STEP 1.75 - HYBRID CLASSIC ENVIRONMENT PLAN: OpenAI 400 error (no retry): {error_str}")
                 raise ValueError(f"invalid_request: {error_str}")
             
             # Check for rate limit (429) - RETRY with backoff
@@ -1168,11 +1181,11 @@ JSON:"""
                     base_delay = 2 ** attempt
                     jitter = random.uniform(0, 1)
                     delay = base_delay + jitter
-                    logger.warning(f"STEP 1.75 - HYBRID CONTEXT PLAN: Rate limit hit (attempt {attempt + 1}/{max_retries}), retrying in {delay:.2f}s")
+                    logger.warning(f"STEP 1.75 - HYBRID CLASSIC ENVIRONMENT PLAN: Rate limit hit (attempt {attempt + 1}/{max_retries}), retrying in {delay:.2f}s")
                     time.sleep(delay)
                     continue
                 else:
-                    logger.error(f"STEP 1.75 - HYBRID CONTEXT PLAN: Rate limit exceeded after {max_retries} attempts")
+                    logger.error(f"STEP 1.75 - HYBRID CLASSIC ENVIRONMENT PLAN: Rate limit exceeded after {max_retries} attempts")
                     raise Exception("rate_limited")
             
             # Check for server errors - RETRY
@@ -1188,15 +1201,15 @@ JSON:"""
             
             if is_server_error:
                 if attempt < max_retries - 1:
-                    logger.warning(f"STEP 1.75 - HYBRID CONTEXT PLAN: Server/connection error (attempt {attempt + 1}/{max_retries}): {error_str}, retrying...")
+                    logger.warning(f"STEP 1.75 - HYBRID CLASSIC ENVIRONMENT PLAN: Server/connection error (attempt {attempt + 1}/{max_retries}): {error_str}, retrying...")
                     time.sleep(1 + attempt)
                     continue
                 else:
-                    logger.error(f"STEP 1.75 - HYBRID CONTEXT PLAN: Server/connection error after {max_retries} attempts: {error_str}")
+                    logger.error(f"STEP 1.75 - HYBRID CLASSIC ENVIRONMENT PLAN: Server/connection error after {max_retries} attempts: {error_str}")
                     raise
             
             # Other errors - don't retry, raise immediately
-            logger.error(f"STEP 1.75 - HYBRID CONTEXT PLAN: OpenAI call failed (non-retryable, attempt {attempt + 1}): {error_str}")
+            logger.error(f"STEP 1.75 - HYBRID CLASSIC ENVIRONMENT PLAN: OpenAI call failed (non-retryable, attempt {attempt + 1}): {error_str}")
             raise
     
     raise Exception("Failed to generate hybrid context plan")
@@ -1291,41 +1304,44 @@ def create_image_prompt(
         is_strict: If True, use stricter prompt for retry
     """
     # Check if we're in HYBRID_SINGLE_OBJECT mode
-    if hybrid_plan and hybrid_plan.get("mode") == "HYBRID_SINGLE_OBJECT":
+    if hybrid_plan and ("hero_object" in hybrid_plan or hybrid_plan.get("mode") == "HYBRID_SINGLE_OBJECT"):
         # HYBRID_SINGLE_OBJECT mode
-        hero_object = object_a if hybrid_plan["hero_object"] == "object_a" else object_b
-        context_object = object_a if hybrid_plan["context_object"] == "object_a" else object_b
-        context_description = hybrid_plan.get("context_description", "")
-        context_mechanic = hybrid_plan.get("context_mechanic", "")
-        headline_placement = hybrid_plan.get("headline_placement", "BOTTOM")
+        hero_object = hybrid_plan.get("hero_object", object_a)
+        environment_based_on = hybrid_plan.get("environment_based_on", object_b)
+        classic_environment_description = hybrid_plan.get("classic_environment_description", "")
         
-        # Build headline placement instruction
-        if headline_placement == "BOTTOM":
-            headline_instruction = "Place the headline under the object on clean space."
-        else:  # SIDE
-            headline_instruction = "Place the headline beside the object on clean space (landscape layout)."
+        # Default headline placement (BOTTOM)
+        headline_instruction = "Place the headline under the object on clean space."
         
         return f"""Create a professional advertisement image in HYBRID_SINGLE_OBJECT mode.
 
+CORE RULE:
+"Show ONE object placed inside the CLASSIC ENVIRONMENT of the other object."
+
 COMPOSITION:
 - Show ONLY the hero object: {hero_object}
-- Show it IN the physical context of {context_object}: {context_description}
-- Do NOT show {context_object} as a full object—only the physical context/mechanism.
-- The context mechanic is: {context_mechanic}
-- Minimal background, clean, physically realistic.
+- Do NOT show the environment_based_on object ({environment_based_on}) as a full object.
+- Place the hero object inside the classic environment: {classic_environment_description}
+- The environment must be the natural, iconic, immediately recognizable setting where {environment_based_on} is normally found.
+- The environment must feel natural and physically real.
+- No decorative background elements.
+- Ultra realistic photography.
+- Clean minimal background.
+- No logos.
+- No object text.
+- Headline placed under the object (default) or side if landscape.
 
 VISUAL STYLE CONSTRAINTS:
-- Ultra realistic photography.
-- Professional studio or real-world photography.
-- Natural lighting.
-- Real materials.
-- No illustration style.
-- No drawn elements.
-- No graphic design look.
-- No visible logos.
-- No printed brand names.
-- No readable text except the main headline generated for the ad.
-- If any object would normally contain branding, render it completely generic and blank.
+- Photorealistic photography only.
+- No illustration.
+- No drawing.
+- No 3D render look.
+- No painterly texture.
+- No logos.
+- No branding.
+- No printed text on objects.
+- No packaging with labels.
+- The only readable text allowed in the entire image is the generated headline.
 
 HEADLINE:
 - Only one headline: "{headline}"
@@ -1513,15 +1529,23 @@ def generate_image_with_dalle(
     
     # Log before image generation
     image_prompt_includes_shape_hint = shape_hint is not None and shape_hint != ""
-    mode = "HYBRID_SINGLE_OBJECT" if hybrid_plan and hybrid_plan.get("mode") == "HYBRID_SINGLE_OBJECT" else "SIDE_BY_SIDE"
+    is_hybrid = hybrid_plan and ("hero_object" in hybrid_plan or hybrid_plan.get("mode") == "HYBRID_SINGLE_OBJECT")
+    mode = "HYBRID_SINGLE_OBJECT" if is_hybrid else "SIDE_BY_SIDE"
     logger.info(f"STEP 3 - IMAGE GENERATION: image_model={model}, image_size={image_size}, object_a={object_a}, object_b={object_b}, headline={headline}, image_prompt_includes_shape_hint={image_prompt_includes_shape_hint}, shape_hint=\"{shape_hint or ''}\", mode={mode}")
     logger.info(f"STEP 3 VISUAL_RULES_APPLIED: no_logos=true, photorealistic_only=true")
     if mode == "SIDE_BY_SIDE":
         logger.info(f"STEP 3 COMPOSITION: near_touching=true, overlap=false_expected")
     else:
-        hero_name = object_a if hybrid_plan["hero_object"] == "object_a" else object_b
-        context_name = object_a if hybrid_plan["context_object"] == "object_a" else object_b
-        logger.info(f"STEP 3 IMAGE: mode=HYBRID_SINGLE_OBJECT, hero={hero_name}, context={context_name}")
+        hero_name = hybrid_plan.get("hero_object", object_a)
+        environment_name = hybrid_plan.get("environment_based_on", object_b)
+        env_description = hybrid_plan.get("classic_environment_description", "")
+        logger.info(f"STEP 3 HYBRID_MODE_ACTIVE=true")
+        logger.info(f"STEP 3 HERO={hero_name}")
+        logger.info(f"STEP 3 ENVIRONMENT_BASED_ON={environment_name}")
+        logger.info(f"STEP 3 CLASSIC_ENVIRONMENT=\"{env_description}\"")
+        logger.info(f"STEP 3 SINGLE_OBJECT_CONFIRMED=true")
+        logger.info(f"STEP 3 NO_LOGOS_RULE=true")
+        logger.info(f"STEP 3 PHOTO_REALISM_RULE=true")
     
     for attempt in range(max_retries):
         is_strict = attempt > 0  # Use stricter prompt on retries
