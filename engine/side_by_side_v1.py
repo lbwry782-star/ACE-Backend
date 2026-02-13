@@ -836,19 +836,36 @@ def create_image_prompt(
     if shape_hint:
         shape_instruction = f"\n- Both objects must share a similar outline: {shape_hint}. Emphasize comparable silhouettes."
     
+    # Build composition rules section
+    composition_rules = f"""COMPOSITION RULES (CRITICAL):
+- Place both objects ({object_a} and {object_b}) extremely close together with minimal space between them.
+- The objects must be almost touching with a very small gap only.
+- No overlap between the objects.
+- Same vertical alignment (same baseline alignment).
+- Center of the composition is between the two objects.
+- Clear comparable outer contours.{shape_instruction}
+- Physical context extensions (if any) must:
+  * Stay attached to each object.
+  * NOT extend toward the center beyond the main shape boundary.
+  * NOT create overlap with the other object.
+- Maintain this exact compositional structure in all attempts (do not change positioning between retries)."""
+
     if is_strict:
         return f"""Create a professional advertisement image with a SIDE BY SIDE layout.
 
-LAYOUT:
-- Two distinct objects side by side (left and right): {object_a} (left) and {object_b} (right).
-- No overlap.
-- Clean composition.{shape_instruction}
+OBJECTS:
+- Left object: {object_a}
+- Right object: {object_b}
+
+{composition_rules}
+
+HEADLINE:
+- Only one headline: "{headline}"
+- Use fewer letters. Use one short headline. Make text extremely large and bold.
 - The headline must be integrated into the design as a strong central visual element.
 - The headline must have the same visual importance as the objects.
 
 TEXT RULES (CRITICAL):
-- Only one headline: "{headline}"
-- Use fewer letters. Use one short headline. Make text extremely large and bold.
 - ALL CAPS.
 - English only.
 - Perfectly legible.
@@ -866,15 +883,18 @@ STYLE:
     else:
         return f"""Create a professional advertisement image with a SIDE BY SIDE layout.
 
-LAYOUT:
-- Two distinct objects side by side (left and right): {object_a} (left) and {object_b} (right).
-- No overlap.
-- Clean composition.{shape_instruction}
+OBJECTS:
+- Left object: {object_a}
+- Right object: {object_b}
+
+{composition_rules}
+
+HEADLINE:
+- Only one headline: "{headline}"
 - The headline must be integrated into the design as a strong central visual element.
 - The headline must have the same visual importance as the objects.
 
 TEXT RULES (CRITICAL):
-- Only one headline: "{headline}"
 - ALL CAPS.
 - English only.
 - Perfectly legible.
@@ -945,6 +965,7 @@ def generate_image_with_dalle(
     # Log before image generation
     image_prompt_includes_shape_hint = shape_hint is not None and shape_hint != ""
     logger.info(f"STEP 3 - IMAGE GENERATION: image_model={model}, image_size={image_size}, object_a={object_a}, object_b={object_b}, headline={headline}, image_prompt_includes_shape_hint={image_prompt_includes_shape_hint}, shape_hint=\"{shape_hint or ''}\"")
+    logger.info(f"STEP 3 COMPOSITION: near_touching=true, overlap=false_expected")
     
     for attempt in range(max_retries):
         is_strict = attempt > 0  # Use stricter prompt on retries
