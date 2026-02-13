@@ -144,7 +144,8 @@ def select_similar_pair_shape_only(
         # Build full prompt (include system instruction in prompt for Responses API)
         system_instruction = "You are a shape similarity analyzer. Output must be in English only. Return JSON only without additional text.\n\n"
         
-        prompt = f"""{system_instruction}Task: Choose TWO items from the provided list.
+        # Request list of candidates (12 pairs, minimum 5)
+        prompt = f"""{system_instruction}Task: Find pairs of items from the provided list with similar geometric shapes (outer contour/outline).
 
 ONLY criterion: geometric shape similarity of the objects' outer contour (outline).
 
@@ -155,17 +156,23 @@ Return EXACT strings from the list (no synonyms, no new words).
 Available object list:
 {json.dumps(available_objects, ensure_ascii=False, indent=2)}
 
-Output JSON only:
+Output JSON only with a list of candidate pairs:
 {{
-  "object_a": "<exact match>",
-  "object_b": "<exact match>",
-  "shape_similarity_score": 0-100,
-  "shape_hint": "very short (e.g., tall-vertical, round-flat, spiral, crescent, oval)",
-  "why": "one short sentence focused on shape"
-}}"""
+  "candidates": [
+    {{"a": "OBJECT_1", "b": "OBJECT_2", "score": 0-100, "hint": "short shape hint"}},
+    {{"a": "OBJECT_3", "b": "OBJECT_4", "score": 0-100, "hint": "short shape hint"}},
+    ...
+  ]
+}}
+
+Requirements:
+- Return 12 candidate pairs if possible, minimum 5
+- Each a/b must be EXACT match from the object list
+- Score based ONLY on shape similarity (outer contour/outline)
+- No meaning, no concept, only geometric shape"""
         
         if is_strict:
-            prompt = f"""{system_instruction}Task: Choose TWO items from the provided list.
+            prompt = f"""{system_instruction}Task: Find pairs of items from the provided list with similar geometric shapes (outer contour/outline).
 
 ONLY criterion: geometric shape similarity of the objects' outer contour (outline).
 
@@ -176,14 +183,20 @@ Return exact strings from the list only. Return EXACT strings from the list (no 
 Available object list:
 {json.dumps(available_objects, ensure_ascii=False, indent=2)}
 
-Output JSON only:
+Output JSON only with a list of candidate pairs:
 {{
-  "object_a": "<exact match>",
-  "object_b": "<exact match>",
-  "shape_similarity_score": 0-100,
-  "shape_hint": "very short (e.g., tall-vertical, round-flat, spiral, crescent, oval)",
-  "why": "one short sentence focused on shape"
-}}"""
+  "candidates": [
+    {{"a": "OBJECT_1", "b": "OBJECT_2", "score": 0-100, "hint": "short shape hint"}},
+    {{"a": "OBJECT_3", "b": "OBJECT_4", "score": 0-100, "hint": "short shape hint"}},
+    ...
+  ]
+}}
+
+Requirements:
+- Return 12 candidate pairs if possible, minimum 5
+- Each a/b must be EXACT match from the object list
+- Score based ONLY on shape similarity (outer contour/outline)
+- No meaning, no concept, only geometric shape"""
         
         try:
             if attempt == 0:
@@ -216,103 +229,89 @@ Output JSON only:
             if not isinstance(result, dict):
                 raise ValueError("Response is not a dict")
             
-            required_fields = ["object_a", "object_b", "shape_similarity_score"]
-            if not all(field in result for field in required_fields):
-                raise ValueError(f"Missing required fields: {required_fields}")
+            if "candidates" not in result or not isinstance(result["candidates"], list):
+                raise ValueError("Missing or invalid 'candidates' field")
             
-            object_a = result["object_a"]
-            object_b = result["object_b"]
+            candidates = result["candidates"]
+            if len(candidates) < 5:
+                raise ValueError(f"Too few candidates returned: {len(candidates)}, minimum 5 required")
             
-            # Guardrail: Validate objects are exact members of the list
-            if object_a not in object_list or object_b not in object_list:
-                invalid = [obj for obj in [object_a, object_b] if obj not in object_list]
-                logger.warning(f"Shape selection validation failed: objects not in list: {invalid}, attempt {attempt + 1}/{max_retries}")
+            # Filter candidates: keep only those with a/b in objectList
+            valid_candidates = []
+            for c in candidates:
+                if not isinstance(c, dict):
+                    continue
+                
+                # Support both "a"/"b" and "object_a"/"object_b" formats
+                obj_a = c.get("a") or c.get("object_a")
+                obj_b = c.get("b") or c.get("object_b")
+                
+                if not obj_a or not obj_b:
+                    continue
+                
+                if obj_a not in object_list or obj_b not in object_list:
+                    continue
+                
+                if obj_a == obj_b:
+                    continue
+                
+                # Normalize score
+                score = c.get("score") or c.get("shape_similarity_score", 0)
+                if not isinstance(score, (int, float)):
+                    try:
+                        score = int(score)
+                    except:
+                        score = 0
+                
+                hint = c.get("hint") or c.get("shape_hint", "")
+                
+                valid_candidates.append({
+                    "a": obj_a,
+                    "b": obj_b,
+                    "score": score,
+                    "hint": hint
+                })
+            
+            if len(valid_candidates) < 5:
+                logger.warning(f"Too few valid candidates after filtering: {len(valid_candidates)}, attempt {attempt + 1}/{max_retries}")
                 if attempt < max_retries - 1:
                     logger.info(f"Retrying with stricter instruction (attempt {attempt + 2}/{max_retries})")
                     continue
                 else:
-                    raise ValueError(f"Objects not in list after {max_retries} attempts: {invalid}")
+                    raise ValueError(f"Too few valid candidates after filtering: {len(valid_candidates)}")
             
-            if object_a == object_b:
-                raise ValueError("object_a and object_b must be different")
+            # Sort by score descending
+            valid_candidates.sort(key=lambda x: x["score"], reverse=True)
             
-            score = result.get("shape_similarity_score", 0)
-            if not isinstance(score, (int, float)):
-                try:
-                    score = int(score)
-                except:
-                    score = 0
+            # Calculate similar_pairs_found (score >= 80)
+            similar_pairs_found = sum(1 for c in valid_candidates if c["score"] >= 80)
             
-            # Guardrail: If score < 80, ask for 5 candidates
-            if score < 80 and attempt < max_retries - 1:
-                logger.warning(f"Shape similarity score too low ({score} < 80), requesting 5 candidates...")
-                candidates_prompt = f"""{system_instruction}Task: Choose FIVE candidate pairs from the provided list, ranked by shape similarity.
-
-ONLY criterion: geometric shape similarity of the objects' outer contour (outline).
-
-Ignore meaning, category, theme, symbolism, relevance, marketing, color, material, texture.
-
-Return EXACT strings from the list only.
-
-Available object list:
-{json.dumps(available_objects, ensure_ascii=False, indent=2)}
-
-Output JSON only:
-{{
-  "candidates": [
-    {{"object_a": "<exact>", "object_b": "<exact>", "shape_similarity_score": 0-100}},
-    {{"object_a": "<exact>", "object_b": "<exact>", "shape_similarity_score": 0-100}},
-    {{"object_a": "<exact>", "object_b": "<exact>", "shape_similarity_score": 0-100}},
-    {{"object_a": "<exact>", "object_b": "<exact>", "shape_similarity_score": 0-100}},
-    {{"object_a": "<exact>", "object_b": "<exact>", "shape_similarity_score": 0-100}}
-  ]
-}}"""
-                
-                if using_responses_api:
-                    # Use Responses API for o* models
-                    candidates_response = client.responses.create(
-                        model=model_name,
-                        input=candidates_prompt
-                    )
-                    candidates_content = candidates_response.output_text
-                else:
-                    # Use Chat Completions for other models
-                    candidates_params = {
-                        "model": model_name,
-                        "messages": [
-                            {"role": "system", "content": "You are a shape similarity analyzer. Output must be in English only. Return JSON only without additional text."},
-                            {"role": "user", "content": candidates_prompt}
-                        ],
-                        "response_format": {"type": "json_object"},
-                        "temperature": 0.7
-                    }
-                    candidates_response = client.chat.completions.create(**candidates_params)
-                    candidates_content = candidates_response.choices[0].message.content
-                
-                candidates_result = json.loads(candidates_content)
-                
-                if "candidates" in candidates_result and isinstance(candidates_result["candidates"], list):
-                    # Pick highest scoring candidate
-                    valid_candidates = [
-                        c for c in candidates_result["candidates"]
-                        if isinstance(c, dict) and 
-                        c.get("object_a") in object_list and 
-                        c.get("object_b") in object_list and
-                        c.get("object_a") != c.get("object_b")
-                    ]
-                    
-                    if valid_candidates:
-                        best = max(valid_candidates, key=lambda x: x.get("shape_similarity_score", 0))
-                        result = {
-                            "object_a": best["object_a"],
-                            "object_b": best["object_b"],
-                            "shape_similarity_score": best.get("shape_similarity_score", 0),
-                            "shape_hint": best.get("shape_hint", ""),
-                            "why": best.get("why", "")
-                        }
-                        logger.info(f"Selected best candidate from 5: {result['object_a']} + {result['object_b']}, score={result['shape_similarity_score']}")
+            # Select best pair (highest score)
+            best_pair = valid_candidates[0]
+            object_a = best_pair["a"]
+            object_b = best_pair["b"]
+            score = best_pair["score"]
+            shape_hint = best_pair["hint"]
             
-            logger.info(f"STEP 1 - SHAPE SELECTION SUCCESS: selected_pair=[{object_a}, {object_b}], score={score}, shape_hint={result.get('shape_hint', '')}, validation_passed=true")
+            # Log summary
+            logger.info(f"SHAPE_MATCH summary: objectList_size={len(object_list)}, candidates_returned={len(candidates)}, candidates_valid={len(valid_candidates)}, similar_pairs_found(score>=80)={similar_pairs_found}, best_pair=\"{object_a} ~ {object_b}\" score={score} hint=\"{shape_hint}\"")
+            
+            # Log top 5 (max 10 lines to avoid flooding)
+            top5 = valid_candidates[:5]
+            top5_str = " | ".join([f"{i+1}) {c['a']}~{c['b']} score={c['score']} hint={c['hint']}" for i, c in enumerate(top5)])
+            logger.info(f"SHAPE_MATCH top5: {top5_str}")
+            
+            # Return result in expected format
+            result = {
+                "object_a": object_a,
+                "object_b": object_b,
+                "shape_similarity_score": score,
+                "shape_hint": shape_hint,
+                "why": f"Selected from {len(valid_candidates)} valid candidates, {similar_pairs_found} with score>=80",
+                "_similar_pairs_found": similar_pairs_found  # Internal variable for future use
+            }
+            
+            logger.info(f"STEP 1 - SHAPE SELECTION SUCCESS: selected_pair=[{object_a}, {object_b}], score={score}, shape_hint={shape_hint}, validation_passed=true")
             return result
             
         except Exception as e:
