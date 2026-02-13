@@ -14,6 +14,7 @@ import random
 import io
 import zipfile
 import base64
+import string
 from typing import Dict, List, Optional, Tuple
 from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
@@ -53,14 +54,224 @@ def parse_image_size(image_size: str) -> Tuple[int, int]:
         return (1536, 1024)
 
 
-def validate_object_list(object_list: Optional[List[str]]) -> List[str]:
+def build_object_list_from_ad_goal(
+    ad_goal: str,
+    product_name: Optional[str] = None,
+    max_retries: int = 2
+) -> List[str]:
+    """
+    STEP 0 - BUILD_OBJECT_LIST_FROM_AD_GOAL
+    
+    Build a list of 200 concrete visual objects related to ad_goal.
+    
+    Args:
+        ad_goal: The advertising goal (e.g., "protect nature", "climate action")
+        product_name: Optional product name for context
+        max_retries: Maximum retry attempts
+    
+    Returns:
+        List[str]: List of 200 concrete nouns (visual objects)
+    
+    Rules:
+    - Each item is a concrete noun that can be drawn (visual object)
+    - Must be directly related to ad_goal
+    - NO generic shapes: circle, cylinder, square, triangle, sphere, etc.
+    - English only, single words or short noun phrases
+    """
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    model_name = os.environ.get("OPENAI_TEXT_MODEL", "o4-mini")
+    
+    # Build prompt
+    product_context = f"\nProduct name (optional context): {product_name}" if product_name else ""
+    
+    prompt = f"""Generate a list of 200 concrete visual objects (nouns) that are directly related to this advertising goal.
+
+Advertising goal: {ad_goal}{product_context}
+
+Requirements:
+- Each item must be a concrete noun that can be drawn/visualized (visual object)
+- All items must be directly related to the advertising goal
+- English only
+- Single words or short noun phrases (max 2-3 words)
+- NO generic geometric shapes: circle, cylinder, square, triangle, sphere, cube, rectangle, oval, etc.
+- NO abstract concepts
+- Focus on tangible, drawable objects
+
+Return ONLY a JSON object with this exact format:
+{{"objectList": ["item1", "item2", ..., "item200"]}}
+
+JSON:"""
+
+    # Check if model is o* type - these use Responses API
+    is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
+    using_responses_api = is_o_model
+    
+    for attempt in range(max_retries):
+        try:
+            if attempt == 0:
+                logger.info(f"STEP 0 - BUILD_OBJECT_LIST: text_model={model_name}, ad_goal={ad_goal[:50]}, productName={product_name[:50] if product_name else 'N/A'}, using_responses_api={using_responses_api}")
+            
+            if using_responses_api:
+                # Use Responses API for o* models
+                response = client.responses.create(
+                    model=model_name,
+                    input=prompt
+                )
+                response_text = response.output_text.strip()
+            else:
+                # Use Chat Completions for other models
+                request_params = {
+                    "model": model_name,
+                    "messages": [
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.7
+                }
+                response = client.chat.completions.create(**request_params)
+                response_text = response.choices[0].message.content.strip()
+            
+            # Parse JSON response
+            # Try to extract JSON from response (might have markdown code blocks)
+            response_text = response_text.strip()
+            if response_text.startswith("```"):
+                # Remove markdown code blocks
+                lines = response_text.split('\n')
+                response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+            if response_text.startswith("```json"):
+                lines = response_text.split('\n')
+                response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+            
+            # Parse JSON
+            data = json.loads(response_text)
+            object_list = data.get("objectList", [])
+            
+            # Validate: must have at least 120 items
+            if len(object_list) < 120:
+                if attempt < max_retries - 1:
+                    logger.warning(f"STEP 0 - BUILD_OBJECT_LIST: Only {len(object_list)} items returned (need >=120), retrying with stricter prompt...")
+                    # Stricter prompt for retry
+                    prompt = f"""Generate a list of 200 concrete visual objects (nouns) that are directly related to this advertising goal.
+
+Advertising goal: {ad_goal}{product_context}
+
+CRITICAL REQUIREMENTS:
+- Return EXACTLY 200 items (no fewer)
+- Each item must be a concrete noun that can be drawn/visualized
+- All items must be directly related to the advertising goal
+- English only
+- Single words or short noun phrases (max 2-3 words)
+- NO generic geometric shapes: circle, cylinder, square, triangle, sphere, cube, rectangle, oval, etc.
+- NO abstract concepts
+- Focus on tangible, drawable objects
+
+Return ONLY a JSON object with this exact format:
+{{"objectList": ["item1", "item2", ..., "item200"]}}
+
+JSON:"""
+                    continue
+                else:
+                    logger.error(f"STEP 0 - BUILD_OBJECT_LIST: Only {len(object_list)} items returned after {max_retries} attempts (need >=120)")
+                    raise ValueError(f"Failed to generate sufficient object list: got {len(object_list)} items, need >=120")
+            
+            # Filter out generic shapes
+            generic_shapes = {"circle", "cylinder", "square", "triangle", "sphere", "cube", "rectangle", "oval", "cone", "pyramid", "hexagon", "pentagon", "octagon", "diamond", "trapezoid"}
+            filtered_list = [obj for obj in object_list if obj.lower().strip() not in generic_shapes]
+            
+            # Log sample
+            sample_size = min(10, len(filtered_list))
+            sample = filtered_list[:sample_size]
+            logger.info(f"STEP 0 OBJECTLIST: size={len(filtered_list)}, sample10={sample}")
+            
+            return filtered_list
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"STEP 0 - BUILD_OBJECT_LIST: JSON parse error: {e}")
+            if attempt < max_retries - 1:
+                continue
+            raise ValueError(f"Failed to parse object list JSON: {e}")
+        except Exception as e:
+            error_str = str(e)
+            error_lower = error_str.lower()
+            
+            # Check for 400 errors - DO NOT RETRY
+            is_400_error = (
+                "400" in error_str or 
+                "invalid_request" in error_lower or 
+                "unsupported_value" in error_lower or
+                "bad_request" in error_lower
+            )
+            
+            if is_400_error:
+                logger.error(f"STEP 0 - BUILD_OBJECT_LIST: OpenAI 400 error (no retry): {error_str}")
+                raise ValueError(f"invalid_request: {error_str}")
+            
+            # Check for rate limit (429) - RETRY with backoff
+            is_rate_limit = (
+                "429" in error_str or 
+                "rate_limit" in error_lower or 
+                "quota" in error_lower or
+                "rate limit" in error_lower
+            )
+            
+            if is_rate_limit:
+                if attempt < max_retries - 1:
+                    base_delay = 2 ** attempt
+                    jitter = random.uniform(0, 1)
+                    delay = base_delay + jitter
+                    logger.warning(f"STEP 0 - BUILD_OBJECT_LIST: Rate limit hit (attempt {attempt + 1}/{max_retries}), retrying in {delay:.2f}s")
+                    time.sleep(delay)
+                    continue
+                else:
+                    logger.error(f"STEP 0 - BUILD_OBJECT_LIST: Rate limit exceeded after {max_retries} attempts")
+                    raise Exception("rate_limited")
+            
+            # Check for server errors - RETRY
+            is_server_error = (
+                "500" in error_str or 
+                "502" in error_str or 
+                "503" in error_str or
+                "504" in error_str or
+                "timeout" in error_lower or
+                "connection" in error_lower or
+                "network" in error_lower
+            )
+            
+            if is_server_error:
+                if attempt < max_retries - 1:
+                    logger.warning(f"STEP 0 - BUILD_OBJECT_LIST: Server/connection error (attempt {attempt + 1}/{max_retries}): {error_str}, retrying...")
+                    time.sleep(1 + attempt)
+                    continue
+                else:
+                    logger.error(f"STEP 0 - BUILD_OBJECT_LIST: Server/connection error after {max_retries} attempts: {error_str}")
+                    raise
+            
+            # Other errors - don't retry, raise immediately
+            logger.error(f"STEP 0 - BUILD_OBJECT_LIST: OpenAI call failed (non-retryable, attempt {attempt + 1}): {error_str}")
+            raise
+    
+    raise Exception("Failed to build object list from ad_goal")
+
+
+def validate_object_list(object_list: Optional[List[str]], ad_goal: Optional[str] = None, product_name: Optional[str] = None) -> List[str]:
     """
     Validate and return object list.
-    If None or too small, return default concrete objects list.
+    If None or too small, and ad_goal is provided, use STEP 0 to build list.
+    Otherwise, return default concrete objects list.
     """
     if not object_list or len(object_list) < 2:
-        logger.info(f"objectList missing or too small (size={len(object_list) if object_list else 0}), using default concrete objects list (size={len(DEFAULT_OBJECT_LIST)})")
-        return DEFAULT_OBJECT_LIST
+        # If ad_goal is provided, use STEP 0 to build list
+        if ad_goal:
+            logger.info(f"objectList missing or too small (size={len(object_list) if object_list else 0}), building from ad_goal using STEP 0")
+            return build_object_list_from_ad_goal(ad_goal=ad_goal, product_name=product_name)
+        else:
+            logger.info(f"objectList missing or too small (size={len(object_list) if object_list else 0}), using default concrete objects list (size={len(DEFAULT_OBJECT_LIST)})")
+            return DEFAULT_OBJECT_LIST
+    
+    # If object_list is provided but small (<120), and ad_goal is provided, use STEP 0
+    if len(object_list) < 120 and ad_goal:
+        logger.info(f"objectList too small (size={len(object_list)}), building from ad_goal using STEP 0")
+        return build_object_list_from_ad_goal(ad_goal=ad_goal, product_name=product_name)
+    
     logger.info(f"objectList provided with {len(object_list)} items")
     return object_list
 
@@ -294,12 +505,12 @@ Requirements:
             shape_hint = best_pair["hint"]
             
             # Log summary
-            logger.info(f"SHAPE_MATCH summary: objectList_size={len(object_list)}, candidates_returned={len(candidates)}, candidates_valid={len(valid_candidates)}, similar_pairs_found(score>=80)={similar_pairs_found}, best_pair=\"{object_a} ~ {object_b}\" score={score} hint=\"{shape_hint}\"")
+            logger.info(f"STEP 1 SHAPE_MATCH summary: objectList_size={len(object_list)}, candidates_returned={len(candidates)}, candidates_valid={len(valid_candidates)}, similar_pairs_found(score>=80)={similar_pairs_found}, best_pair=\"{object_a} ~ {object_b}\" score={score} hint=\"{shape_hint}\"")
             
             # Log top 5 (max 10 lines to avoid flooding)
             top5 = valid_candidates[:5]
             top5_str = " | ".join([f"{i+1}) {c['a']}~{c['b']} score={c['score']} hint={c['hint']}" for i, c in enumerate(top5)])
-            logger.info(f"SHAPE_MATCH top5: {top5_str}")
+            logger.info(f"STEP 1 SHAPE_MATCH top5: {top5_str}")
             
             # Return result in expected format
             result = {
@@ -406,7 +617,9 @@ Requirements:
 - ALL CAPS
 - Maximum 7 words INCLUDING the product name
 - Include the product name in the headline
+- Do NOT mention the objects ({object_a} or {object_b}) in the headline
 - Do NOT change or re-select the objects
+- No punctuation (no colons, commas, periods, etc.)
 - Return ONLY the headline text, no JSON, no quotes
 
 Headline:"""
@@ -439,9 +652,20 @@ Headline:"""
                 response = client.chat.completions.create(**request_params)
                 headline = response.choices[0].message.content.strip()
             
-            # Clean headline (remove quotes, ensure ALL CAPS, validate length)
+            # Clean headline (remove quotes, ensure ALL CAPS, remove punctuation)
             headline = headline.strip('"\'')
             headline = headline.upper()
+            
+            # Remove punctuation (colons, commas, periods, etc.)
+            import string
+            headline = ''.join(char for char in headline if char not in string.punctuation)
+            
+            # Remove object_a and object_b from headline if present
+            object_a_upper = object_a.upper()
+            object_b_upper = object_b.upper()
+            words = headline.split()
+            words = [w for w in words if w != object_a_upper and w != object_b_upper]
+            headline = " ".join(words)
             
             # Validate: max 7 words including productName
             words = headline.split()
@@ -833,13 +1057,30 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     history = payload_dict.get("history", [])
     object_list = payload_dict.get("objectList")
     
+    # Determine ad_goal (from history or from productDescription)
+    ad_goal = None
+    if history:
+        # Try to get ad_goal from most recent history item
+        for item in reversed(history):
+            if isinstance(item, dict) and "ad_goal" in item:
+                ad_goal = item.get("ad_goal", "")
+                if ad_goal:
+                    break
+    
+    # If no ad_goal from history, use productDescription as ad_goal
+    if not ad_goal:
+        ad_goal = product_description if product_description else "Make a difference"
+    
     # Validate and normalize
     width, height = parse_image_size(image_size_str)
-    object_list = validate_object_list(object_list)
+    
+    # STEP 0 - BUILD_OBJECT_LIST_FROM_AD_GOAL (if needed)
+    # Use validate_object_list which will call STEP 0 if object_list is missing/small and ad_goal exists
+    object_list = validate_object_list(object_list, ad_goal=ad_goal, product_name=product_name)
     
     # Log request
     logger.info(f"[{request_id}] generate_preview_data called: sessionId={session_id}, adIndex={ad_index}, "
-                f"productName={product_name[:50]}, language={language}")
+                f"productName={product_name[:50]}, language={language}, ad_goal={ad_goal[:50]}")
     
     # STEP 1 - SHAPE SELECTION (ONLY SHAPE)
     used_objects = get_used_objects(history)
@@ -959,13 +1200,30 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     history = payload_dict.get("history", [])
     object_list = payload_dict.get("objectList")
     
+    # Determine ad_goal (from history or from productDescription)
+    ad_goal = None
+    if history:
+        # Try to get ad_goal from most recent history item
+        for item in reversed(history):
+            if isinstance(item, dict) and "ad_goal" in item:
+                ad_goal = item.get("ad_goal", "")
+                if ad_goal:
+                    break
+    
+    # If no ad_goal from history, use productDescription as ad_goal
+    if not ad_goal:
+        ad_goal = product_description if product_description else "Make a difference"
+    
     # Validate and normalize
     width, height = parse_image_size(image_size_str)
-    object_list = validate_object_list(object_list)
+    
+    # STEP 0 - BUILD_OBJECT_LIST_FROM_AD_GOAL (if needed)
+    # Use validate_object_list which will call STEP 0 if object_list is missing/small and ad_goal exists
+    object_list = validate_object_list(object_list, ad_goal=ad_goal, product_name=product_name)
     
     # Log request
     logger.info(f"[{request_id}] generate_zip called: sessionId={session_id}, adIndex={ad_index}, "
-                f"productName={product_name[:50]}, language={language}, is_preview={is_preview}")
+                f"productName={product_name[:50]}, language={language}, is_preview={is_preview}, ad_goal={ad_goal[:50]}")
     
     # STEP 1 - SHAPE SELECTION (ONLY SHAPE)
     used_objects = get_used_objects(history)
