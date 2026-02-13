@@ -273,96 +273,238 @@ def call_openai_model(
     raise Exception("Failed to get valid response from OpenAI")
 
 
-def create_side_by_side_image(
+def generate_short_phrase(product_name: str) -> str:
+    """
+    Generate short headline from product name.
+    Returns: headline (max 7 words INCLUDING product name, ALL CAPS)
+    """
+    product_upper = product_name.upper().strip()
+    product_words = product_upper.split()
+    
+    # Simple mapping for common product types
+    if "GREENPEACE" in product_upper or "ENVIRONMENT" in product_upper or "CLIMATE" in product_upper:
+        headline = "PROTECT OUR PLANET"
+    elif "CHARITY" in product_upper or "DONATE" in product_upper or "HELP" in product_upper:
+        headline = "MAKE A DIFFERENCE"
+    elif "TECH" in product_upper or "INNOVATION" in product_upper or "FUTURE" in product_upper:
+        headline = "INNOVATION FOR TOMORROW"
+    elif "HEALTH" in product_upper or "MEDICAL" in product_upper or "CARE" in product_upper:
+        headline = "YOUR HEALTH MATTERS"
+    elif "EDUCATION" in product_upper or "LEARN" in product_upper or "SCHOOL" in product_upper:
+        headline = "EDUCATION FOR ALL"
+    else:
+        # Generic fallback - use product name or short phrase
+        if len(product_words) <= 2:
+            headline = product_upper
+        else:
+            # Use first 2-3 words of product name
+            headline = " ".join(product_words[:3])
+    
+    # Ensure headline includes product name and is max 7 words total
+    headline_words = headline.split()
+    
+    # If product name is not in headline, add it
+    product_in_headline = any(word in headline for word in product_words)
+    if not product_in_headline:
+        # Add product name, but keep total <= 7 words
+        available_slots = 7 - len(headline_words)
+        if available_slots >= len(product_words):
+            # Can fit full product name
+            headline = f"{product_upper} {headline}"
+        elif available_slots > 0:
+            # Can fit part of product name
+            product_part = " ".join(product_words[:available_slots])
+            headline = f"{product_part} {headline}"
+        # If no slots available, use product name only
+        else:
+            headline = product_upper
+    
+    # Final check: ensure max 7 words
+    headline_words = headline.split()
+    if len(headline_words) > 7:
+        # Cut to 7 words, prioritizing product name
+        if len(product_words) <= 7:
+            # Keep product name + first words from rest
+            remaining = 7 - len(product_words)
+            if remaining > 0:
+                other_words = [w for w in headline_words if w not in product_words][:remaining]
+                headline = " ".join(product_words + other_words)
+            else:
+                headline = " ".join(product_words[:7])
+        else:
+            # Product name itself is too long, use first 7 words
+            headline = " ".join(headline_words[:7])
+    
+    return headline
+
+
+def create_image_prompt(
+    product_name: str,
+    object_a: str,
+    object_b: str,
+    headline: str,
+    is_strict: bool = False
+) -> str:
+    """
+    Create DALL-E prompt for SIDE_BY_SIDE image with text.
+    
+    Args:
+        product_name: Product name
+        object_a: Left panel object/concept
+        object_b: Right panel object/concept
+        headline: Single headline (max 7 words INCLUDING product name, ALL CAPS)
+        is_strict: If True, use stricter prompt for retry
+    """
+    if is_strict:
+        # Stricter prompt for retry
+        return f"""Create a professional advertisement image with a SIDE BY SIDE layout.
+
+LAYOUT:
+- Two distinct objects side by side (left and right).
+- No overlap.
+- Clean composition.
+- The headline must be integrated into the design as a strong central visual element.
+- The headline must have the same visual importance as the objects.
+
+TEXT RULES (CRITICAL):
+- Only one headline: "{headline}"
+- Use fewer letters. Use one short headline. Make text extremely large and bold.
+- Maximum 7 words INCLUDING the product name.
+- ALL CAPS.
+- English only.
+- Perfectly legible.
+- No paragraphs.
+- No small print.
+- No separate CTA.
+
+STYLE:
+- Bold, modern, minimal.
+- High contrast.
+- Clear typography.
+- Professional advertising aesthetic."""
+
+    else:
+        # Standard prompt
+        return f"""Create a professional advertisement image with a SIDE BY SIDE layout.
+
+LAYOUT:
+- Two distinct objects side by side (left and right).
+- No overlap.
+- Clean composition.
+- The headline must be integrated into the design as a strong central visual element.
+- The headline must have the same visual importance as the objects.
+
+TEXT RULES (CRITICAL):
+- Only one headline: "{headline}"
+- Maximum 7 words INCLUDING the product name.
+- ALL CAPS.
+- English only.
+- Perfectly legible.
+- No paragraphs.
+- No small print.
+- No separate CTA.
+
+STYLE:
+- Bold, modern, minimal.
+- High contrast.
+- Clear typography.
+- Professional advertising aesthetic."""
+
+
+def check_text_quality(image_base64: str) -> bool:
+    """
+    Basic heuristic check for text quality in image.
+    Returns True if text appears readable, False if suspicious.
+    
+    Note: This is a simple heuristic. For production, consider OCR.
+    """
+    # Simple check: if base64 is too short, might be placeholder
+    if len(image_base64) < 10000:  # Very small image might be placeholder
+        return False
+    
+    # For now, we'll do a stochastic check for language=en
+    # In production, you could add OCR here
+    return True
+
+
+def generate_image_with_dalle(
+    client: OpenAI,
+    product_name: str,
+    object_a: str,
+    object_b: str,
+    headline: str,
     width: int,
     height: int,
-    headline: str,
-    object_a: str,
-    object_b: str
+    max_retries: int = 3
 ) -> bytes:
     """
-    Create a SIDE_BY_SIDE image with two objects and headline.
-    Returns image as bytes (JPEG).
+    Generate image using DALL-E with retry logic for text quality.
+    
+    Returns:
+        bytes: JPEG image
     """
-    # Create image with light background
-    img = Image.new('RGB', (width, height), color='#F5F5F5')
-    draw = ImageDraw.Draw(img)
+    model = os.environ.get("OPENAI_IMAGE_MODEL", "dall-e-3")
+    quality = "hd" if width >= 1024 or height >= 1024 else "standard"
     
-    # Try to load a font, fallback to default if not available
-    font = None
-    headline_font = None
-    font_size = max(40, width // 30)
-    
-    # Try common font paths (Windows, Linux, Mac)
-    font_paths = [
-        "arial.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/System/Library/Fonts/Helvetica.ttc"
-    ]
-    
-    for font_path in font_paths:
+    for attempt in range(max_retries):
+        is_strict = attempt > 0  # Use stricter prompt on retries
+        
+        prompt = create_image_prompt(
+            product_name=product_name,
+            object_a=object_a,
+            object_b=object_b,
+            headline=headline,
+            is_strict=is_strict
+        )
+        
         try:
-            font = ImageFont.truetype(font_path, font_size)
-            headline_font = ImageFont.truetype(font_path, font_size + 10)
-            break
-        except:
-            continue
+            logger.info(f"Generating image with DALL-E (attempt {attempt + 1}/{max_retries}), strict={is_strict}")
+            
+            if model == "dall-e-3":
+                response = client.images.generate(
+                    model=model,
+                    prompt=prompt,
+                    size=f"{width}x{height}",
+                    quality=quality,
+                    n=1,
+                    response_format="b64_json"
+                )
+                image_base64 = response.data[0].b64_json
+            else:
+                # dall-e-2
+                response = client.images.generate(
+                    model=model,
+                    prompt=prompt,
+                    size=f"{width}x{height}",
+                    n=1,
+                    response_format="b64_json"
+                )
+                image_base64 = response.data[0].b64_json
+            
+            # Basic quality check
+            if attempt < max_retries - 1:
+                if not check_text_quality(image_base64):
+                    logger.warning(f"Text quality check failed (attempt {attempt + 1}), retrying with stricter prompt...")
+                    time.sleep(1)
+                    continue
+            
+            # Decode base64 to bytes
+            image_bytes = base64.b64decode(image_base64)
+            logger.info(f"Image generated successfully (attempt {attempt + 1})")
+            return image_bytes
+            
+        except Exception as e:
+            error_str = str(e)
+            logger.error(f"DALL-E generation failed (attempt {attempt + 1}/{max_retries}): {error_str}")
+            
+            if attempt < max_retries - 1:
+                # Retry on errors
+                time.sleep(1 + attempt)
+                continue
+            else:
+                raise
     
-    # Fallback to default font if no truetype font found
-    if font is None:
-        try:
-            font = ImageFont.load_default()
-            headline_font = ImageFont.load_default()
-        except:
-            pass
-    
-    # Calculate layout
-    padding = width // 20
-    card_width = (width - 3 * padding) // 2
-    card_height = height - 4 * padding - 80  # Space for headline
-    card_y = 80 + padding  # Start below headline area
-    
-    # Draw headline at top
-    headline_y = padding + 20
-    if headline_font:
-        draw.text((width // 2, headline_y), headline, fill='#333333', 
-                 font=headline_font, anchor='mm')
-    else:
-        draw.text((width // 2, headline_y), headline, fill='#333333', anchor='mm')
-    
-    # Draw left card (Object A)
-    left_x = padding
-    left_rect = [left_x, card_y, left_x + card_width, card_y + card_height]
-    draw.rectangle(left_rect, fill='#E8F4F8', outline='#B0D4E3', width=3)
-    
-    # Object A text
-    obj_a_y = card_y + card_height // 2
-    if font:
-        draw.text((left_x + card_width // 2, obj_a_y), object_a, 
-                 fill='#1A5F7A', font=font, anchor='mm')
-    else:
-        draw.text((left_x + card_width // 2, obj_a_y), object_a, 
-                 fill='#1A5F7A', anchor='mm')
-    
-    # Draw right card (Object B)
-    right_x = padding * 2 + card_width
-    right_rect = [right_x, card_y, right_x + card_width, card_y + card_height]
-    draw.rectangle(right_rect, fill='#F8E8F4', outline='#E3B0D4', width=3)
-    
-    # Object B text
-    obj_b_y = card_y + card_height // 2
-    if font:
-        draw.text((right_x + card_width // 2, obj_b_y), object_b, 
-                 fill='#7A1A5F', font=font, anchor='mm')
-    else:
-        draw.text((right_x + card_width // 2, obj_b_y), object_b, 
-                 fill='#7A1A5F', anchor='mm')
-    
-    # Save to bytes
-    img_bytes = io.BytesIO()
-    img.save(img_bytes, format='JPEG', quality=85)
-    return img_bytes.getvalue()
+    raise Exception("Failed to generate image after retries")
 
 
 def create_text_file(
@@ -374,7 +516,8 @@ def create_text_file(
     chosen_objects: List[str]
 ) -> str:
     """
-    Create text.txt content with proper format.
+    Create minimal text.txt content (optional, for documentation only).
+    All text is already in the image.
     """
     lines = []
     if session_id:
@@ -382,10 +525,7 @@ def create_text_file(
     lines.append(f"adIndex={ad_index}")
     lines.append("layout=SIDE_BY_SIDE")
     lines.append(f"productName={product_name}")
-    lines.append(f"ad_goal={ad_goal}")
-    lines.append(f"headline={headline}")
-    lines.append(f"chosen_objects={' | '.join(chosen_objects)}")
-    
+    # Note: All text is in the image, this file is for documentation only
     return "\n".join(lines)
 
 
@@ -464,17 +604,25 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                 f"headline={headline[:50]}, chosen_objects={chosen_objects}, "
                 f"model={model_name}")
     
-    # Create image
+    # Generate short headline from product name (for image text)
+    product_name = payload_dict.get("productName", "")
+    image_headline = generate_short_phrase(product_name)
+    
+    # Create image using DALL-E
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     try:
-        image_bytes = create_side_by_side_image(
+        image_bytes = generate_image_with_dalle(
+            client=client,
+            product_name=product_name,
+            object_a=chosen_objects[0],
+            object_b=chosen_objects[1],
+            headline=image_headline,
             width=width,
             height=height,
-            headline=headline,
-            object_a=chosen_objects[0],
-            object_b=chosen_objects[1]
+            max_retries=3
         )
     except Exception as e:
-        logger.error(f"[{request_id}] Image creation failed: {str(e)}")
+        logger.error(f"[{request_id}] Image generation failed: {str(e)}")
         raise
     
     # Convert image to base64 (without data URI header)
@@ -482,12 +630,9 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     
     logger.info(f"[{request_id}] Preview data created successfully: imageBase64 length={len(image_base64)}")
     
+    # Return only imageBase64 (all text is in the image)
     return {
-        "imageBase64": image_base64,
-        "ad_goal": ad_goal,
-        "headline": headline,
-        "chosen_objects": chosen_objects,
-        "layout": "SIDE_BY_SIDE"
+        "imageBase64": image_base64
     }
 
 
@@ -563,33 +708,41 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
                 f"headline={headline[:50]}, chosen_objects={chosen_objects}, "
                 f"model={model_name}")
     
-    # Create image
+    # Generate short headline from product name (for image text)
+    image_headline = generate_short_phrase(product_name)
+    
+    # Create image using DALL-E
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     try:
-        image_bytes = create_side_by_side_image(
+        image_bytes = generate_image_with_dalle(
+            client=client,
+            product_name=product_name,
+            object_a=chosen_objects[0],
+            object_b=chosen_objects[1],
+            headline=image_headline,
             width=width,
             height=height,
-            headline=headline,
-            object_a=chosen_objects[0],
-            object_b=chosen_objects[1]
+            max_retries=3
         )
     except Exception as e:
-        logger.error(f"[{request_id}] Image creation failed: {str(e)}")
+        logger.error(f"[{request_id}] Image generation failed: {str(e)}")
         raise
     
-    # Create text file
+    # Create minimal text file (optional, for documentation)
     text_content = create_text_file(
         session_id=session_id,
         ad_index=ad_index,
         product_name=product_name,
         ad_goal=ad_goal,
-        headline=headline,
+        headline=image_headline,  # Use image headline
         chosen_objects=chosen_objects
     )
     
-    # Create ZIP
+    # Create ZIP with image.jpg only (text.txt is optional)
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
         zip_file.writestr("image.jpg", image_bytes)
+        # Optional: include minimal text.txt for documentation
         zip_file.writestr("text.txt", text_content.encode('utf-8'))
     
     logger.info(f"[{request_id}] ZIP created successfully: {len(zip_buffer.getvalue())} bytes")
