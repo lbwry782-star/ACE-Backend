@@ -52,6 +52,9 @@ CACHE_KEY_VERSION = os.environ.get("CACHE_KEY_VERSION", "v2")  # Cache key versi
 ENABLE_DIVERSITY_GUARD = os.environ.get("ENABLE_DIVERSITY_GUARD", "1") == "1"  # Diversity guard to prevent repetition
 DIVERSITY_GUARD_TTL_SECONDS = 1800  # 30 minutes TTL for diversity guard
 
+# Layout mode
+ACE_LAYOUT_MODE = os.environ.get("ACE_LAYOUT_MODE", "side_by_side")  # "side_by_side" | "hybrid" (default: side_by_side, hybrid ignored)
+
 # ============================================================================
 # In-Memory Caches (with TTL)
 # ============================================================================
@@ -84,7 +87,8 @@ _diversity_guard_lock = Lock()
 def _get_cache_key_plan(product_name: str, message: str, ad_goal: str, ad_index: int, object_list: Optional[List[str]], engine_mode: str, mode: str, language: str = "en", session_seed: Optional[str] = None) -> str:
     """Generate cache key for plan."""
     object_list_hash = hashlib.md5(json.dumps(object_list or [], sort_keys=True).encode()).hexdigest()[:16]
-    key_str = f"{product_name}|{message}|{ad_goal}|{language}|{ad_index}|{session_seed or ''}|{engine_mode}|{mode}|{object_list_hash}|PLAN_{CACHE_KEY_VERSION}"
+    layout_mode = ACE_LAYOUT_MODE  # Include layout mode in cache key
+    key_str = f"{product_name}|{message}|{ad_goal}|{language}|{ad_index}|{session_seed or ''}|{engine_mode}|{mode}|{layout_mode}|{object_list_hash}|PLAN_{CACHE_KEY_VERSION}"
     return hashlib.md5(key_str.encode()).hexdigest()
 
 
@@ -92,7 +96,8 @@ def _get_cache_key_preview(product_name: str, message: str, ad_goal: str, ad_ind
     """Generate cache key for preview plan."""
     # Include objectList version (hash of sorted list) for cache invalidation
     object_list_hash = hashlib.md5(json.dumps(object_list or [], sort_keys=True).encode()).hexdigest()[:16]
-    key_str = f"{product_name}|{message}|{ad_goal}|{language}|{ad_index}|{session_seed or ''}|{engine_mode}|{preview_mode}|{object_list_hash}|PREVIEW_{CACHE_KEY_VERSION}"
+    layout_mode = ACE_LAYOUT_MODE  # Include layout mode in cache key
+    key_str = f"{product_name}|{message}|{ad_goal}|{language}|{ad_index}|{session_seed or ''}|{engine_mode}|{preview_mode}|{layout_mode}|{object_list_hash}|PREVIEW_{CACHE_KEY_VERSION}"
     return hashlib.md5(key_str.encode()).hexdigest()
 
 
@@ -218,7 +223,8 @@ def _get_cache_key_step1(object_list: List[str], min_shape_score: int, min_env_d
     # Include objectList hash, gate parameters, used_objects, and context
     object_list_hash = hashlib.md5(json.dumps(sorted(object_list), sort_keys=True).encode()).hexdigest()[:16]
     used_objects_str = "|".join(sorted(used_objects)) if used_objects else ""
-    key_str = f"{product_name}|{ad_goal}|{language}|{ad_index}|{session_seed or ''}|{engine_mode}|{preview_mode}|{object_list_hash}|PAIR_GATE(min_shape={min_shape_score},min_env_diff={min_env_diff_score})|{used_objects_str}|STEP1_{CACHE_KEY_VERSION}"
+    layout_mode = ACE_LAYOUT_MODE  # Include layout mode in cache key
+    key_str = f"{product_name}|{ad_goal}|{language}|{ad_index}|{session_seed or ''}|{engine_mode}|{preview_mode}|{layout_mode}|{object_list_hash}|PAIR_GATE(min_shape={min_shape_score},min_env_diff={min_env_diff_score})|{used_objects_str}|STEP1_{CACHE_KEY_VERSION}"
     return hashlib.md5(key_str.encode()).hexdigest()
 
 
@@ -1923,85 +1929,21 @@ def create_image_prompt(
     """
     STEP 3 - IMAGE GENERATION PROMPT
     
-    Create DALL-E prompt for SIDE_BY_SIDE or HYBRID_SINGLE_OBJECT image with text.
+    Create DALL-E prompt for SIDE_BY_SIDE layout only.
     
     Args:
         object_a: First object (from STEP 1)
         object_b: Second object (from STEP 1)
         headline: Headline from STEP 2 (ALL CAPS, max 7 words)
         shape_hint: Shape hint from STEP 1 (e.g., "tall-vertical", "round-flat"), optional
-        physical_context: Physical context extensions (for SIDE_BY_SIDE), optional
-        hybrid_plan: Hybrid context plan (for HYBRID_SINGLE_OBJECT), optional
+        physical_context: Physical context extensions (ignored, kept for compatibility), optional
+        hybrid_plan: Hybrid context plan (ignored, kept for compatibility), optional
         is_strict: If True, use stricter prompt for retry
     """
-    # Check if we're in HYBRID_SINGLE_OBJECT mode
-    if hybrid_plan and ("hero_object" in hybrid_plan or hybrid_plan.get("mode") == "HYBRID_SINGLE_OBJECT"):
-        # HYBRID_SINGLE_OBJECT mode (ENVIRONMENT SWAP)
-        hero_object = hybrid_plan.get("hero_object", object_a)
-        environment_from = hybrid_plan.get("environment_from", object_b)
-        environment_description = hybrid_plan.get("environment_description", "")
-        
-        # Determine headline placement based on image dimensions
-        # Default is BOTTOM, but can be SIDE for landscape
-        headline_instruction = "Place the headline below the object on clean space."
-        
-        return f"""Create a professional advertisement image using ENVIRONMENT SWAP logic.
-
-CORE RULE:
-- Show ONLY one object (hero_object).
-- Place it inside the CLASSIC NATURAL ENVIRONMENT of the second object.
-- Do NOT show the second object.
-- No physical merging.
-- No structural integration.
-- No inserted mechanisms.
-
-COMPOSITION:
-- Show ONLY the hero object: {hero_object}
-- Place it inside this natural environment: {environment_description}
-- Do NOT show the second object ({environment_from}).
-- Single centered object.
-- Clean frame.
-- Ultra realistic photography.
-- Natural lighting.
-- Real materials.
-- No illustration.
-- No CGI look.
-- No logos.
-- No object text.
-- The only readable text allowed is the headline.
-- Headline below the object (default).
-- If landscape format and space allows, headline may be placed to the side.
-
-VISUAL STYLE CONSTRAINTS:
-- Photorealistic photography only.
-- No illustration.
-- No drawing.
-- No 3D render look.
-- No painterly texture.
-- No logos.
-- No branding.
-- No printed text on objects.
-- No packaging with labels.
-- The only readable text allowed in the entire image is the generated headline.
-
-HEADLINE:
-- Only one headline: "{headline}"
-- {headline_instruction}
-- ALL CAPS.
-- English only.
-- Perfectly legible.
-- No paragraphs.
-- No small print.
-- No separate CTA.
-- No extra text.
-
-STYLE:
-- Bold, modern, minimal.
-- High contrast.
-- Clear typography.
-- Professional advertising aesthetic."""
+    # Force SIDE BY SIDE mode only (ignore hybrid_plan and physical_context)
+    # ACE_LAYOUT_MODE is always "side_by_side" or ignored
     
-    # SIDE_BY_SIDE mode (existing logic)
+    # SIDE_BY_SIDE mode only
     # Build shape hint instruction if provided
     shape_instruction = ""
     if shape_hint:
