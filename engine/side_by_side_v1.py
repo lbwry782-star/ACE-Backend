@@ -591,8 +591,8 @@ def generate_short_phrase(product_name: str) -> str:
 def create_image_prompt(
     object_a: str,
     object_b: str,
-    shape_hint: str,
     headline: str,
+    shape_hint: Optional[str] = None,
     is_strict: bool = False
 ) -> str:
     """
@@ -603,18 +603,22 @@ def create_image_prompt(
     Args:
         object_a: Left panel object (from STEP 1)
         object_b: Right panel object (from STEP 1)
-        shape_hint: Shape hint from STEP 1 (e.g., "tall-vertical", "round-flat")
         headline: Headline from STEP 2 (ALL CAPS, max 7 words)
+        shape_hint: Shape hint from STEP 1 (e.g., "tall-vertical", "round-flat"), optional
         is_strict: If True, use stricter prompt for retry
     """
+    # Build shape hint instruction if provided
+    shape_instruction = ""
+    if shape_hint:
+        shape_instruction = f"\n- Both objects must share a similar outline: {shape_hint}. Emphasize comparable silhouettes."
+    
     if is_strict:
         return f"""Create a professional advertisement image with a SIDE BY SIDE layout.
 
 LAYOUT:
 - Two distinct objects side by side (left and right): {object_a} (left) and {object_b} (right).
 - No overlap.
-- Clean composition.
-- Shape similarity hint: {shape_hint}
+- Clean composition.{shape_instruction}
 - The headline must be integrated into the design as a strong central visual element.
 - The headline must have the same visual importance as the objects.
 
@@ -641,8 +645,7 @@ STYLE:
 LAYOUT:
 - Two distinct objects side by side (left and right): {object_a} (left) and {object_b} (right).
 - No overlap.
-- Clean composition.
-- Shape similarity hint: {shape_hint}
+- Clean composition.{shape_instruction}
 - The headline must be integrated into the design as a strong central visual element.
 - The headline must have the same visual importance as the objects.
 
@@ -681,12 +684,12 @@ def check_text_quality(image_base64: str) -> bool:
 
 def generate_image_with_dalle(
     client: OpenAI,
-    product_name: str,
     object_a: str,
     object_b: str,
     headline: str,
     width: int,
     height: int,
+    shape_hint: Optional[str] = None,
     max_retries: int = 3
 ) -> bytes:
     """
@@ -715,7 +718,9 @@ def generate_image_with_dalle(
     model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
     image_size = f"{width}x{height}"
     
-    logger.info(f"STEP 3 - IMAGE GENERATION: image_model={model}, image_size={image_size}, object_a={object_a}, object_b={object_b}, shape_hint={shape_hint}, headline={headline}")
+    # Log before image generation
+    image_prompt_includes_shape_hint = shape_hint is not None and shape_hint != ""
+    logger.info(f"STEP 3 - IMAGE GENERATION: image_model={model}, image_size={image_size}, object_a={object_a}, object_b={object_b}, headline={headline}, image_prompt_includes_shape_hint={image_prompt_includes_shape_hint}, shape_hint=\"{shape_hint or ''}\"")
     
     for attempt in range(max_retries):
         is_strict = attempt > 0  # Use stricter prompt on retries
@@ -723,8 +728,8 @@ def generate_image_with_dalle(
         prompt = create_image_prompt(
             object_a=object_a,
             object_b=object_b,
-            shape_hint=shape_hint,
             headline=headline,
+            shape_hint=shape_hint,
             is_strict=is_strict
         )
         
