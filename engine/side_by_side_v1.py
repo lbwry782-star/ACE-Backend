@@ -1494,13 +1494,16 @@ def select_pair_with_limited_shape_search(
         
         themed_pool = themed_pool_by_tag + themed_pool_by_link
         
+        # Log theme matching counts
+        logger.info(f"THEME_POOL_MATCH counts: by_tag={len(themed_pool_by_tag)} by_link={len(themed_pool_by_link)} total={len(themed_pool)} (from {len(object_list)} total)")
+        
         # Use themed_pool if it's large enough (>= 60), otherwise fallback to full object_list
         if len(themed_pool) >= 60:
             search_objects = themed_pool
-            logger.info(f"THEME_FILTER: using themed_pool size={len(themed_pool)} (by_tag={len(themed_pool_by_tag)} by_link={len(themed_pool_by_link)}) (from {len(object_list)} total)")
+            logger.info(f"THEME_FILTER: using themed_pool size={len(themed_pool)} (from {len(object_list)} total)")
         else:
             search_objects = object_list
-            logger.warning(f"THEME_FILTER: themed_pool too small ({len(themed_pool)}), using full object_list ({len(object_list)})")
+            logger.warning(f"THEME_FILTER: themed_pool too small ({len(themed_pool)} < 60), using full object_list ({len(object_list)})")
     else:
         search_objects = object_list
         themed_pool = []  # Empty for fallback checks
@@ -1530,9 +1533,9 @@ def select_pair_with_limited_shape_search(
     
     # BATCH MODE: Collect candidate pairs first, then batch score them
     K = SHAPE_SEARCH_K
-    # Ensure K is not zero/None
+    # Ensure K is not zero/None - if < 5, set to 40
     if K is None or K < 5:
-        K = 35
+        K = 40
         logger.warning(f"SHAPE_SEARCH_K was invalid ({SHAPE_SEARCH_K}), setting to {K}")
     
     candidate_limit = CANDIDATE_LIMIT
@@ -1619,7 +1622,7 @@ def select_pair_with_limited_shape_search(
             candidate_pairs = _make_random_candidates(search_objects, candidate_limit, rng)
             
             # If still empty and we're using themed_pool, expand to full object_list
-            if not candidate_pairs and search_objects is themed_pool and len(themed_pool) >= 60:
+            if not candidate_pairs and themed_pool and len(themed_pool) >= 60 and search_objects is themed_pool:
                 logger.warning(f"Random generation with themed_pool failed; expanding to full object_list (size={len(object_list)})")
                 candidate_pairs = _make_random_candidates(object_list, candidate_limit, rng)
                 # Update search_objects for this attempt
@@ -1631,7 +1634,11 @@ def select_pair_with_limited_shape_search(
         if not candidate_pairs:
             logger.error(f"CANDIDATE_DEBUG pool={len(search_objects)} K={K} limit={candidate_limit} used_pairs={len(used_pairs_set)} used_main={len(used_main_set)}")
             logger.error(f"Failed to generate any candidate pairs after all fallbacks in batch attempt {batch_attempt + 1}")
-            continue  # Try next batch attempt
+            if batch_attempt < max_batch_calls - 1:
+                continue  # Try next batch attempt
+            else:
+                # Last attempt failed - raise error
+                raise ValueError(f"NO_CANDIDATE_PAIRS: Failed to generate any candidate pairs after {max_batch_calls} batch attempts. pool={len(search_objects)} K={K} limit={candidate_limit}")
         
         # Batch score all candidates at once
         batch_call_count += 1
@@ -1639,9 +1646,17 @@ def select_pair_with_limited_shape_search(
         
         batch_results = score_pairs_batch_o3_pro(candidate_pairs, shape_model, language="en")
         
+        # Guard: If parsed_results is empty, try another attempt with new candidates
         if not batch_results:
-            logger.warning(f"Batch scoring returned no results in attempt {batch_attempt + 1}")
-            continue
+            logger.warning(f"SHAPE_BATCH_PARSED count=0 (empty results) in attempt {batch_attempt + 1}")
+            if batch_attempt < max_batch_calls - 1:
+                continue  # Try next batch attempt with new candidates
+            else:
+                # Last attempt - raise error
+                raise ValueError(f"SHAPE_BATCH_EMPTY_RESULTS: Batch scoring returned empty results after {max_batch_calls} attempts")
+        
+        # Log parsed results count
+        logger.info(f"SHAPE_BATCH_PARSED count={len(batch_results)}")
         
         # Find best scoring pair that passes threshold
         passes_threshold = []
@@ -1667,9 +1682,10 @@ def select_pair_with_limited_shape_search(
                     "idx": idx
                 })
         
-        # Log batch results
+        # Log batch results with detailed info
         best_batch_score = max([r.get("score", 0) for r in batch_results], default=0)
         logger.info(f"SHAPE_BATCH attempt={batch_attempt + 1} n_pairs={len(candidate_pairs)} best={best_batch_score} passes={len(passes_threshold)}")
+        logger.info(f"SHAPE_BATCH_AFTER_FILTER count={len(passes_threshold)}")
         
         # If we found a pair that passes threshold, use it
         if passes_threshold:
@@ -1724,6 +1740,55 @@ def select_pair_with_limited_shape_search(
             
             logger.info(f"PAIR_PICK sid={sid} ad={ad_index} A={obj_a_id} A_obj={obj_a_name} A_sub={obj_a_sub} B={obj_b_id} B_obj={obj_b_name} B_sub={obj_b_sub} shape={score} archetype={archetype} reason={reason[:50]} checked_pairs={len(candidate_pairs)} batch_calls={batch_call_count} cache_hit_plan=0{theme_info}")
             return best_pair_result
+        
+        # If passes == 0, check if best_score >= 70 for soft fallback
+        if len(passes_threshold) == 0:
+            if best_batch_score >= 70:
+                # Soft fallback: use best pair even if below threshold
+                logger.warning(f"SHAPE_BATCH: passes=0 but best_score={best_batch_score} >= 70, using soft fallback")
+                best_result = max(batch_results, key=lambda x: x.get("score", 0))
+                idx = best_result.get("i", -1)
+                if 0 <= idx < len(candidate_pairs):
+                    item_a, item_b = candidate_pairs[idx]
+                    best_pair_result = {
+                        "object_a": item_a["object"],
+                        "object_b": item_b["object"],
+                        "object_a_id": item_a["id"],
+                        "object_b_id": item_b["id"],
+                        "shape_similarity_score": best_result.get("score", 0),
+                        "shape_hint": best_result.get("archetype", ""),
+                        "shape_reason": best_result.get("reason", "")
+                    }
+                    # Update best_score for tracking
+                    if best_result.get("score", 0) > best_score:
+                        best_score = best_result.get("score", 0)
+                    # Break to use fallback logic below
+                    break
+            else:
+                # best_score < 70, try another attempt
+                logger.warning(f"SHAPE_BATCH: passes=0 and best_score={best_batch_score} < 70, trying another attempt")
+                if batch_attempt < max_batch_calls - 1:
+                    # Track best for potential final fallback
+                    if best_batch_score > best_score:
+                        best_score = best_batch_score
+                        best_result = max(batch_results, key=lambda x: x.get("score", 0))
+                        idx = best_result.get("i", -1)
+                        if 0 <= idx < len(candidate_pairs):
+                            item_a, item_b = candidate_pairs[idx]
+                            best_pair_result = {
+                                "object_a": item_a["object"],
+                                "object_b": item_b["object"],
+                                "object_a_id": item_a["id"],
+                                "object_b_id": item_b["id"],
+                                "shape_similarity_score": best_result.get("score", 0),
+                                "shape_hint": best_result.get("archetype", ""),
+                                "shape_reason": best_result.get("reason", "")
+                            }
+                    continue  # Try next batch attempt
+                else:
+                    # Last attempt failed - raise error if best_score still < 70
+                    if best_score < 70:
+                        raise ValueError(f"NO_VALID_PAIR_BEST_TOO_LOW: No pair passed threshold ({min_score_threshold}) and best_score={best_score} < 70 after {max_batch_calls} attempts")
         
         # Track best score for fallback
         if best_batch_score > best_score:
@@ -3204,9 +3269,10 @@ def create_image_prompt(
         context_b_hint = f", shown {object_b_context}"
     
     composition_rules = f"""COMPOSITION RULES (CRITICAL):
-- CRITICAL: The left and right panels MUST show two DIFFERENT object types. Do NOT repeat the same main object on both sides.
-- Left panel MUST show: {object_a}{context_a_hint} (interacting with its sub_object as described in classic_context).
-- Right panel MUST show: {object_b}{context_b_hint} (interacting with its sub_object as described in classic_context).
+- CRITICAL: The left and right panels MUST show two DIFFERENT main object types. Do NOT repeat the same main object on both sides.
+- CRITICAL: Left and right panels must show TWO DIFFERENT main object types. Never repeat the same main object on both sides.
+- Left panel MUST show exactly: {object_a}{context_a_hint} (interacting with its sub_object as described in classic_context).
+- Right panel MUST show exactly: {object_b}{context_b_hint} (interacting with its sub_object as described in classic_context).
 - Both objects are FULL objects, completely visible in their respective panels.
 - Each object must be shown interacting with its sub_object as described in classic_context.
 - The sub_object is part of the composition, not just background.
