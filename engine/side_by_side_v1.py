@@ -64,6 +64,12 @@ MAX_CHECKED_PAIRS = int(os.environ.get("MAX_CHECKED_PAIRS", "500"))  # Maximum p
 OBJECT_LIST_TARGET = 150  # Target size for STEP 0 object list
 OBJECT_LIST_MIN_OK = 130  # Minimum acceptable size to proceed without failure
 
+# Image size and quality parameters
+PREVIEW_IMAGE_SIZE_DEFAULT = "1024x1024"  # Fast preview size
+PREVIEW_IMAGE_QUALITY_DEFAULT = "low"  # Fast preview quality
+GENERATE_IMAGE_QUALITY_DEFAULT = "high"  # High quality for final generation
+ALLOWED_IMAGE_SIZES = {"1024x1024", "1024x1536", "1536x1024"}  # Supported by gpt-image-*
+
 # ============================================================================
 # In-Memory Caches (with TTL)
 # ============================================================================
@@ -97,22 +103,35 @@ _session_used_pairs: Dict[str, Tuple[set, set, float]] = {}  # key: sid, value: 
 _session_used_lock = Lock()
 
 
-def _get_cache_key_plan(product_name: str, message: str, ad_goal: str, ad_index: int, object_list: Optional[List[str]], engine_mode: str, mode: str, language: str = "en", session_seed: Optional[str] = None) -> str:
+def _get_cache_key_plan(
+    product_name: str,
+    message: str,
+    ad_goal: str,
+    ad_index: int,
+    object_list: Optional[List[str]],
+    engine_mode: str,
+    mode: str,
+    language: str = "en",
+    session_seed: Optional[str] = None,
+    image_size: Optional[str] = None,
+) -> str:
     """Generate cache key for plan."""
     object_list_hash = hashlib.md5(json.dumps(object_list or [], sort_keys=True).encode()).hexdigest()[:16]
     layout_mode = ACE_LAYOUT_MODE  # Include layout mode in cache key
-    key_str = f"{product_name}|{message}|{ad_goal}|{language}|{ad_index}|{session_seed or ''}|{engine_mode}|{mode}|{layout_mode}|{object_list_hash}|PLAN_{CACHE_KEY_VERSION}"
+    size_part = image_size or ""
+    quality_part = "high"  # PLAN cache is for generate, always high quality
+    key_str = f"{product_name}|{message}|{ad_goal}|{language}|{ad_index}|{session_seed or ''}|{engine_mode}|{mode}|{layout_mode}|{size_part}|{quality_part}|{object_list_hash}|PLAN_{CACHE_KEY_VERSION}"
     return hashlib.md5(key_str.encode()).hexdigest()
 
 
-def _get_cache_key_preview(product_name: str, message: str, ad_goal: str, ad_index: int, object_list: Optional[List], language: str = "en", session_seed: Optional[str] = None, engine_mode: str = "legacy", preview_mode: str = "image", image_size: Optional[str] = None) -> str:
+def _get_cache_key_preview(product_name: str, message: str, ad_goal: str, ad_index: int, object_list: Optional[List], language: str = "en", session_seed: Optional[str] = None, engine_mode: str = "legacy", preview_mode: str = "image", image_size: Optional[str] = None, quality: str = "low") -> str:
     """Generate cache key for preview plan. Includes sid + ad_index to prevent repetition."""
     # Hash productName + productDescription (or ad_goal as fallback)
     hash_inp = hashlib.sha256(f"{product_name}|{message}".encode()).hexdigest()[:16]
     object_list_hash = hashlib.md5(json.dumps([describe_item(item) for item in (object_list or [])], sort_keys=True).encode()).hexdigest()[:16]
     layout_mode = ACE_LAYOUT_MODE
-    image_size_str = image_size or "1536x1024"
-    key_str = f"{session_seed or 'no_session'}|{ad_index}|{image_size_str}|{layout_mode}|{engine_mode}|{preview_mode}|{hash_inp}|{object_list_hash}|PREVIEW_{CACHE_KEY_VERSION}"
+    image_size_str = image_size or PREVIEW_IMAGE_SIZE_DEFAULT
+    key_str = f"{session_seed or 'no_session'}|{ad_index}|{image_size_str}|{quality}|{layout_mode}|{engine_mode}|{preview_mode}|{hash_inp}|{object_list_hash}|PREVIEW_{CACHE_KEY_VERSION}"
     return hashlib.sha256(key_str.encode()).hexdigest()
 
 
@@ -141,9 +160,9 @@ def _set_to_preview_cache(key: str, value: Dict):
         _preview_cache[key] = (value, time.time())
 
 
-def _get_cache_key_image(prompt: str, image_size: str, model: str) -> str:
+def _get_cache_key_image(prompt: str, image_size: str, model: str, quality: str = "high") -> str:
     """Generate cache key for image."""
-    key_str = f"{prompt}|{image_size}|{model}"
+    key_str = f"{prompt}|{image_size}|{model}|{quality}"
     return hashlib.md5(key_str.encode()).hexdigest()
 
 
@@ -2643,7 +2662,8 @@ def generate_image_with_dalle(
     hybrid_plan: Optional[Dict] = None,
     max_retries: int = 3,
     object_a_context: Optional[str] = None,
-    object_b_context: Optional[str] = None
+    object_b_context: Optional[str] = None,
+    quality: str = "high"
 ) -> bytes:
     """
     STEP 3 - IMAGE GENERATION
@@ -2699,10 +2719,12 @@ def generate_image_with_dalle(
             logger.info(f"STEP 3 - IMAGE GENERATION: attempt={attempt + 1}/{max_retries}, image_model={model}, image_size={image_size}")
             
             # Simple call without response_format for gpt-image-1.5 compatibility
+            # Include quality parameter for preview (low) vs generate (high)
             response = client.images.generate(
                 model=model,
                 prompt=prompt,
-                size=image_size
+                size=image_size,
+                quality=quality
             )
             
             # Extract base64 from response
@@ -2851,7 +2873,7 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     cached_plan = None
     
     if PREVIEW_USE_CACHE:
-        preview_cache_key = _get_cache_key_preview(product_name, message, ad_goal, ad_index, object_list, language=language, session_seed=session_seed, engine_mode=ENGINE_MODE, preview_mode=PREVIEW_MODE, image_size=image_size_str)
+        preview_cache_key = _get_cache_key_preview(product_name, message, ad_goal, ad_index, object_list, language=language, session_seed=session_seed, engine_mode=ENGINE_MODE, preview_mode=PREVIEW_MODE, image_size=PREVIEW_IMAGE_SIZE_DEFAULT, quality=PREVIEW_IMAGE_QUALITY_DEFAULT)
         cached_plan = _get_from_preview_cache(preview_cache_key)
         if cached_plan:
             preview_cache_hit = True
@@ -3051,7 +3073,7 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
             is_strict=False
         )
         image_model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
-        image_cache_key = _get_cache_key_image(prompt_for_cache, image_size_str, image_model)
+        image_cache_key = _get_cache_key_image(prompt_for_cache, PREVIEW_IMAGE_SIZE_DEFAULT, image_model, PREVIEW_IMAGE_QUALITY_DEFAULT)
         cached_image_bytes = _get_from_image_cache(image_cache_key)
         if cached_image_bytes:
             image_bytes = cached_image_bytes
@@ -3088,7 +3110,8 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                 headline=headline,
                 width=width,
                 height=height,
-                max_retries=max_img_retries
+                max_retries=max_img_retries,
+                quality=PREVIEW_IMAGE_QUALITY_DEFAULT
             )
             
             # Save to image cache
@@ -3339,7 +3362,8 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
             object_b_context=object_b_context
         )
         image_model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
-        image_cache_key = _get_cache_key_image(prompt_for_cache, image_size_str, image_model)
+        # Use generate_size and generate_quality from outer scope
+        image_cache_key = _get_cache_key_image(prompt_for_cache, image_size_str, image_model, GENERATE_IMAGE_QUALITY_DEFAULT)
         cached_image_bytes = _get_from_image_cache(image_cache_key)
         if cached_image_bytes:
             image_bytes = cached_image_bytes
@@ -3376,7 +3400,8 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
                 headline=headline,
                 width=width,
                 height=height,
-                max_retries=max_img_retries
+                max_retries=max_img_retries,
+                quality=GENERATE_IMAGE_QUALITY_DEFAULT
             )
             
             # Save to image cache
