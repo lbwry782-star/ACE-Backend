@@ -1130,6 +1130,48 @@ def get_used_ad_goals(history: Optional[List[Dict]]) -> set:
     return used
 
 
+def _make_random_candidates(objects: List[Dict], limit: int, rng: random.Random) -> List[Tuple[Dict, Dict]]:
+    """
+    Fallback: Generate random candidate pairs when neighborhood search fails.
+    
+    Args:
+        objects: List of object items
+        limit: Maximum number of pairs to generate
+        rng: Seeded random number generator for determinism
+    
+    Returns:
+        List of tuples (item_a, item_b)
+    """
+    pairs = []
+    n = len(objects)
+    if n < 2:
+        return pairs
+    
+    attempts = 0
+    max_attempts = limit * 20
+    
+    while len(pairs) < limit and attempts < max_attempts:
+        i = rng.randrange(n)
+        j = rng.randrange(n)
+        
+        if i == j:
+            attempts += 1
+            continue
+        
+        A = objects[i]
+        B = objects[j]
+        
+        # Reject if same main object
+        if _main_key(A) == _main_key(B):
+            attempts += 1
+            continue
+        
+        pairs.append((A, B))
+        attempts += 1
+    
+    return pairs
+
+
 def plan_session_one_call(
     product_name: str,
     product_description: str,
@@ -1511,6 +1553,11 @@ def select_pair_with_limited_shape_search(
     
     # BATCH MODE: Collect candidate pairs first, then batch score them
     K = SHAPE_SEARCH_K
+    # Ensure K is not zero/None
+    if K is None or K < 5:
+        K = 35
+        logger.warning(f"SHAPE_SEARCH_K was invalid ({SHAPE_SEARCH_K}), setting to {K}")
+    
     candidate_limit = CANDIDATE_LIMIT
     min_score_threshold = int(SHAPE_MIN_SCORE * 100)  # Convert to 0-100 scale
     
@@ -1519,15 +1566,21 @@ def select_pair_with_limited_shape_search(
     if model_name and model_name != shape_model:
         logger.warning(f"Overriding model_name={model_name} with OPENAI_SHAPE_MODEL={shape_model} for batch scoring")
     
+    # Create seeded RNG for fallback random generation
+    rng = random.Random(seed_int)
+    
     best_pair_result = None
     best_score = 0
     total_checked = 0
     batch_call_count = 0
     max_batch_calls = 3
     
+    # Track used main objects for debug
+    used_main_set = {_main_key(obj) for obj in search_objects if obj.get("id") in used_objects_session}
+    
     for batch_attempt in range(max_batch_calls):
         # Collect candidate pairs (without model calls)
-        candidate_pairs = []  # List of tuples: (item_a, item_b, idx_a, idx_b, obj_a_id, obj_b_id)
+        candidate_pairs = []  # List of tuples: (item_a, item_b)
         candidate_indices = []  # Track original indices in shuffled_objects
         
         for i in range(len(shuffled_objects)):
@@ -1580,9 +1633,28 @@ def select_pair_with_limited_shape_search(
                 candidate_pairs.append((obj_a_item, obj_b_item))
                 candidate_indices.append((i, j))
         
+        # Fallback: If no candidates from neighborhood search, use random generation
         if not candidate_pairs:
-            logger.warning(f"No candidate pairs collected in batch attempt {batch_attempt + 1}")
-            break
+            logger.warning(f"CANDIDATE_DEBUG pool={len(search_objects)} K={K} limit={candidate_limit} used_pairs={len(used_pairs_set)} used_main={len(used_main_set)}")
+            logger.warning(f"No candidate pairs collected in batch attempt {batch_attempt + 1} from neighborhood search; using random candidate generation")
+            
+            # Try random generation with current search_objects
+            candidate_pairs = _make_random_candidates(search_objects, candidate_limit, rng)
+            
+            # If still empty and we're using themed_pool, expand to full object_list
+            if not candidate_pairs and search_objects is themed_pool and len(themed_pool) >= 60:
+                logger.warning(f"Random generation with themed_pool failed; expanding to full object_list (size={len(object_list)})")
+                candidate_pairs = _make_random_candidates(object_list, candidate_limit, rng)
+                # Update search_objects for this attempt
+                if candidate_pairs:
+                    search_objects = object_list
+                    shuffled_objects = uniform_shuffle(object_list, seed_int)
+        
+        # If still empty after all fallbacks, log and continue to next attempt
+        if not candidate_pairs:
+            logger.error(f"CANDIDATE_DEBUG pool={len(search_objects)} K={K} limit={candidate_limit} used_pairs={len(used_pairs_set)} used_main={len(used_main_set)}")
+            logger.error(f"Failed to generate any candidate pairs after all fallbacks in batch attempt {batch_attempt + 1}")
+            continue  # Try next batch attempt
         
         # Batch score all candidates at once
         batch_call_count += 1
