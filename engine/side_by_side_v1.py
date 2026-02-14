@@ -170,6 +170,29 @@ def _get_cache_key_image(prompt: str, image_size: str, model: str, quality: str 
     return hashlib.md5(key_str.encode()).hexdigest()
 
 
+def _get_cache_key_final_image(
+    session_seed: str,
+    ad_index: int,
+    product_name: str,
+    message: str,
+    headline: str,
+    image_size: str,
+    quality: str,
+    layout_mode: str = "side_by_side"
+) -> str:
+    """
+    Generate unified cache key for final image (shared between preview and zip).
+    
+    Key includes: sid + ad_index + product hash + layout/mode + image_size + headline + quality + CACHE_KEY_VERSION
+    """
+    # Hash productName + message
+    product_hash = hashlib.sha256(f"{product_name}|{message}".encode()).hexdigest()[:16]
+    # Hash headline (shortened)
+    headline_hash = hashlib.sha256(headline.encode()).hexdigest()[:16]
+    key_str = f"{session_seed}|{ad_index}|{product_hash}|{layout_mode}|{image_size}|{headline_hash}|{quality}|FINAL_IMAGE_{CACHE_KEY_VERSION}"
+    return hashlib.sha256(key_str.encode()).hexdigest()
+
+
 def _get_from_plan_cache(key: str) -> Optional[Dict]:
     """Get from plan cache if valid."""
     if not ENABLE_PLAN_CACHE:
@@ -3492,6 +3515,42 @@ def generate_image_with_dalle(
     raise Exception("Failed to generate image after retries")
 
 
+def _generate_final_image_unified(
+    client: OpenAI,
+    object_a: str,
+    object_b: str,
+    headline: str,
+    width: int,
+    height: int,
+    shape_hint: Optional[str] = None,
+    object_a_context: Optional[str] = None,
+    object_b_context: Optional[str] = None,
+    quality: str = "high",
+    max_retries: int = 3
+) -> bytes:
+    """
+    Unified function to generate final image (used by both preview and zip).
+    
+    Returns:
+        bytes: JPEG image bytes
+    """
+    return generate_image_with_dalle(
+        client=client,
+        object_a=object_a,
+        object_b=object_b,
+        headline=headline,
+        width=width,
+        height=height,
+        shape_hint=shape_hint,
+        physical_context=None,  # No physical context in SIDE BY SIDE mode
+        hybrid_plan=None,  # No hybrid plan in SIDE BY SIDE mode
+        max_retries=max_retries,
+        object_a_context=object_a_context,
+        object_b_context=object_b_context,
+        quality=quality
+    )
+
+
 def create_text_file(
     session_id: Optional[str],
     ad_index: int,
@@ -3638,7 +3697,9 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     cached_plan = None
     
     if PREVIEW_USE_CACHE:
-        preview_cache_key = _get_cache_key_preview(product_name, message, ad_goal, ad_index, object_list, language=language, session_seed=session_seed, engine_mode=ENGINE_MODE, preview_mode=PREVIEW_MODE, image_size=PREVIEW_IMAGE_SIZE_DEFAULT, quality=PREVIEW_IMAGE_QUALITY_DEFAULT)
+        # Use final image size and quality (same as ZIP) for plan cache key
+        final_quality = GENERATE_IMAGE_QUALITY_DEFAULT
+        preview_cache_key = _get_cache_key_preview(product_name, message, ad_goal, ad_index, object_list, language=language, session_seed=session_seed, engine_mode=ENGINE_MODE, preview_mode=PREVIEW_MODE, image_size=image_size_str, quality=final_quality)
         cached_plan = _get_from_preview_cache(preview_cache_key)
         if cached_plan:
             preview_cache_hit = True
@@ -3738,7 +3799,7 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                     sid=session_seed or session_id or "no_session",
                     ad_index=ad_index,
                     ad_goal=ad_goal,
-                    image_size=PREVIEW_IMAGE_SIZE_DEFAULT,
+                    image_size=image_size_str,  # Use final image size (same as ZIP)
                     object_list=object_list,
                     used_objects=used_objects,
                     model_name=planner_model or os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro"),
@@ -3756,7 +3817,7 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                 sid=session_seed or session_id or "no_session",
                 ad_index=ad_index,
                 ad_goal=ad_goal,
-                image_size=PREVIEW_IMAGE_SIZE_DEFAULT,
+                image_size=image_size_str,  # Use final image size (same as ZIP)
                 object_list=object_list,
                 used_objects=used_objects,
                 model_name=planner_model or os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro"),
@@ -3851,69 +3912,72 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
         return plan_data if not cache_hit else cached_plan
     
     # STEP 3 - IMAGE GENERATION (only if PREVIEW_MODE=image)
+    # Use FINAL image size and quality (same as ZIP) - no preview-only variants
     t_image_start = time.time()
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     
-    # Check image cache
-    image_cache_key = None
-    image_bytes = None
+    # Use same quality as generate_zip (high quality for final)
+    final_quality = GENERATE_IMAGE_QUALITY_DEFAULT
     
-    if ENABLE_IMAGE_CACHE:
-        # Create prompt for cache key
-        prompt_for_cache = create_image_prompt(
-            object_a=object_a,
-            object_b=object_b,
-            headline=headline,
-            shape_hint=shape_hint,
-            physical_context=physical_context,
-            hybrid_plan=hybrid_plan,
-            is_strict=False
-        )
-        image_model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
-        image_cache_key = _get_cache_key_image(prompt_for_cache, PREVIEW_IMAGE_SIZE_DEFAULT, image_model, PREVIEW_IMAGE_QUALITY_DEFAULT)
-        cached_image_bytes = _get_from_image_cache(image_cache_key)
-        if cached_image_bytes:
-            image_bytes = cached_image_bytes
-            image_cache_hit = True
-            logger.info(f"[{request_id}] IMAGE_CACHE hit=true key={image_cache_key[:16]}...")
-        else:
-            logger.info(f"[{request_id}] IMAGE_CACHE hit=false key={image_cache_key[:16]}...")
+    # Get context from items if available
+    if 'object_a_item' in locals() and object_a_item:
+        object_a_context = object_a_item.get("classic_context", "")
+    else:
+        object_a_context = ""
+    if 'object_b_item' in locals() and object_b_item:
+        object_b_context = object_b_item.get("classic_context", "")
+    else:
+        object_b_context = ""
+    
+    # Check unified final image cache
+    final_image_cache_key = _get_cache_key_final_image(
+        session_seed=session_seed or session_id,
+        ad_index=ad_index,
+        product_name=product_name,
+        message=message,
+        headline=headline,
+        image_size=image_size_str,
+        quality=final_quality,
+        layout_mode=ACE_LAYOUT_MODE
+    )
+    
+    image_bytes = None
+    image_cache_hit = False
+    image_gen_called = False
+    
+    # Check cache for final image
+    cached_image_bytes = _get_from_image_cache(final_image_cache_key)
+    if cached_image_bytes:
+        image_bytes = cached_image_bytes
+        image_cache_hit = True
+        logger.info(f"[{request_id}] PREVIEW_IMAGE_CACHE hit=true key={final_image_cache_key[:16]}... bytes={len(image_bytes)}")
+    else:
+        logger.info(f"[{request_id}] PREVIEW_IMAGE_CACHE hit=false key={final_image_cache_key[:16]}...")
     
     if not image_cache_hit:
         try:
             # Determine max_retries based on mode
             max_img_retries = 1 if ENGINE_MODE == "optimized" else 3
             
-            # D) Update image prompt to use new format with classic_context
-            # Get context from items if available
-            if 'object_a_item' in locals() and object_a_item:
-                object_a_context = object_a_item.get("classic_context", "")
-            else:
-                object_a_context = ""
-            if 'object_b_item' in locals() and object_b_item:
-                object_b_context = object_b_item.get("classic_context", "")
-            else:
-                object_b_context = ""
-            
-            image_bytes = generate_image_with_dalle(
+            # Generate final image using unified function
+            image_gen_called = True
+            image_bytes = _generate_final_image_unified(
                 client=client,
                 object_a=object_a_name,
                 object_b=object_b_name,
-                object_a_context=object_a_context,
-                object_b_context=object_b_context,
-                shape_hint=shape_hint,
-                physical_context=None,  # No physical context in SIDE BY SIDE mode
-                hybrid_plan=None,  # No hybrid plan in SIDE BY SIDE mode
                 headline=headline,
                 width=width,
                 height=height,
-                max_retries=max_img_retries,
-                quality=PREVIEW_IMAGE_QUALITY_DEFAULT
+                shape_hint=shape_hint,
+                object_a_context=object_a_context,
+                object_b_context=object_b_context,
+                quality=final_quality,
+                max_retries=max_img_retries
             )
             
-            # Save to image cache
-            if ENABLE_IMAGE_CACHE and image_cache_key:
-                _set_to_image_cache(image_cache_key, image_bytes)
+            # Save to unified image cache
+            _set_to_image_cache(final_image_cache_key, image_bytes)
+            logger.info(f"[{request_id}] IMAGE_GEN called=true bytes={len(image_bytes)}")
                 
         except Exception as e:
             logger.error(f"[{request_id}] STEP 3 FAILED: Image generation error: {str(e)}")
@@ -3921,7 +3985,7 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     
     t_image_ms = int((time.time() - t_image_start) * 1000)
     
-    # Convert image to base64 (without data URI header)
+    # Convert image to base64 (without data URI header) - use same bytes as ZIP
     image_base64 = base64.b64encode(image_bytes).decode('utf-8')
     
     # Get image model and size for logging
@@ -3931,8 +3995,9 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     cache_hit = preview_cache_hit or plan_cache_hit
     logger.info(f"[{request_id}] STEP 3 SUCCESS: image_model={image_model}, image_size={image_size_str}, preview_success=true")
     logger.info(f"[{request_id}] PERF_PREVIEW total_ms={t_total_ms} shape_ms={t_shape_ms} env_ms={t_envswap_ms} headline_ms={t_headline_ms} image_ms={t_image_ms} cache_hit={cache_hit} cache_image_hit={image_cache_hit} cache_step0_hit={step0_cache_hit} cache_step1_hit={step1_cache_hit}")
+    logger.info(f"[{request_id}] PREVIEW_IMAGE_CACHE hit={image_cache_hit} key={final_image_cache_key[:16]}... bytes={len(image_bytes)} IMAGE_GEN called={image_gen_called}")
     
-    # Return only imageBase64 (all text is in the image)
+    # Return only imageBase64 (all text is in the image) - same bytes as ZIP
     return {
         "imageBase64": image_base64
     }
@@ -4166,80 +4231,73 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
         logger.info(f"[{request_id}] STEP 4 VALIDATION PASSED: object_a={object_a_name}, object_b={object_b_name} (unchanged)")
     
     # STEP 3 - IMAGE GENERATION
+    # Use unified cache key (same as preview) to ensure byte-level identical images
     t_image_start = time.time()
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     
-    # Check image cache
-    image_cache_key = None
-    image_bytes = None
+    # Get context from items
+    object_a_context = object_a_item.get("classic_context", "") if object_a_item else ""
+    object_b_context = object_b_item.get("classic_context", "") if object_b_item else ""
     
-    if ENABLE_IMAGE_CACHE:
-        # Create prompt for cache key
-        object_a_context = object_a_item.get("classic_context", "") if object_a_item else ""
-        object_b_context = object_b_item.get("classic_context", "") if object_b_item else ""
-        prompt_for_cache = create_image_prompt(
-            object_a=object_a_name,
-            object_b=object_b_name,
-            headline=headline,
-            shape_hint=shape_hint,
-            physical_context=physical_context,
-            hybrid_plan=hybrid_plan,
-            is_strict=False,
-            object_a_context=object_a_context,
-            object_b_context=object_b_context
-        )
-        image_model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
-        # Use generate_size and generate_quality from outer scope
-        image_cache_key = _get_cache_key_image(prompt_for_cache, image_size_str, image_model, GENERATE_IMAGE_QUALITY_DEFAULT)
-        cached_image_bytes = _get_from_image_cache(image_cache_key)
-        if cached_image_bytes:
-            image_bytes = cached_image_bytes
-            image_cache_hit = True
-            logger.info(f"[{request_id}] IMAGE_CACHE hit=true key={image_cache_key[:16]}...")
-        else:
-            logger.info(f"[{request_id}] IMAGE_CACHE hit=false key={image_cache_key[:16]}...")
+    # Use same quality as preview (high quality for final)
+    final_quality = GENERATE_IMAGE_QUALITY_DEFAULT
+    
+    # Check unified final image cache (same key as preview)
+    final_image_cache_key = _get_cache_key_final_image(
+        session_seed=session_seed or session_id,
+        ad_index=ad_index,
+        product_name=product_name,
+        message=message,
+        headline=headline,
+        image_size=image_size_str,
+        quality=final_quality,
+        layout_mode=ACE_LAYOUT_MODE
+    )
+    
+    image_bytes = None
+    image_cache_hit = False
+    image_gen_called = False
+    
+    # Check cache for final image (may have been generated by preview)
+    cached_image_bytes = _get_from_image_cache(final_image_cache_key)
+    if cached_image_bytes:
+        image_bytes = cached_image_bytes
+        image_cache_hit = True
+        logger.info(f"[{request_id}] ZIP_IMAGE_CACHE hit=true key={final_image_cache_key[:16]}... bytes={len(image_bytes)}")
+    else:
+        logger.info(f"[{request_id}] ZIP_IMAGE_CACHE hit=false key={final_image_cache_key[:16]}...")
     
     if not image_cache_hit:
         try:
             # Determine max_retries based on mode
             max_img_retries = 2 if ENGINE_MODE == "optimized" else 3
             
-            # D) Update image prompt to use new format with classic_context
-            # Get context from items if available
-            if 'object_a_item' in locals() and object_a_item:
-                object_a_context = object_a_item.get("classic_context", "")
-            else:
-                object_a_context = ""
-            if 'object_b_item' in locals() and object_b_item:
-                object_b_context = object_b_item.get("classic_context", "")
-            else:
-                object_b_context = ""
-            
-            image_bytes = generate_image_with_dalle(
+            # Generate final image using unified function (same as preview)
+            image_gen_called = True
+            image_bytes = _generate_final_image_unified(
                 client=client,
                 object_a=object_a_name,
                 object_b=object_b_name,
-                object_a_context=object_a_context,
-                object_b_context=object_b_context,
-                shape_hint=shape_hint,
-                physical_context=None,  # No physical context in SIDE BY SIDE mode
-                hybrid_plan=None,  # No hybrid plan in SIDE BY SIDE mode
                 headline=headline,
                 width=width,
                 height=height,
-                max_retries=max_img_retries,
-                quality=GENERATE_IMAGE_QUALITY_DEFAULT
+                shape_hint=shape_hint,
+                object_a_context=object_a_context,
+                object_b_context=object_b_context,
+                quality=final_quality,
+                max_retries=max_img_retries
             )
             
-            # Save to image cache
-            if ENABLE_IMAGE_CACHE and image_cache_key:
-                _set_to_image_cache(image_cache_key, image_bytes)
+            # Save to unified image cache (for future preview/zip reuse)
+            _set_to_image_cache(final_image_cache_key, image_bytes)
+            logger.info(f"[{request_id}] IMAGE_GEN called=true bytes={len(image_bytes)}")
                 
         except Exception as e:
             logger.error(f"[{request_id}] STEP 3 FAILED: Image generation error: {str(e)}")
             raise
     
     t_image_ms = int((time.time() - t_image_start) * 1000)
+    logger.info(f"[{request_id}] ZIP_IMAGE_CACHE hit={image_cache_hit} key={final_image_cache_key[:16]}... bytes={len(image_bytes)} IMAGE_GEN called={image_gen_called}")
     
     # Create minimal text file (optional, for documentation)
     text_content = create_text_file(
