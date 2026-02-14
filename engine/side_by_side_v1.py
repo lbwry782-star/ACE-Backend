@@ -49,12 +49,15 @@ ENABLE_STEP1_CACHE = os.environ.get("ENABLE_STEP1_CACHE", "1") == "1"  # Cache S
 STEP1_CACHE_TTL_SECONDS = int(os.environ.get("STEP1_CACHE_TTL_SECONDS", "1800"))  # STEP 1 cache TTL
 
 # Cache key versioning and diversity
-CACHE_KEY_VERSION = os.environ.get("CACHE_KEY_VERSION", "v2")  # Cache key version
+CACHE_KEY_VERSION = os.environ.get("CACHE_KEY_VERSION", "v3")  # Cache key version (incremented to invalidate old cache)
 ENABLE_DIVERSITY_GUARD = os.environ.get("ENABLE_DIVERSITY_GUARD", "1") == "1"  # Diversity guard to prevent repetition
 DIVERSITY_GUARD_TTL_SECONDS = 1800  # 30 minutes TTL for diversity guard
 
 # Layout mode
 ACE_LAYOUT_MODE = os.environ.get("ACE_LAYOUT_MODE", "side_by_side")  # "side_by_side" | "hybrid" (default: side_by_side, hybrid ignored)
+
+# Image generation mode
+ACE_IMAGE_MODE = os.environ.get("ACE_IMAGE_MODE", "replacement")  # "replacement" | "side_by_side" (default: replacement)
 
 # Shape matching parameters
 SHAPE_MIN_SCORE = float(os.environ.get("SHAPE_MIN_SCORE", "0.80"))  # Minimum shape similarity score (0-1)
@@ -178,18 +181,19 @@ def _get_cache_key_final_image(
     headline: str,
     image_size: str,
     quality: str,
-    layout_mode: str = "side_by_side"
+    layout_mode: str = "side_by_side",
+    image_mode: str = "replacement"
 ) -> str:
     """
     Generate unified cache key for final image (shared between preview and zip).
     
-    Key includes: sid + ad_index + product hash + layout/mode + image_size + headline + quality + CACHE_KEY_VERSION
+    Key includes: sid + ad_index + product hash + layout/mode + image_mode + image_size + headline + quality + CACHE_KEY_VERSION
     """
     # Hash productName + message
     product_hash = hashlib.sha256(f"{product_name}|{message}".encode()).hexdigest()[:16]
     # Hash headline (shortened)
     headline_hash = hashlib.sha256(headline.encode()).hexdigest()[:16]
-    key_str = f"{session_seed}|{ad_index}|{product_hash}|{layout_mode}|{image_size}|{headline_hash}|{quality}|FINAL_IMAGE_{CACHE_KEY_VERSION}"
+    key_str = f"{session_seed}|{ad_index}|{product_hash}|{layout_mode}|{image_mode}|{image_size}|{headline_hash}|{quality}|FINAL_IMAGE_{CACHE_KEY_VERSION}"
     return hashlib.sha256(key_str.encode()).hexdigest()
 
 
@@ -3260,7 +3264,9 @@ def create_image_prompt(
     """
     STEP 3 - IMAGE GENERATION PROMPT
     
-    Create DALL-E prompt for SIDE_BY_SIDE layout only.
+    Create DALL-E prompt based on ACE_IMAGE_MODE:
+    - "replacement": B replaces A in A's scene (single unified scene)
+    - "side_by_side": Two panels side by side (legacy)
     
     Args:
         object_a: First object (from STEP 1)
@@ -3273,10 +3279,111 @@ def create_image_prompt(
         object_a_context: Classic context for object_a (optional)
         object_b_context: Classic context for object_b (optional)
     """
-    # Force SIDE BY SIDE mode only (ignore hybrid_plan and physical_context)
-    # ACE_LAYOUT_MODE is always "side_by_side" or ignored
+    logger.info(f"ACE_IMAGE_MODE={ACE_IMAGE_MODE} (prompt mode)")
     
-    # SIDE_BY_SIDE mode only
+    # REPLACEMENT mode: B replaces A in A's scene
+    if ACE_IMAGE_MODE == "replacement":
+        # Extract sub_object from context (assume format: "object + sub_object" or use object_a_context)
+        # For now, use object_a_context as the scene description
+        scene_description = object_a_context or f"{object_a} in its classic situation"
+        sub_object = ""  # Will be extracted from context if available
+        
+        # Try to extract sub_object from context (e.g., "landing on a flower" -> sub_object is "flower")
+        # This is a simple heuristic - in production, you might want to parse this more carefully
+        if object_a_context:
+            # Look for common patterns like "on a X", "with a X", "next to a X"
+            import re
+            patterns = [
+                r"on a ([a-z]+)",
+                r"with a ([a-z]+)",
+                r"next to a ([a-z]+)",
+                r"landing on a ([a-z]+)",
+                r"resting on a ([a-z]+)"
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, object_a_context.lower())
+                if match:
+                    sub_object = match.group(1)
+                    break
+        
+        replacement_prompt = f"""Create a professional photorealistic advertisement image as a single unified scene.
+
+BASE SCENE (derived from Object A context):
+
+The scene is based entirely on Object A's classic situation:
+"{object_a_context or f'{object_a} in its classic situation'}"
+
+{f'The sub-object from Object A must be clearly visible: "{sub_object}"' if sub_object else ''}
+
+Keep the original environmental logic, physical interaction, lighting direction, camera angle, framing, depth of field, and overall composition exactly as if photographing Object A in this situation.
+
+--------------------------------------------------------
+MAIN OBJECT REPLACEMENT – STRICT COMPOSITION LOCK
+--------------------------------------------------------
+
+Treat Object A's scene as a fixed photographic template.
+
+- Imagine the scene was already photographed with Object A.
+- Now replace ONLY the main object body with: "{object_b}"
+- Do NOT show Object A anywhere in the image.
+- Object B must occupy the exact spatial position where Object A would naturally appear.
+- Maintain the same pose logic implied by the interaction with "{sub_object or 'the sub-object'}" if applicable.
+- Keep identical scale, orientation, distance to camera, and physical alignment.
+- Do NOT redesign the composition.
+- Do NOT change camera perspective.
+- Do NOT move or remove the sub-object.
+- Do NOT add the sub-object of B.
+- Only swap the identity of the main object.
+
+Object B must interact naturally and physically with "{sub_object or 'the sub-object'}" in a realistic and believable way.
+
+--------------------------------------------------------
+VISUAL STYLE CONSTRAINTS
+--------------------------------------------------------
+
+Ultra realistic photography.
+Real materials.
+Natural lighting.
+Professional commercial quality.
+No illustration style.
+No graphic design look.
+No artificial collage appearance.
+No surreal distortions.
+
+No logos.
+No brand names.
+No printed text.
+No labels.
+No packaging graphics.
+No numbers.
+
+--------------------------------------------------------
+HEADLINE – MANDATORY
+--------------------------------------------------------
+
+The image must contain exactly ONE headline:
+
+"{headline}"
+
+- The headline must be clearly visible.
+- The headline must be fully readable.
+- The headline must be integrated naturally into the scene.
+- The headline must feel like part of a professional advertisement.
+- The headline must have strong visual presence.
+- The headline must not hide or cover the main object.
+- No other text may appear in the image.
+
+--------------------------------------------------------
+FINAL RULE
+--------------------------------------------------------
+
+This is a single-scene composition.
+There must be only one main object visible: "{object_b}".
+The scene must look like a realistic photograph."""
+        
+        return replacement_prompt
+    
+    # SIDE_BY_SIDE mode (legacy)
     # Build shape hint instruction if provided
     shape_instruction = ""
     if shape_hint:
@@ -3549,6 +3656,74 @@ def _generate_final_image_unified(
         object_b_context=object_b_context,
         quality=quality
     )
+
+
+def render_final_ad_bytes(
+    client: OpenAI,
+    object_a_name: str,
+    object_b_name: str,
+    object_a_id: str,
+    object_b_id: str,
+    object_a_item: Dict,
+    object_b_item: Dict,
+    headline: str,
+    shape_hint: Optional[str],
+    width: int,
+    height: int,
+    quality: str = "high",
+    max_retries: int = 3
+) -> Tuple[bytes, str, Dict, str]:
+    """
+    Unified function to render final ad image (used by both preview and zip).
+    
+    Returns:
+        Tuple of:
+        - image_bytes: JPEG image bytes
+        - headline: Generated headline
+        - selected_pair: Dict with object_a, object_b, object_a_id, object_b_id
+        - prompt_used: The prompt string used for generation
+    """
+    # Get context from items
+    object_a_context = object_a_item.get("classic_context", "") if object_a_item else ""
+    object_b_context = object_b_item.get("classic_context", "") if object_b_item else ""
+    
+    # Create prompt
+    prompt_used = create_image_prompt(
+        object_a=object_a_name,
+        object_b=object_b_name,
+        headline=headline,
+        shape_hint=shape_hint,
+        physical_context=None,  # No physical context in SIDE BY SIDE mode
+        hybrid_plan=None,  # No hybrid plan in SIDE BY SIDE mode
+        is_strict=False,
+        object_a_context=object_a_context,
+        object_b_context=object_b_context
+    )
+    
+    # Generate image
+    image_bytes = _generate_final_image_unified(
+        client=client,
+        object_a=object_a_name,
+        object_b=object_b_name,
+        headline=headline,
+        width=width,
+        height=height,
+        shape_hint=shape_hint,
+        object_a_context=object_a_context,
+        object_b_context=object_b_context,
+        quality=quality,
+        max_retries=max_retries
+    )
+    
+    # Build selected_pair dict
+    selected_pair = {
+        "object_a": object_a_name,
+        "object_b": object_b_name,
+        "object_a_id": object_a_id,
+        "object_b_id": object_b_id
+    }
+    
+    return image_bytes, headline, selected_pair, prompt_used
 
 
 def create_text_file(
@@ -3929,7 +4104,7 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     else:
         object_b_context = ""
     
-    # Check unified final image cache
+    # Check unified final image cache (includes ACE_IMAGE_MODE)
     final_image_cache_key = _get_cache_key_final_image(
         session_seed=session_seed or session_id,
         ad_index=ad_index,
@@ -3938,46 +4113,50 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
         headline=headline,
         image_size=image_size_str,
         quality=final_quality,
-        layout_mode=ACE_LAYOUT_MODE
+        layout_mode=ACE_LAYOUT_MODE,
+        image_mode=ACE_IMAGE_MODE
     )
     
     image_bytes = None
     image_cache_hit = False
     image_gen_called = False
+    prompt_used = None
     
     # Check cache for final image
     cached_image_bytes = _get_from_image_cache(final_image_cache_key)
     if cached_image_bytes:
         image_bytes = cached_image_bytes
         image_cache_hit = True
-        logger.info(f"[{request_id}] PREVIEW_IMAGE_CACHE hit=true key={final_image_cache_key[:16]}... bytes={len(image_bytes)}")
+        logger.info(f"[{request_id}] PREVIEW_IMAGE_CACHE hit=true mode={ACE_IMAGE_MODE} key={final_image_cache_key[:16]}... bytes={len(image_bytes)}")
     else:
-        logger.info(f"[{request_id}] PREVIEW_IMAGE_CACHE hit=false key={final_image_cache_key[:16]}...")
+        logger.info(f"[{request_id}] PREVIEW_IMAGE_CACHE hit=false mode={ACE_IMAGE_MODE} key={final_image_cache_key[:16]}...")
     
     if not image_cache_hit:
         try:
             # Determine max_retries based on mode
             max_img_retries = 1 if ENGINE_MODE == "optimized" else 3
             
-            # Generate final image using unified function
+            # Generate final image using unified render function
             image_gen_called = True
-            image_bytes = _generate_final_image_unified(
+            image_bytes, headline, selected_pair, prompt_used = render_final_ad_bytes(
                 client=client,
-                object_a=object_a_name,
-                object_b=object_b_name,
+                object_a_name=object_a_name,
+                object_b_name=object_b_name,
+                object_a_id=object_a_id,
+                object_b_id=object_b_id,
+                object_a_item=object_a_item,
+                object_b_item=object_b_item,
                 headline=headline,
+                shape_hint=shape_hint,
                 width=width,
                 height=height,
-                shape_hint=shape_hint,
-                object_a_context=object_a_context,
-                object_b_context=object_b_context,
                 quality=final_quality,
                 max_retries=max_img_retries
             )
             
             # Save to unified image cache
             _set_to_image_cache(final_image_cache_key, image_bytes)
-            logger.info(f"[{request_id}] IMAGE_GEN called=true bytes={len(image_bytes)}")
+            logger.info(f"[{request_id}] IMAGE_GEN_CALLED=true mode={ACE_IMAGE_MODE} bytes={len(image_bytes)}")
                 
         except Exception as e:
             logger.error(f"[{request_id}] STEP 3 FAILED: Image generation error: {str(e)}")
@@ -3995,7 +4174,7 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     cache_hit = preview_cache_hit or plan_cache_hit
     logger.info(f"[{request_id}] STEP 3 SUCCESS: image_model={image_model}, image_size={image_size_str}, preview_success=true")
     logger.info(f"[{request_id}] PERF_PREVIEW total_ms={t_total_ms} shape_ms={t_shape_ms} env_ms={t_envswap_ms} headline_ms={t_headline_ms} image_ms={t_image_ms} cache_hit={cache_hit} cache_image_hit={image_cache_hit} cache_step0_hit={step0_cache_hit} cache_step1_hit={step1_cache_hit}")
-    logger.info(f"[{request_id}] PREVIEW_IMAGE_CACHE hit={image_cache_hit} key={final_image_cache_key[:16]}... bytes={len(image_bytes)} IMAGE_GEN called={image_gen_called}")
+    logger.info(f"[{request_id}] PREVIEW_IMAGE_CACHE hit={image_cache_hit} mode={ACE_IMAGE_MODE} key={final_image_cache_key[:16]}... bytes={len(image_bytes)} IMAGE_GEN_CALLED={image_gen_called}")
     
     # Return only imageBase64 (all text is in the image) - same bytes as ZIP
     return {
@@ -4242,7 +4421,7 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     # Use same quality as preview (high quality for final)
     final_quality = GENERATE_IMAGE_QUALITY_DEFAULT
     
-    # Check unified final image cache (same key as preview)
+    # Check unified final image cache (same key as preview, includes ACE_IMAGE_MODE)
     final_image_cache_key = _get_cache_key_final_image(
         session_seed=session_seed or session_id,
         ad_index=ad_index,
@@ -4251,53 +4430,57 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
         headline=headline,
         image_size=image_size_str,
         quality=final_quality,
-        layout_mode=ACE_LAYOUT_MODE
+        layout_mode=ACE_LAYOUT_MODE,
+        image_mode=ACE_IMAGE_MODE
     )
     
     image_bytes = None
     image_cache_hit = False
     image_gen_called = False
+    prompt_used = None
     
     # Check cache for final image (may have been generated by preview)
     cached_image_bytes = _get_from_image_cache(final_image_cache_key)
     if cached_image_bytes:
         image_bytes = cached_image_bytes
         image_cache_hit = True
-        logger.info(f"[{request_id}] ZIP_IMAGE_CACHE hit=true key={final_image_cache_key[:16]}... bytes={len(image_bytes)}")
+        logger.info(f"[{request_id}] ZIP_IMAGE_CACHE hit=true mode={ACE_IMAGE_MODE} key={final_image_cache_key[:16]}... bytes={len(image_bytes)}")
     else:
-        logger.info(f"[{request_id}] ZIP_IMAGE_CACHE hit=false key={final_image_cache_key[:16]}...")
+        logger.info(f"[{request_id}] ZIP_IMAGE_CACHE hit=false mode={ACE_IMAGE_MODE} key={final_image_cache_key[:16]}...")
     
     if not image_cache_hit:
         try:
             # Determine max_retries based on mode
             max_img_retries = 2 if ENGINE_MODE == "optimized" else 3
             
-            # Generate final image using unified function (same as preview)
+            # Generate final image using unified render function (same as preview)
             image_gen_called = True
-            image_bytes = _generate_final_image_unified(
+            image_bytes, headline, selected_pair, prompt_used = render_final_ad_bytes(
                 client=client,
-                object_a=object_a_name,
-                object_b=object_b_name,
+                object_a_name=object_a_name,
+                object_b_name=object_b_name,
+                object_a_id=object_a_id,
+                object_b_id=object_b_id,
+                object_a_item=object_a_item,
+                object_b_item=object_b_item,
                 headline=headline,
+                shape_hint=shape_hint,
                 width=width,
                 height=height,
-                shape_hint=shape_hint,
-                object_a_context=object_a_context,
-                object_b_context=object_b_context,
                 quality=final_quality,
                 max_retries=max_img_retries
             )
             
             # Save to unified image cache (for future preview/zip reuse)
             _set_to_image_cache(final_image_cache_key, image_bytes)
-            logger.info(f"[{request_id}] IMAGE_GEN called=true bytes={len(image_bytes)}")
+            logger.info(f"[{request_id}] IMAGE_GEN_CALLED=true mode={ACE_IMAGE_MODE} bytes={len(image_bytes)}")
                 
         except Exception as e:
             logger.error(f"[{request_id}] STEP 3 FAILED: Image generation error: {str(e)}")
             raise
     
     t_image_ms = int((time.time() - t_image_start) * 1000)
-    logger.info(f"[{request_id}] ZIP_IMAGE_CACHE hit={image_cache_hit} key={final_image_cache_key[:16]}... bytes={len(image_bytes)} IMAGE_GEN called={image_gen_called}")
+    logger.info(f"[{request_id}] ZIP_IMAGE_CACHE hit={image_cache_hit} mode={ACE_IMAGE_MODE} key={final_image_cache_key[:16]}... bytes={len(image_bytes)} IMAGE_GEN_CALLED={image_gen_called}")
     
     # Create minimal text file (optional, for documentation)
     text_content = create_text_file(
