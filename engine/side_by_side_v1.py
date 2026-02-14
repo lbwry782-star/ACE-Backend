@@ -60,6 +60,7 @@ ACE_LAYOUT_MODE = os.environ.get("ACE_LAYOUT_MODE", "side_by_side")  # "side_by_
 SHAPE_MIN_SCORE = float(os.environ.get("SHAPE_MIN_SCORE", "0.80"))  # Minimum shape similarity score (0-1)
 SHAPE_SEARCH_K = int(os.environ.get("SHAPE_SEARCH_K", "40"))  # Number of candidates to check per object (K=35-50)
 MAX_CHECKED_PAIRS = int(os.environ.get("MAX_CHECKED_PAIRS", "500"))  # Maximum pairs to check before stopping
+CANDIDATE_LIMIT = int(os.environ.get("CANDIDATE_LIMIT", "80"))  # Maximum candidate pairs to collect before batch scoring
 
 # Object list size parameters
 OBJECT_LIST_TARGET = 150  # Target size for STEP 0 object list
@@ -1127,6 +1128,135 @@ def get_used_ad_goals(history: Optional[List[Dict]]) -> set:
     return used
 
 
+def score_pairs_batch_o3_pro(
+    pairs: List[Tuple[Dict, Dict]],
+    model_name: str,
+    language: str = "en"
+) -> List[Dict]:
+    """
+    Score multiple pairs in a single batch call to o3-pro.
+    
+    Args:
+        pairs: List of tuples (itemA, itemB) where each item is a dict with keys: object, sub_object, etc.
+        model_name: Model name (should be o3-pro)
+        language: Language (default: "en")
+    
+    Returns:
+        List of dicts with keys: {"i": idx, "score": 0-100, "archetype": str, "reason": str}
+        Returns empty list if parsing fails or error occurs.
+    """
+    if not pairs:
+        return []
+    
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    
+    # Build compact JSON input for batch scoring
+    pairs_data = []
+    for idx, (item_a, item_b) in enumerate(pairs):
+        # Extract main objects and sub_objects
+        a_main = item_a.get("object", "") if isinstance(item_a, dict) else str(item_a)
+        a_sub = item_a.get("sub_object", "") if isinstance(item_a, dict) else ""
+        b_main = item_b.get("object", "") if isinstance(item_b, dict) else str(item_b)
+        b_sub = item_b.get("sub_object", "") if isinstance(item_b, dict) else ""
+        
+        # Optional: short context strings
+        a_context = item_a.get("classic_context", "")[:30] if isinstance(item_a, dict) else ""
+        b_context = item_b.get("classic_context", "")[:30] if isinstance(item_b, dict) else ""
+        
+        pairs_data.append({
+            "i": idx,
+            "A_main": a_main,
+            "A_sub": a_sub,
+            "B_main": b_main,
+            "B_sub": b_sub,
+            "A_context": a_context,
+            "B_context": b_context
+        })
+    
+    prompt = f"""You are scoring OUTLINE similarity of MAIN objects only (ignore sub_object for silhouette).
+
+Score each pair based ONLY on the geometric shape similarity of the OUTER CONTOUR/OUTLINE of the MAIN objects (A_main and B_main).
+Ignore sub_objects, context, meaning, color, material, texture, category, theme.
+
+For each pair, return:
+- score: 0-100 (0=completely different shapes, 100=identical outlines)
+- archetype: one word describing the shared shape archetype (e.g., "round", "tall", "curved", "flat", "spiral", "crescent", "cylindrical", "spherical", "rectangular", "triangular", "organic", "geometric")
+- reason: one short sentence explaining the shape similarity (focus on outline/contour only)
+
+Pairs to score:
+{json.dumps(pairs_data, indent=2, ensure_ascii=False)}
+
+Return ONLY a JSON array with one object per pair:
+[
+  {{"i": 0, "score": 85, "archetype": "round", "reason": "Both have circular outer contours"}},
+  {{"i": 1, "score": 72, "archetype": "tall", "reason": "Both are vertically elongated shapes"}},
+  ...
+]
+
+Do not write any extra text. Return JSON array only."""
+    
+    try:
+        # Use Responses API for o* models (o3-pro)
+        is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
+        if is_o_model:
+            response = client.responses.create(model=model_name, input=prompt)
+            response_text = response.output_text.strip()
+        else:
+            # Fallback to Chat Completions if not o* model
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": "You are a shape similarity analyzer. Output must be in English only. Return JSON only without additional text."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=2000
+            )
+            response_text = response.choices[0].message.content.strip()
+        
+        # Parse JSON array
+        if response_text.startswith("```"):
+            lines = response_text.split('\n')
+            response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+        if response_text.startswith("```json"):
+            lines = response_text.split('\n')
+            response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+        
+        results = json.loads(response_text)
+        if not isinstance(results, list):
+            logger.warning(f"Batch scoring returned non-list: {type(results)}")
+            return []
+        
+        # Validate and normalize results
+        validated_results = []
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            idx = r.get("i")
+            score = r.get("score", 0)
+            archetype = r.get("archetype", "")
+            reason = r.get("reason", "")
+            
+            # Ensure score is 0-100
+            try:
+                score = max(0, min(100, int(float(score))))
+            except (ValueError, TypeError):
+                score = 0
+            
+            validated_results.append({
+                "i": idx,
+                "score": score,
+                "archetype": archetype,
+                "reason": reason
+            })
+        
+        return validated_results
+        
+    except Exception as e:
+        logger.error(f"Batch scoring failed: {e}")
+        return []
+
+
 def select_pair_with_limited_shape_search(
     object_list: List[Dict],
     sid: str,
@@ -1213,155 +1343,202 @@ def select_pair_with_limited_shape_search(
             used_objects_session = set()
             _session_used_pairs[sid] = (used_pairs_set, used_objects_session, time.time())
     
-    # Limited search: for each i, check j=i+1..i+K
+    # BATCH MODE: Collect candidate pairs first, then batch score them
     K = SHAPE_SEARCH_K
-    max_checked = MAX_CHECKED_PAIRS
-    checked_pairs = 0
-    best_pair = None
-    best_score = 0.0
+    candidate_limit = CANDIDATE_LIMIT
+    min_score_threshold = int(SHAPE_MIN_SCORE * 100)  # Convert to 0-100 scale
     
-    for i in range(len(shuffled_objects)):
-        if checked_pairs >= max_checked:
-            break
+    # Ensure we use o3-pro for shape scoring
+    shape_model = os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
+    if model_name and model_name != shape_model:
+        logger.warning(f"Overriding model_name={model_name} with OPENAI_SHAPE_MODEL={shape_model} for batch scoring")
+    
+    best_pair_result = None
+    best_score = 0
+    total_checked = 0
+    batch_call_count = 0
+    max_batch_calls = 3
+    
+    for batch_attempt in range(max_batch_calls):
+        # Collect candidate pairs (without model calls)
+        candidate_pairs = []  # List of tuples: (item_a, item_b, idx_a, idx_b, obj_a_id, obj_b_id)
+        candidate_indices = []  # Track original indices in shuffled_objects
         
-        obj_a_item = shuffled_objects[i]
-        obj_a_id = obj_a_item["id"]
-        obj_a_name = obj_a_item["object"]
-        
-        # Skip if already used in session (prefer diversity)
-        if obj_a_id in used_objects_session and len(used_objects_session) < len(shuffled_objects) * 0.8:
-            continue
-        
-        # Check candidates j=i+1..i+K
-        for j in range(i + 1, min(i + 1 + K, len(shuffled_objects))):
-            if checked_pairs >= max_checked:
+        for i in range(len(shuffled_objects)):
+            if len(candidate_pairs) >= candidate_limit:
                 break
             
-            obj_b_item = shuffled_objects[j]
-            obj_b_id = obj_b_item["id"]
-            obj_b_name = obj_b_item["object"]
+            obj_a_item = shuffled_objects[i]
+            obj_a_id = obj_a_item["id"]
+            obj_a_name = obj_a_item["object"]
             
-            # CRITICAL: Reject if same main object (forbidden: same object with different sub_object)
-            obj_a_main_key = _main_key(obj_a_item)
-            obj_b_main_key = _main_key(obj_b_item)
-            if obj_a_main_key == obj_b_main_key:
-                logger.debug(f"PAIR_REJECT_MAIN_DUPLICATE sid={sid} ad={ad_index} A={obj_a_id}(main={obj_a_main_key}) B={obj_b_id}(main={obj_b_main_key}) - same main object")
+            # Skip if already used in session (prefer diversity)
+            if obj_a_id in used_objects_session and len(used_objects_session) < len(shuffled_objects) * 0.8:
                 continue
             
-            # Skip if already used in session
-            if obj_b_id in used_objects_session and len(used_objects_session) < len(shuffled_objects) * 0.8:
-                continue
-            
-            # Check if pair already used
-            pair_hash = hashlib.sha256("|".join(sorted([obj_a_id, obj_b_id])).encode()).hexdigest()
-            if pair_hash in used_pairs_set:
-                logger.info(f"PAIR_SKIP_USED sid={sid} ad={ad_index} reason=pair A={obj_a_id} B={obj_b_id}")
-                continue
-            
-            checked_pairs += 1
-            
-            # Call shape model to get similarity score (simplified - in production, batch or cache)
-            try:
-                prompt = f"""Compare geometric shape similarity:
-
-Object A: {obj_a_name}
-Object B: {obj_b_name}
-
-Return JSON: {{"shape_score": 0-100, "hint": "short description"}}"""
-
-                is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
-                if is_o_model:
-                    response = client.responses.create(model=model_name, input=prompt)
-                    response_text = response.output_text.strip()
-                else:
-                    response = client.chat.completions.create(
-                        model=model_name,
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.3,
-                        max_tokens=100
-                    )
-                    response_text = response.choices[0].message.content.strip()
+            # Check candidates j=i+1..i+K
+            for j in range(i + 1, min(i + 1 + K, len(shuffled_objects))):
+                if len(candidate_pairs) >= candidate_limit:
+                    break
                 
-                # Parse JSON
-                if response_text.startswith("```"):
-                    lines = response_text.split('\n')
-                    response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
-                if response_text.startswith("```json"):
-                    lines = response_text.split('\n')
-                    response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+                obj_b_item = shuffled_objects[j]
+                obj_b_id = obj_b_item["id"]
+                obj_b_name = obj_b_item["object"]
                 
-                result = json.loads(response_text)
-                shape_score = float(result.get("shape_score", 0)) / 100.0
-                hint = result.get("hint", "")
+                # CRITICAL: Reject if same main object (forbidden: same object with different sub_object)
+                obj_a_main_key = _main_key(obj_a_item)
+                obj_b_main_key = _main_key(obj_b_item)
+                if obj_a_main_key == obj_b_main_key:
+                    continue
                 
-                if shape_score >= SHAPE_MIN_SCORE:
-                    # Get theme and sub_object info for logging
+                # Skip if already used in session
+                if obj_b_id in used_objects_session and len(used_objects_session) < len(shuffled_objects) * 0.8:
+                    continue
+                
+                # Check if pair already used
+                pair_hash = hashlib.sha256("|".join(sorted([obj_a_id, obj_b_id])).encode()).hexdigest()
+                if pair_hash in used_pairs_set:
+                    continue
+                
+                # Check theme relevance if allowed_theme_tags provided (before adding to candidates)
+                if allowed_theme_tags and len(allowed_theme_tags) > 0 and themed_pool and len(themed_pool) >= 60:
+                    theme_tags_norm = {_norm(t) for t in allowed_theme_tags}
                     obj_a_theme = obj_a_item.get("theme_tag", "")
                     obj_b_theme = obj_b_item.get("theme_tag", "")
-                    obj_a_sub = obj_a_item.get("sub_object", "")
-                    obj_b_sub = obj_b_item.get("sub_object", "")
-                    
-                    # Check theme relevance if allowed_theme_tags provided
-                    obj_a_link = obj_a_item.get("theme_link", "")
-                    obj_b_link = obj_b_item.get("theme_link", "")
-                    
-                    # Acceptance rule: reject if theme tags don't match (unless fallback mode)
-                    if allowed_theme_tags and len(allowed_theme_tags) > 0 and themed_pool and len(themed_pool) >= 60:
-                        theme_tags_norm = {_norm(t) for t in allowed_theme_tags}
-                        obj_a_theme_norm = _norm(obj_a_theme)
-                        obj_b_theme_norm = _norm(obj_b_theme)
-                        if obj_a_theme_norm not in theme_tags_norm or obj_b_theme_norm not in theme_tags_norm:
-                            logger.debug(f"PAIR_REJECT_THEME sid={sid} ad={ad_index} A={obj_a_id}(theme={obj_a_theme}) B={obj_b_id}(theme={obj_b_theme}) not in allowed_tags")
-                            continue
-                    
-                    best_pair = {
-                        "object_a": obj_a_name,
-                        "object_b": obj_b_name,
-                        "object_a_id": obj_a_id,
-                        "object_b_id": obj_b_id,
-                        "shape_similarity_score": int(shape_score * 100),
-                        "shape_hint": hint
-                    }
-                    
-                    # Update session tracking
-                    with _session_used_lock:
-                        if sid in _session_used_pairs:
-                            used_pairs_set, used_objects_session, _ = _session_used_pairs[sid]
-                            used_pairs_set.add(pair_hash)
-                            used_objects_session.add(obj_a_id)
-                            used_objects_session.add(obj_b_id)
-                            _session_used_pairs[sid] = (used_pairs_set, used_objects_session, time.time())
-                    
-                    # Log with detailed information including main objects and sub_objects
-                    theme_info = ""
-                    if obj_a_theme or obj_b_theme:
-                        a_link_short = obj_a_link[:30] + "..." if len(obj_a_link) > 30 else obj_a_link
-                        b_link_short = obj_b_link[:30] + "..." if len(obj_b_link) > 30 else obj_b_link
-                        theme_info = f" A_theme={obj_a_theme} B_theme={obj_b_theme} A_link={a_link_short} B_link={b_link_short}"
-                    
-                    logger.info(f"PAIR_PICK sid={sid} ad={ad_index} A={obj_a_id} A_obj={obj_a_name} A_sub={obj_a_sub} B={obj_b_id} B_obj={obj_b_name} B_sub={obj_b_sub} shape={int(shape_score*100)} checked_pairs={checked_pairs} cache_hit_plan=0{theme_info}")
-                    return best_pair
+                    obj_a_theme_norm = _norm(obj_a_theme)
+                    obj_b_theme_norm = _norm(obj_b_theme)
+                    if obj_a_theme_norm not in theme_tags_norm or obj_b_theme_norm not in theme_tags_norm:
+                        continue
                 
-                if shape_score > best_score:
-                    best_score = shape_score
-                    best_pair = {
-                        "object_a": obj_a_name,
-                        "object_b": obj_b_name,
-                        "object_a_id": obj_a_id,
-                        "object_b_id": obj_b_id,
-                        "shape_similarity_score": int(shape_score * 100),
-                        "shape_hint": hint
-                    }
-            
-            except Exception as e:
-                logger.debug(f"Shape matching error: {e}")
+                # Add to candidates
+                candidate_pairs.append((obj_a_item, obj_b_item))
+                candidate_indices.append((i, j))
+        
+        if not candidate_pairs:
+            logger.warning(f"No candidate pairs collected in batch attempt {batch_attempt + 1}")
+            break
+        
+        # Batch score all candidates at once
+        batch_call_count += 1
+        logger.info(f"SHAPE_BATCH attempt={batch_attempt + 1} n_pairs={len(candidate_pairs)} model={shape_model}")
+        
+        batch_results = score_pairs_batch_o3_pro(candidate_pairs, shape_model, language="en")
+        
+        if not batch_results:
+            logger.warning(f"Batch scoring returned no results in attempt {batch_attempt + 1}")
+            continue
+        
+        # Find best scoring pair that passes threshold
+        passes_threshold = []
+        for result in batch_results:
+            idx = result.get("i", -1)
+            if idx < 0 or idx >= len(candidate_pairs):
                 continue
+            
+            score = result.get("score", 0)
+            archetype = result.get("archetype", "")
+            reason = result.get("reason", "")
+            
+            if score >= min_score_threshold:
+                item_a, item_b = candidate_pairs[idx]
+                i_idx, j_idx = candidate_indices[idx]
+                
+                passes_threshold.append({
+                    "item_a": item_a,
+                    "item_b": item_b,
+                    "score": score,
+                    "archetype": archetype,
+                    "reason": reason,
+                    "idx": idx
+                })
+        
+        # Log batch results
+        best_batch_score = max([r.get("score", 0) for r in batch_results], default=0)
+        logger.info(f"SHAPE_BATCH attempt={batch_attempt + 1} n_pairs={len(candidate_pairs)} best={best_batch_score} passes={len(passes_threshold)}")
+        
+        # If we found a pair that passes threshold, use it
+        if passes_threshold:
+            # Sort by score descending and pick the best
+            passes_threshold.sort(key=lambda x: x["score"], reverse=True)
+            best_candidate = passes_threshold[0]
+            
+            item_a = best_candidate["item_a"]
+            item_b = best_candidate["item_b"]
+            score = best_candidate["score"]
+            archetype = best_candidate["archetype"]
+            reason = best_candidate["reason"]
+            
+            obj_a_id = item_a["id"]
+            obj_a_name = item_a["object"]
+            obj_b_id = item_b["id"]
+            obj_b_name = item_b["object"]
+            
+            best_pair_result = {
+                "object_a": obj_a_name,
+                "object_b": obj_b_name,
+                "object_a_id": obj_a_id,
+                "object_b_id": obj_b_id,
+                "shape_similarity_score": score,
+                "shape_hint": archetype,
+                "shape_reason": reason
+            }
+            
+            # Update session tracking
+            pair_hash = hashlib.sha256("|".join(sorted([obj_a_id, obj_b_id])).encode()).hexdigest()
+            with _session_used_lock:
+                if sid in _session_used_pairs:
+                    used_pairs_set, used_objects_session, _ = _session_used_pairs[sid]
+                    used_pairs_set.add(pair_hash)
+                    used_objects_session.add(obj_a_id)
+                    used_objects_session.add(obj_b_id)
+                    _session_used_pairs[sid] = (used_pairs_set, used_objects_session, time.time())
+            
+            # Log with detailed information
+            obj_a_theme = item_a.get("theme_tag", "")
+            obj_b_theme = item_b.get("theme_tag", "")
+            obj_a_sub = item_a.get("sub_object", "")
+            obj_b_sub = item_b.get("sub_object", "")
+            obj_a_link = item_a.get("theme_link", "")
+            obj_b_link = item_b.get("theme_link", "")
+            
+            theme_info = ""
+            if obj_a_theme or obj_b_theme:
+                a_link_short = obj_a_link[:30] + "..." if len(obj_a_link) > 30 else obj_a_link
+                b_link_short = obj_b_link[:30] + "..." if len(obj_b_link) > 30 else obj_b_link
+                theme_info = f" A_theme={obj_a_theme} B_theme={obj_b_theme} A_link={a_link_short} B_link={b_link_short}"
+            
+            logger.info(f"PAIR_PICK sid={sid} ad={ad_index} A={obj_a_id} A_obj={obj_a_name} A_sub={obj_a_sub} B={obj_b_id} B_obj={obj_b_name} B_sub={obj_b_sub} shape={score} archetype={archetype} reason={reason[:50]} checked_pairs={len(candidate_pairs)} batch_calls={batch_call_count} cache_hit_plan=0{theme_info}")
+            return best_pair_result
+        
+        # Track best score for fallback
+        if best_batch_score > best_score:
+            best_score = best_batch_score
+            # Store best pair for fallback
+            best_result = max(batch_results, key=lambda x: x.get("score", 0))
+            idx = best_result.get("i", -1)
+            if 0 <= idx < len(candidate_pairs):
+                item_a, item_b = candidate_pairs[idx]
+                best_pair_result = {
+                    "object_a": item_a["object"],
+                    "object_b": item_b["object"],
+                    "object_a_id": item_a["id"],
+                    "object_b_id": item_b["id"],
+                    "shape_similarity_score": best_result.get("score", 0),
+                    "shape_hint": best_result.get("archetype", ""),
+                    "shape_reason": best_result.get("reason", "")
+                }
+        
+        total_checked += len(candidate_pairs)
+        
+        # If we found a good enough pair (even if below threshold), or exhausted candidates, break
+        if best_score >= 70 or total_checked >= MAX_CHECKED_PAIRS:
+            break
     
-    # Fallback: use best pair if >= 0.70
-    if best_pair and best_score >= 0.70:
-        # Find theme info for best_pair
-        obj_a_item_fallback = next((it for it in search_objects if it.get("id") == best_pair["object_a_id"]), None)
-        obj_b_item_fallback = next((it for it in search_objects if it.get("id") == best_pair["object_b_id"]), None)
+    # Fallback: use best pair if >= 70 (0-100 scale)
+    if best_pair_result and best_score >= 70:
+        # Find theme info for best_pair_result
+        obj_a_item_fallback = next((it for it in search_objects if it.get("id") == best_pair_result["object_a_id"]), None)
+        obj_b_item_fallback = next((it for it in search_objects if it.get("id") == best_pair_result["object_b_id"]), None)
         
         obj_a_theme = obj_a_item_fallback.get("theme_tag", "") if obj_a_item_fallback else ""
         obj_b_theme = obj_b_item_fallback.get("theme_tag", "") if obj_b_item_fallback else ""
@@ -1370,8 +1547,10 @@ Return JSON: {{"shape_score": 0-100, "hint": "short description"}}"""
         
         obj_a_sub = obj_a_item_fallback.get("sub_object", "") if obj_a_item_fallback else ""
         obj_b_sub = obj_b_item_fallback.get("sub_object", "") if obj_b_item_fallback else ""
-        obj_a_name_fallback = best_pair["object_a"]
-        obj_b_name_fallback = best_pair["object_b"]
+        obj_a_name_fallback = best_pair_result["object_a"]
+        obj_b_name_fallback = best_pair_result["object_b"]
+        archetype = best_pair_result.get("shape_hint", "")
+        reason = best_pair_result.get("shape_reason", "")
         
         # Check theme relevance for fallback too
         if allowed_theme_tags and len(allowed_theme_tags) > 0 and themed_pool and len(themed_pool) >= 60:
@@ -1379,16 +1558,16 @@ Return JSON: {{"shape_score": 0-100, "hint": "short description"}}"""
             obj_a_theme_norm = _norm(obj_a_theme)
             obj_b_theme_norm = _norm(obj_b_theme)
             if obj_a_theme_norm not in theme_tags_norm or obj_b_theme_norm not in theme_tags_norm:
-                logger.warning(f"PAIR_REJECT_THEME_FALLBACK sid={sid} ad={ad_index} A={best_pair['object_a_id']}(theme={obj_a_theme}) B={best_pair['object_b_id']}(theme={obj_b_theme}) not in allowed_tags")
+                logger.warning(f"PAIR_REJECT_THEME_FALLBACK sid={sid} ad={ad_index} A={best_pair_result['object_a_id']}(theme={obj_a_theme}) B={best_pair_result['object_b_id']}(theme={obj_b_theme}) not in allowed_tags")
                 # Still return it as fallback, but log the issue
         
-        pair_hash = hashlib.sha256("|".join(sorted([best_pair["object_a_id"], best_pair["object_b_id"]])).encode()).hexdigest()
+        pair_hash = hashlib.sha256("|".join(sorted([best_pair_result["object_a_id"], best_pair_result["object_b_id"]])).encode()).hexdigest()
         with _session_used_lock:
             if sid in _session_used_pairs:
                 used_pairs_set, used_objects_session, _ = _session_used_pairs[sid]
                 used_pairs_set.add(pair_hash)
-                used_objects_session.add(best_pair["object_a_id"])
-                used_objects_session.add(best_pair["object_b_id"])
+                used_objects_session.add(best_pair_result["object_a_id"])
+                used_objects_session.add(best_pair_result["object_b_id"])
                 _session_used_pairs[sid] = (used_pairs_set, used_objects_session, time.time())
         
         # Log with detailed information including main objects and sub_objects
@@ -1398,10 +1577,10 @@ Return JSON: {{"shape_score": 0-100, "hint": "short description"}}"""
             b_link_short = obj_b_link[:30] + "..." if len(obj_b_link) > 30 else obj_b_link
             theme_info = f" A_theme={obj_a_theme} B_theme={obj_b_theme} A_link={a_link_short} B_link={b_link_short}"
         
-        logger.warning(f"PAIR_PICK sid={sid} ad={ad_index} A={best_pair['object_a_id']} A_obj={obj_a_name_fallback} A_sub={obj_a_sub} B={best_pair['object_b_id']} B_obj={obj_b_name_fallback} B_sub={obj_b_sub} shape={best_pair['shape_similarity_score']} checked_pairs={checked_pairs} cache_hit_plan=0 (fallback){theme_info}")
-        return best_pair
+        logger.warning(f"PAIR_PICK sid={sid} ad={ad_index} A={best_pair_result['object_a_id']} A_obj={obj_a_name_fallback} A_sub={obj_a_sub} B={best_pair_result['object_b_id']} B_obj={obj_b_name_fallback} B_sub={obj_b_sub} shape={best_pair_result['shape_similarity_score']} archetype={archetype} reason={reason[:50]} checked_pairs={total_checked} batch_calls={batch_call_count} cache_hit_plan=0 (fallback){theme_info}")
+        return best_pair_result
     
-    raise ValueError(f"No valid pair found after {checked_pairs} checks")
+    raise ValueError(f"No valid pair found after {total_checked} checks ({batch_call_count} batch calls)")
 
 
 def describe_item(item) -> str:
