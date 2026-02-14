@@ -1224,6 +1224,25 @@ RULES
 - Must be directly related to the ad_goal.
 - No abstract marketing fluff.
 
+2.5) PHYSICAL_METAPHOR_MAPPING (CRITICAL):
+- Convert each theme_tag into concrete physical metaphor objects.
+- For each theme_tag, produce 1–3 concrete PHYSICAL OBJECTS that naturally represent it.
+- Objects must be everyday physical objects.
+- No abstract symbols.
+- No text.
+- No logos.
+- No conceptual words.
+- Must be photographable.
+
+Examples (for guidance only):
+- optimization → tuning knob, adjustable wrench, compass needle
+- targeting → arrow hitting target, magnifying glass over object
+- personalization → key and lock, engraved nameplate
+- analytics → measuring scale, ruler, caliper
+- automation → conveyor belt, mechanical lever
+- precision → laser pointer dot, dart hitting bullseye
+- growth → sprouting seed, rising thermometer
+
 3) Generate OBJECT_LIST:
 - EXACTLY 150 items.
 - Each item must contain:
@@ -1248,6 +1267,19 @@ STRICT OBJECT RULES:
 - No text.
 - No branding.
 - No abstract metaphors.
+
+PHYSICAL METAPHOR ENFORCEMENT (CRITICAL):
+- Each object in object_list MUST originate from one of the physical metaphors generated in step 2.5.
+- OR be a direct physical extension of them.
+- If theme_tag = "targeting" and metaphor = "arrow and target", then valid objects may include:
+  - arrow + target board
+  - dart + dartboard
+  - spear + marked circle
+- NOT: random household items unrelated to the metaphor.
+- If product domain is abstract (AI, advertising, analytics, finance, SaaS, optimization, etc):
+  - Do NOT generate generic everyday objects unrelated to the physical metaphors.
+  - Reject internally any object that cannot be explained as a physical embodiment of a theme_tag.
+- Each object must clearly represent an abstract idea physically.
 
 4) SELECT 3 FINAL PAIRS FROM THE LIST:
 
@@ -1329,6 +1361,13 @@ Return JSON only."""
             raise ValueError("ads must have exactly 3 items")
         
         logger.info(f"PLAN_ONE_CALL used=true model={model} ad_goal={plan.get('ad_goal', '')[:50]} object_list_size={len(plan.get('object_list', []))} ads_count={len(plan.get('ads', []))}")
+        
+        # Log metaphor enforcement check (first 5 items)
+        if plan.get("object_list"):
+            sample_items = plan["object_list"][:5]
+            sample_str = json.dumps([{"id": it.get("id", ""), "object": it.get("object", ""), "sub_object": it.get("sub_object", ""), "theme_tag": it.get("theme_tag", "")} for it in sample_items], ensure_ascii=False)
+            logger.info(f"METAPHOR_CHECK sample={sample_str}")
+        
         return plan
         
     except Exception as e:
