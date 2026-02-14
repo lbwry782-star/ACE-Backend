@@ -182,18 +182,29 @@ def _get_cache_key_final_image(
     image_size: str,
     quality: str,
     layout_mode: str = "side_by_side",
-    image_mode: str = "replacement"
+    image_mode: str = "replacement",
+    object_a: Optional[str] = None,
+    object_a_sub: Optional[str] = None,
+    object_b: Optional[str] = None
 ) -> str:
     """
     Generate unified cache key for final image (shared between preview and zip).
     
-    Key includes: sid + ad_index + product hash + layout/mode + image_mode + image_size + headline + quality + CACHE_KEY_VERSION
+    Key includes: sid + ad_index + product hash + layout/mode + image_mode + image_size + headline + quality + A.object + A.sub_object + B.object + CACHE_KEY_VERSION
+    For replacement mode, includes A.object, A.sub_object, B.object to ensure cache correctness.
     """
     # Hash productName + message
     product_hash = hashlib.sha256(f"{product_name}|{message}".encode()).hexdigest()[:16]
     # Hash headline (shortened)
     headline_hash = hashlib.sha256(headline.encode()).hexdigest()[:16]
-    key_str = f"{session_seed}|{ad_index}|{product_hash}|{layout_mode}|{image_mode}|{image_size}|{headline_hash}|{quality}|FINAL_IMAGE_{CACHE_KEY_VERSION}"
+    
+    # For replacement mode, include A.object, A.sub_object, B.object in cache key
+    if image_mode == "replacement" and object_a and object_b:
+        object_a_sub_str = object_a_sub or ""
+        key_str = f"{session_seed}|{ad_index}|{product_hash}|{layout_mode}|{image_mode}|{image_size}|{headline_hash}|{quality}|A={object_a}|A_sub={object_a_sub_str}|B={object_b}|FINAL_IMAGE_{CACHE_KEY_VERSION}"
+    else:
+        key_str = f"{session_seed}|{ad_index}|{product_hash}|{layout_mode}|{image_mode}|{image_size}|{headline_hash}|{quality}|FINAL_IMAGE_{CACHE_KEY_VERSION}"
+    
     return hashlib.sha256(key_str.encode()).hexdigest()
 
 
@@ -3259,7 +3270,9 @@ def create_image_prompt(
     hybrid_plan: Optional[Dict] = None,
     is_strict: bool = False,
     object_a_context: Optional[str] = None,
-    object_b_context: Optional[str] = None
+    object_b_context: Optional[str] = None,
+    object_a_item: Optional[Dict] = None,
+    object_b_item: Optional[Dict] = None
 ) -> str:
     """
     STEP 3 - IMAGE GENERATION PROMPT
@@ -3283,15 +3296,14 @@ def create_image_prompt(
     
     # REPLACEMENT mode: B replaces A in A's scene
     if ACE_IMAGE_MODE == "replacement":
-        # Extract sub_object from context (assume format: "object + sub_object" or use object_a_context)
-        # For now, use object_a_context as the scene description
-        scene_description = object_a_context or f"{object_a} in its classic situation"
-        sub_object = ""  # Will be extracted from context if available
+        # Get A.sub_object directly from object_a_item (NEVER use B.sub_object)
+        scene_context = object_a_context or f"{object_a} in its classic situation"
+        locked_sub_object = ""
+        if object_a_item:
+            locked_sub_object = object_a_item.get("sub_object", "")
         
-        # Try to extract sub_object from context (e.g., "landing on a flower" -> sub_object is "flower")
-        # This is a simple heuristic - in production, you might want to parse this more carefully
-        if object_a_context:
-            # Look for common patterns like "on a X", "with a X", "next to a X"
+        # Ensure we have sub_object - if not, try to extract from context as fallback
+        if not locked_sub_object and object_a_context:
             import re
             patterns = [
                 r"on a ([a-z]+)",
@@ -3303,83 +3315,37 @@ def create_image_prompt(
             for pattern in patterns:
                 match = re.search(pattern, object_a_context.lower())
                 if match:
-                    sub_object = match.group(1)
+                    locked_sub_object = match.group(1)
                     break
+        
+        replacement_main_object = object_b
         
         replacement_prompt = f"""Create a professional photorealistic advertisement image as a single unified scene.
 
-BASE SCENE (derived from Object A context):
+BASE SCENE (LOCKED TO OBJECT A):
+- The scene is exactly: '{scene_context}'
+- The ONLY sub-object visible and used for interaction must be: '{locked_sub_object}'
+- Keep background, lighting, camera angle, framing, depth of field, and overall composition as if photographing Object A in this exact situation.
 
-The scene is based entirely on Object A's classic situation:
-"{object_a_context or f'{object_a} in its classic situation'}"
+MAIN OBJECT REPLACEMENT (LOCKED):
+- The ONLY main object visible must be: '{replacement_main_object}'
+- Do NOT show '{object_a}' anywhere in the image.
+- Do NOT include any sub-object that naturally belongs to '{replacement_main_object}'.
+- '{replacement_main_object}' must occupy the exact same position, pose, orientation, and scale where '{object_a}' would be in this scene.
+- '{replacement_main_object}' must be shown interacting with '{locked_sub_object}' in the exact interaction role implied by the scene.
 
-{f'The sub-object from Object A must be clearly visible: "{sub_object}"' if sub_object else ''}
+STRICT NEGATIVES (MANDATORY):
+- No split panels. No side-by-side layout.
+- No additional props besides '{locked_sub_object}' that explain or replace the interaction.
+- Do not swap the scene to match '{replacement_main_object}'. The scene stays from A.
 
-Keep the original environmental logic, physical interaction, lighting direction, camera angle, framing, depth of field, and overall composition exactly as if photographing Object A in this situation.
+STYLE:
+Ultra realistic photography. Real materials. Natural lighting.
+No logos. No brand names. No printed text. No labels. No packaging graphics. No numbers.
 
---------------------------------------------------------
-MAIN OBJECT REPLACEMENT – STRICT COMPOSITION LOCK
---------------------------------------------------------
-
-Treat Object A's scene as a fixed photographic template.
-
-- Imagine the scene was already photographed with Object A.
-- Now replace ONLY the main object body with: "{object_b}"
-- Do NOT show Object A anywhere in the image.
-- Object B must occupy the exact spatial position where Object A would naturally appear.
-- Maintain the same pose logic implied by the interaction with "{sub_object or 'the sub-object'}" if applicable.
-- Keep identical scale, orientation, distance to camera, and physical alignment.
-- Do NOT redesign the composition.
-- Do NOT change camera perspective.
-- Do NOT move or remove the sub-object.
-- Do NOT add the sub-object of B.
-- Only swap the identity of the main object.
-
-Object B must interact naturally and physically with "{sub_object or 'the sub-object'}" in a realistic and believable way.
-
---------------------------------------------------------
-VISUAL STYLE CONSTRAINTS
---------------------------------------------------------
-
-Ultra realistic photography.
-Real materials.
-Natural lighting.
-Professional commercial quality.
-No illustration style.
-No graphic design look.
-No artificial collage appearance.
-No surreal distortions.
-
-No logos.
-No brand names.
-No printed text.
-No labels.
-No packaging graphics.
-No numbers.
-
---------------------------------------------------------
-HEADLINE – MANDATORY
---------------------------------------------------------
-
-The image must contain exactly ONE headline:
-
-"{headline}"
-
-- The headline must be clearly visible.
-- The headline must be fully readable.
-- The headline must be integrated naturally into the scene.
-- The headline must feel like part of a professional advertisement.
-- The headline must have strong visual presence.
-- The headline must not hide or cover the main object.
-- No other text may appear in the image.
-
---------------------------------------------------------
-FINAL RULE
---------------------------------------------------------
-
-This is a single-scene composition.
-There must be only one main object visible: "{object_b}".
-The scene must look like a realistic photograph."""
+HEADLINE – EXACTLY ONE:
+'{headline}'
+The headline must be fully readable and integrated into the image. No other text."""
         
         return replacement_prompt
     
@@ -3687,6 +3653,14 @@ def render_final_ad_bytes(
     object_a_context = object_a_item.get("classic_context", "") if object_a_item else ""
     object_b_context = object_b_item.get("classic_context", "") if object_b_item else ""
     
+    # Get sub_objects for replacement mode
+    object_a_sub = object_a_item.get("sub_object", "") if object_a_item else ""
+    object_b_sub = object_b_item.get("sub_object", "") if object_b_item else ""
+    
+    # Log replacement input before image generation
+    if ACE_IMAGE_MODE == "replacement":
+        logger.info(f"REPLACEMENT_INPUT A={object_a_name} A_sub={object_a_sub} A_ctx={object_a_context} | B={object_b_name} B_sub={object_b_sub}")
+    
     # Create prompt
     prompt_used = create_image_prompt(
         object_a=object_a_name,
@@ -3697,7 +3671,9 @@ def render_final_ad_bytes(
         hybrid_plan=None,  # No hybrid plan in SIDE BY SIDE mode
         is_strict=False,
         object_a_context=object_a_context,
-        object_b_context=object_b_context
+        object_b_context=object_b_context,
+        object_a_item=object_a_item,
+        object_b_item=object_b_item
     )
     
     # Generate image
@@ -4097,14 +4073,20 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     # Get context from items if available
     if 'object_a_item' in locals() and object_a_item:
         object_a_context = object_a_item.get("classic_context", "")
+        object_a_sub = object_a_item.get("sub_object", "")
     else:
         object_a_context = ""
+        object_a_sub = ""
     if 'object_b_item' in locals() and object_b_item:
         object_b_context = object_b_item.get("classic_context", "")
     else:
         object_b_context = ""
     
-    # Check unified final image cache (includes ACE_IMAGE_MODE)
+    # Get object names for cache key
+    obj_a_name = object_a_name if 'object_a_name' in locals() else ""
+    obj_b_name = object_b_name if 'object_b_name' in locals() else ""
+    
+    # Check unified final image cache (includes ACE_IMAGE_MODE + A.object + A.sub_object + B.object)
     final_image_cache_key = _get_cache_key_final_image(
         session_seed=session_seed or session_id,
         ad_index=ad_index,
@@ -4114,7 +4096,10 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
         image_size=image_size_str,
         quality=final_quality,
         layout_mode=ACE_LAYOUT_MODE,
-        image_mode=ACE_IMAGE_MODE
+        image_mode=ACE_IMAGE_MODE,
+        object_a=obj_a_name,
+        object_a_sub=object_a_sub,
+        object_b=obj_b_name
     )
     
     image_bytes = None
@@ -4417,11 +4402,12 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     # Get context from items
     object_a_context = object_a_item.get("classic_context", "") if object_a_item else ""
     object_b_context = object_b_item.get("classic_context", "") if object_b_item else ""
+    object_a_sub = object_a_item.get("sub_object", "") if object_a_item else ""
     
     # Use same quality as preview (high quality for final)
     final_quality = GENERATE_IMAGE_QUALITY_DEFAULT
     
-    # Check unified final image cache (same key as preview, includes ACE_IMAGE_MODE)
+    # Check unified final image cache (same key as preview, includes ACE_IMAGE_MODE + A.object + A.sub_object + B.object)
     final_image_cache_key = _get_cache_key_final_image(
         session_seed=session_seed or session_id,
         ad_index=ad_index,
@@ -4431,7 +4417,10 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
         image_size=image_size_str,
         quality=final_quality,
         layout_mode=ACE_LAYOUT_MODE,
-        image_mode=ACE_IMAGE_MODE
+        image_mode=ACE_IMAGE_MODE,
+        object_a=object_a_name,
+        object_a_sub=object_a_sub,
+        object_b=object_b_name
     )
     
     image_bytes = None
