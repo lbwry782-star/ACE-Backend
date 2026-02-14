@@ -256,10 +256,35 @@ def _set_to_step0_cache(key: str, value: List[str]):
         _step0_cache[key] = (value, time.time())
 
 
+def _stable_object_list_fingerprint(object_list: Optional[List]) -> str:
+    """
+    Generate a stable fingerprint for object_list that works with both List[str] and List[Dict].
+    Never sorts dicts directly - only sorts string identifiers.
+    """
+    if not object_list:
+        return ""
+    # object_list may be List[str] (legacy) or List[Dict] (new)
+    if isinstance(object_list[0], dict):
+        ids = []
+        for it in object_list:
+            # prefer id; fallback to object+sub_object
+            _id = (it.get("id") or "").strip()
+            if not _id:
+                _id = f'{it.get("object","")}::{it.get("sub_object","")}'
+            ids.append(_id)
+        ids.sort()
+        return hashlib.md5("|".join(ids).encode()).hexdigest()[:16]
+    else:
+        ids = [str(x) for x in object_list]
+        ids.sort()
+        return hashlib.md5("|".join(ids).encode()).hexdigest()[:16]
+
+
 def _get_cache_key_step1(object_list: List[str], min_shape_score: int, min_env_diff_score: int, used_objects: set, product_name: str = "", ad_goal: str = "", language: str = "en", ad_index: int = 1, session_seed: Optional[str] = None, engine_mode: str = "legacy", preview_mode: str = "image") -> str:
     """Generate cache key for STEP 1 (shape match)."""
     # Include objectList hash, gate parameters, used_objects, and context
-    object_list_hash = hashlib.md5(json.dumps(sorted(object_list), sort_keys=True).encode()).hexdigest()[:16]
+    # Use stable fingerprint that handles both List[str] and List[Dict]
+    object_list_hash = _stable_object_list_fingerprint(object_list)
     used_objects_str = "|".join(sorted(used_objects)) if used_objects else ""
     layout_mode = ACE_LAYOUT_MODE  # Include layout mode in cache key
     key_str = f"{product_name}|{ad_goal}|{language}|{ad_index}|{session_seed or ''}|{engine_mode}|{preview_mode}|{layout_mode}|{object_list_hash}|PAIR_GATE(min_shape={min_shape_score},min_env_diff={min_env_diff_score})|{used_objects_str}|STEP1_{CACHE_KEY_VERSION}"
