@@ -1201,75 +1201,107 @@ def plan_session_one_call(
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     model = os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
     
-    prompt = f"""You are planning a complete advertising session for a SIDE BY SIDE ad campaign.
+    prompt = f"""You are designing a visual advertising engine.
 
-Product Name: {product_name}
-Product Description: {product_description}
+INPUT:
+Product name: {product_name}
+Product description: {product_description}
+Language: English
 
-Generate a COMPLETE plan in STRICT JSON format. Return ONLY valid JSON, no additional text.
+Your task is to compute EVERYTHING in one structured JSON response.
 
-Required JSON schema:
+========================================================
+RULES
+========================================================
+
+1) Generate an AD_GOAL:
+- One sentence.
+- 6–12 words.
+- Clear commercial intent.
+
+2) Generate THEME_TAGS:
+- 8–12 short tags (1–3 words each).
+- Must be directly related to the ad_goal.
+- No abstract marketing fluff.
+
+3) Generate OBJECT_LIST:
+- EXACTLY 150 items.
+- Each item must contain:
+
 {{
-  "ad_goal": "string (6-12 words, English, defines intent/purpose, not a slogan)",
-  "theme_tags": ["tag1", "tag2", ... exactly 8-12 tags, lowercase, 1-2 words each],
-  "object_list": [
-    {{
-      "id": "unique_id_1",
-      "object": "main physical object (concrete noun, drawable)",
-      "sub_object": "secondary physical object (concrete noun, not generic)",
-      "classic_context": "3-12 words describing physical interaction between object and sub_object (MUST include preposition: on/in/next to/attached to/inserted into/being opened with/resting on/holding/wrapped by)",
-      "theme_tag": "must be EXACTLY one of the theme_tags from above",
-      "theme_link": "5-12 words explaining relevance to ad_goal",
-      "shape_hint": "one of: round,oval,elongated,rectangular,triangular,irregular,curved_organic,cylindrical"
-    }},
-    ... exactly 150 items
-  ],
+  "id": "unique_snake_case_id",
+  "object": "main physical object",
+  "sub_object": "secondary physical object",
+  "classic_context": "3–12 words describing physical interaction",
+  "theme_tag": "must be one of theme_tags",
+  "theme_link": "5–12 words explaining relevance to ad_goal",
+  "shape_hint": "one of: round, oval, elongated, rectangular, triangular, curved_organic, cylindrical, irregular"
+}}
+
+STRICT OBJECT RULES:
+- Each item must be MAIN_OBJECT + SUB_OBJECT.
+- Sub_object must be a physical object.
+- No environments like forest, nature, water, sky, background.
+- classic_context must include a physical relation:
+  (on, in, next to, attached to, inserted into, resting on, being opened with, holding, touching)
+- No logos.
+- No text.
+- No branding.
+- No abstract metaphors.
+
+4) SELECT 3 FINAL PAIRS FROM THE LIST:
+
+Each pair must:
+- Use two DIFFERENT main objects.
+- Not reuse the same main object across the 3 pairs.
+- Be strongly similar in MAIN object silhouette.
+- Ignore sub_object when judging silhouette.
+- Have shape_score between 0–100 (aim 85+).
+- Provide one-sentence shape_reason explaining silhouette similarity.
+
+5) HEADLINE PER PAIR:
+- English only.
+- Max 7 words including product name.
+- Bold, commercial, not poetic.
+- Must relate to ad_goal.
+
+6) SIDE BY SIDE ONLY:
+- Two full objects.
+- No overlap.
+- Equal visual weight.
+- Clear comparable outer contour.
+
+========================================================
+OUTPUT FORMAT (STRICT JSON)
+========================================================
+
+{{
+  "ad_goal": "...",
+  "theme_tags": [...],
+  "object_list": [150 items],
   "ads": [
     {{
       "ad_index": 1,
-      "a_id": "id from object_list",
-      "b_id": "id from object_list",
-      "shape_score": 85,
-      "shape_reason": "one sentence describing MAIN object silhouette similarity only (ignore sub_object)",
-      "headline": "ENGLISH, ALL CAPS, <=7 words total INCLUDING product name, no punctuation"
+      "a_id": "...",
+      "b_id": "...",
+      "shape_score": 0-100,
+      "shape_reason": "...",
+      "headline": "..."
     }},
-    {{ "ad_index": 2, ... }},
-    {{ "ad_index": 3, ... }}
+    {{
+      "ad_index": 2,
+      ...
+    }},
+    {{
+      "ad_index": 3,
+      ...
+    }}
   ]
 }}
 
-CRITICAL RULES:
-
-1. SIDE_BY_SIDE ONLY:
-   - Layout is always two panels side by side, no overlap.
-   - Each panel shows one FULL object with its sub_object.
-
-2. object_list (150 items):
-   - Each item MUST be MAIN_OBJECT + SUB_OBJECT (no environments like forest/water/nature/background).
-   - classic_context MUST include a physical relation (on/in/next to/attached to/inserted into/being opened with/resting on/holding/wrapped by).
-   - theme_tag MUST be exactly one of the theme_tags you generated.
-   - All objects must be concrete, drawable, physical nouns.
-   - No branding, no logos, no text on objects.
-
-3. Pairing rules (for ads array):
-   - A.object != B.object (no same main object type on both sides).
-   - A and B must have similar MAIN object silhouette (ignore sub_object for shape comparison).
-   - shape_score should be high (aim 85+).
-   - Do not reuse the same main object across the 3 ads if possible.
-   - a_id and b_id must be valid IDs from object_list.
-
-4. Headlines:
-   - English only, ALL CAPS.
-   - Maximum 7 words total INCLUDING product name.
-   - No punctuation (no colons, periods, etc.).
-   - Must include product name.
-
-5. Output:
-   - Return ONLY valid JSON.
-   - No markdown, no code blocks, no explanations.
-   - JSON must be parseable.
-
-Generate the complete plan now:"""
+Do NOT include explanations.
+Do NOT include extra text.
+Return JSON only."""
     
     try:
         # Use Responses API for o3-pro
