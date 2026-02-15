@@ -306,6 +306,7 @@ def _stable_object_list_fingerprint(object_list: Optional[List]) -> str:
     """
     Generate a stable fingerprint for object_list that works with both List[str] and List[Dict].
     Never sorts dicts directly - only sorts string identifiers.
+    Handles non-string types (int, float, etc.) by coercing to string.
     """
     if not object_list:
         return ""
@@ -314,9 +315,15 @@ def _stable_object_list_fingerprint(object_list: Optional[List]) -> str:
         ids = []
         for it in object_list:
             # prefer id; fallback to object+sub_object
-            _id = (it.get("id") or "").strip()
+            raw_id = it.get("id")
+            _id = (str(raw_id) if raw_id is not None else "").strip()
             if not _id:
-                _id = f'{it.get("object","")}::{it.get("sub_object","")}'
+                # Fallback: use object+sub_object (also coerce to string)
+                raw_obj = it.get("object")
+                raw_sub = it.get("sub_object")
+                obj_str = str(raw_obj) if raw_obj is not None else ""
+                sub_str = str(raw_sub) if raw_sub is not None else ""
+                _id = f'{obj_str}::{sub_str}'
             ids.append(_id)
         ids.sort()
         return hashlib.md5("|".join(ids).encode()).hexdigest()[:16]
@@ -865,12 +872,66 @@ Return JSON only:
             if len(object_list) != OBJECT_LIST_TARGET:
                 logger.warning(f"STEP0_BUNDLE: object_list length={len(object_list)}, expected={OBJECT_LIST_TARGET}")
             
-            # Validate each item has required fields
+            # Validate and normalize each item (coerce types, strip strings)
+            normalized_items = []
             for i, item in enumerate(object_list):
                 if not isinstance(item, dict):
                     raise ValueError(f"Item {i} is not a dict")
-                if not item.get("id") or not item.get("object") or not item.get("sub_object") or not item.get("classic_context"):
-                    raise ValueError(f"Item {i} missing required fields (id/object/sub_object/classic_context)")
+                
+                # Coerce types to string and strip
+                raw_id = item.get("id")
+                raw_object = item.get("object")
+                raw_sub_object = item.get("sub_object")
+                raw_classic_context = item.get("classic_context")
+                raw_theme_link = item.get("theme_link")
+                raw_theme_tag = item.get("theme_tag")
+                
+                # Coerce and log if type changed
+                if raw_id is not None and not isinstance(raw_id, str):
+                    logger.warning(f"STEP0_BUNDLE_COERCE: id_type={type(raw_id).__name__} -> str, id={raw_id}")
+                item["id"] = str(raw_id) if raw_id is not None else ""
+                
+                if raw_object is not None and not isinstance(raw_object, str):
+                    logger.warning(f"STEP0_BUNDLE_COERCE: object_type={type(raw_object).__name__} -> str, object={raw_object}")
+                item["object"] = str(raw_object) if raw_object is not None else ""
+                
+                if raw_sub_object is not None and not isinstance(raw_sub_object, str):
+                    logger.warning(f"STEP0_BUNDLE_COERCE: sub_object_type={type(raw_sub_object).__name__} -> str, sub_object={raw_sub_object}")
+                item["sub_object"] = str(raw_sub_object) if raw_sub_object is not None else ""
+                
+                if raw_classic_context is not None and not isinstance(raw_classic_context, str):
+                    logger.warning(f"STEP0_BUNDLE_COERCE: classic_context_type={type(raw_classic_context).__name__} -> str")
+                item["classic_context"] = str(raw_classic_context) if raw_classic_context is not None else ""
+                
+                # Optional fields (coerce if present)
+                if raw_theme_link is not None:
+                    if not isinstance(raw_theme_link, str):
+                        logger.warning(f"STEP0_BUNDLE_COERCE: theme_link_type={type(raw_theme_link).__name__} -> str")
+                    item["theme_link"] = str(raw_theme_link)
+                
+                if raw_theme_tag is not None:
+                    if not isinstance(raw_theme_tag, str):
+                        logger.warning(f"STEP0_BUNDLE_COERCE: theme_tag_type={type(raw_theme_tag).__name__} -> str")
+                    item["theme_tag"] = str(raw_theme_tag)
+                
+                # Strip all string fields
+                item["id"] = item["id"].strip()
+                item["object"] = item["object"].strip()
+                item["sub_object"] = item["sub_object"].strip()
+                item["classic_context"] = item["classic_context"].strip()
+                if "theme_link" in item:
+                    item["theme_link"] = item["theme_link"].strip()
+                if "theme_tag" in item:
+                    item["theme_tag"] = item["theme_tag"].strip()
+                
+                # Validate required fields are not empty after stripping
+                if not item["id"] or not item["object"] or not item["sub_object"] or not item["classic_context"]:
+                    raise ValueError(f"Item {i} missing required fields after normalization (id/object/sub_object/classic_context)")
+                
+                normalized_items.append(item)
+            
+            # Replace object_list with normalized version
+            object_list = normalized_items
             
             hard_mode = difficulty_score > 80
             logger.info(f"AD_GOAL={ad_goal}")
@@ -1697,11 +1758,15 @@ def select_three_pairs_single_call(
         model_name = os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
     
     # Format object list for prompt (only id, object, shape_hint - ignore sub_object for similarity)
+    # Normalize all values to string for safe formatting
     object_list_lines = []
     for item in object_list:
-        item_id = item.get("id", "")
-        main_object = item.get("object", "")
-        shape_hint = item.get("shape_hint", "")
+        raw_id = item.get("id")
+        raw_object = item.get("object")
+        raw_shape_hint = item.get("shape_hint")
+        item_id = str(raw_id) if raw_id is not None else ""
+        main_object = str(raw_object) if raw_object is not None else ""
+        shape_hint = str(raw_shape_hint) if raw_shape_hint is not None else ""
         object_list_lines.append(f"- id: {item_id}, object: {main_object}, shape_hint: {shape_hint}")
     
     object_list_formatted = "\n".join(object_list_lines)
@@ -1748,8 +1813,15 @@ LIST:
 Return ONLY a JSON array as specified. No other text."""
     
     # Build ID to item mapping for validation
-    id_to_item = {item.get("id"): item for item in object_list}
-    id_to_main_object = {item.get("id"): item.get("object", "").lower().strip() for item in object_list}  # Normalized for comparison
+    # Normalize all ids to string for consistent comparison
+    id_to_item = {}
+    id_to_main_object = {}
+    for item in object_list:
+        raw_id = item.get("id")
+        normalized_id = str(raw_id) if raw_id is not None else ""
+        id_to_item[normalized_id] = item
+        raw_object = item.get("object", "")
+        id_to_main_object[normalized_id] = str(raw_object).lower().strip() if raw_object else ""
     
     max_retries = 3  # Increased from 2 to 3
     last_raw_response = None
@@ -1826,14 +1898,18 @@ Return ONLY a JSON array as specified. No other text."""
                 if not isinstance(pair, dict):
                     raise ValueError(f"Pair must be dict, got {type(pair)}")
                 
-                a_id = pair.get("a_id", "")
-                b_id = pair.get("b_id", "")
+                raw_a_id = pair.get("a_id", "")
+                raw_b_id = pair.get("b_id", "")
+                
+                # Normalize ids to string for comparison
+                a_id = str(raw_a_id) if raw_a_id is not None else ""
+                b_id = str(raw_b_id) if raw_b_id is not None else ""
                 
                 # Check IDs exist
                 if a_id not in id_to_item:
-                    raise ValueError(f"a_id '{a_id}' not found in object_list")
+                    raise ValueError(f"a_id '{a_id}' (raw: {raw_a_id}, type: {type(raw_a_id).__name__}) not found in object_list")
                 if b_id not in id_to_item:
-                    raise ValueError(f"b_id '{b_id}' not found in object_list")
+                    raise ValueError(f"b_id '{b_id}' (raw: {raw_b_id}, type: {type(raw_b_id).__name__}) not found in object_list")
                 
                 # Get main objects (normalized for comparison)
                 a_main = id_to_main_object.get(a_id, "").lower().strip()
@@ -1998,7 +2074,8 @@ def select_pair_from_three_pairs(
     
     # Cache key for 3 pairs (shared across all ad_index in same session)
     # Use object_list hash for cache key stability
-    object_list_hash = hashlib.md5(json.dumps([item.get("id") for item in object_list], sort_keys=True).encode()).hexdigest()[:16]
+    # Normalize ids to string for hash calculation
+    object_list_hash = hashlib.md5(json.dumps([str(item.get("id")) if item.get("id") is not None else "" for item in object_list], sort_keys=True).encode()).hexdigest()[:16]
     cache_key = f"THREE_PAIRS|{sid}|{ad_goal}|{image_size}|{object_list_hash}"
     
     # Check cache
@@ -2035,15 +2112,19 @@ def select_pair_from_three_pairs(
         raise ValueError(f"PAIRSET_EMPTY_FOR_AD_INDEX: Pair index {pair_index} out of range (got {len(three_pairs)} pairs) for ad_index={ad_index}")
     
     selected_pair = three_pairs[pair_index]
-    a_id = selected_pair.get("a_id")
-    b_id = selected_pair.get("b_id")
+    raw_a_id = selected_pair.get("a_id")
+    raw_b_id = selected_pair.get("b_id")
     
-    if not a_id or not b_id:
+    if raw_a_id is None or raw_b_id is None:
         raise ValueError(f"PAIRSET_EMPTY_FOR_AD_INDEX: Invalid pair at index {pair_index}: missing a_id or b_id")
     
-    # Find items in object_list
-    item_a = next((item for item in object_list if item.get("id") == a_id), None)
-    item_b = next((item for item in object_list if item.get("id") == b_id), None)
+    # Normalize ids to string for comparison
+    a_id = str(raw_a_id)
+    b_id = str(raw_b_id)
+    
+    # Find items in object_list (normalize id for comparison)
+    item_a = next((item for item in object_list if str(item.get("id")) == a_id), None)
+    item_b = next((item for item in object_list if str(item.get("id")) == b_id), None)
     
     if not item_a or not item_b:
         raise ValueError(f"PAIRSET_EMPTY_FOR_AD_INDEX: Could not find items for ids: {a_id}, {b_id}")
@@ -2443,8 +2524,10 @@ def select_pair_with_limited_shape_search(
     # Fallback: use best pair if >= 70 (0-100 scale)
     if best_pair_result and best_score >= 70:
         # Find theme info for best_pair_result
-        obj_a_item_fallback = next((it for it in search_objects if it.get("id") == best_pair_result["object_a_id"]), None)
-        obj_b_item_fallback = next((it for it in search_objects if it.get("id") == best_pair_result["object_b_id"]), None)
+        obj_a_id_str = str(best_pair_result["object_a_id"]) if best_pair_result.get("object_a_id") is not None else ""
+        obj_b_id_str = str(best_pair_result["object_b_id"]) if best_pair_result.get("object_b_id") is not None else ""
+        obj_a_item_fallback = next((it for it in search_objects if str(it.get("id")) == obj_a_id_str), None)
+        obj_b_item_fallback = next((it for it in search_objects if str(it.get("id")) == obj_b_id_str), None)
         
         obj_a_theme = obj_a_item_fallback.get("theme_tag", "") if obj_a_item_fallback else ""
         obj_b_theme = obj_b_item_fallback.get("theme_tag", "") if obj_b_item_fallback else ""
@@ -4854,9 +4937,11 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
             object_b_item = None
             if object_list and isinstance(object_list[0], dict):
                 if object_a_id:
-                    object_a_item = next((item for item in object_list if item.get("id") == object_a_id), None)
+                    object_a_id_str = str(object_a_id) if object_a_id is not None else ""
+                    object_a_item = next((item for item in object_list if str(item.get("id")) == object_a_id_str), None)
                 if object_b_id:
-                    object_b_item = next((item for item in object_list if item.get("id") == object_b_id), None)
+                    object_b_id_str = str(object_b_id) if object_b_id is not None else ""
+                    object_b_item = next((item for item in object_list if str(item.get("id")) == object_b_id_str), None)
                 # Fallback to name matching if id not found
                 if not object_a_item:
                     object_a_item = next((item for item in object_list if item.get("object") == object_a_name), None)
@@ -5230,8 +5315,10 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
             shape_score = pair_result.get("shape_similarity_score", 0)
             
             # Get full item objects for context
-            object_a_item = next((item for item in object_list if item.get("id") == object_a_id), None)
-            object_b_item = next((item for item in object_list if item.get("id") == object_b_id), None)
+            object_a_id_str = str(object_a_id) if object_a_id is not None else ""
+            object_b_id_str = str(object_b_id) if object_b_id is not None else ""
+            object_a_item = next((item for item in object_list if str(item.get("id")) == object_a_id_str), None)
+            object_b_item = next((item for item in object_list if str(item.get("id")) == object_b_id_str), None)
             
             if not object_a_item or not object_b_item:
                 raise ValueError(f"Could not find items for ids: {object_a_id}, {object_b_id}")
