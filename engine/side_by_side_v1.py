@@ -49,7 +49,7 @@ ENABLE_STEP1_CACHE = os.environ.get("ENABLE_STEP1_CACHE", "1") == "1"  # Cache S
 STEP1_CACHE_TTL_SECONDS = int(os.environ.get("STEP1_CACHE_TTL_SECONDS", "1800"))  # STEP 1 cache TTL
 
 # Cache key versioning and diversity
-CACHE_KEY_VERSION = os.environ.get("CACHE_KEY_VERSION", "v3")  # Cache key version (incremented to invalidate old cache)
+CACHE_KEY_VERSION = os.environ.get("CACHE_KEY_VERSION", "v4")  # Cache key version (incremented to invalidate old cache)
 ENABLE_DIVERSITY_GUARD = os.environ.get("ENABLE_DIVERSITY_GUARD", "1") == "1"  # Diversity guard to prevent repetition
 DIVERSITY_GUARD_TTL_SECONDS = 1800  # 30 minutes TTL for diversity guard
 
@@ -726,6 +726,193 @@ def parse_image_size(image_size: str) -> Tuple[int, int]:
     except (ValueError, AttributeError):
         logger.warning(f"Invalid imageSize '{image_size}', falling back to 1536x1024")
         return (1536, 1024)
+
+
+def build_step0_bundle(
+    product_name: str,
+    product_description: str,
+    language: str = "en",
+    max_retries: int = 2
+) -> Dict:
+    """
+    STEP 0 - UNIFIED BUNDLE: ad_goal + difficulty_score + object_list(150)
+    
+    Single call to OPENAI_TEXT_MODEL that returns:
+    {
+      "ad_goal": "6-12 words English sentence",
+      "difficulty_score": 0-100,
+      "object_list": [150 items with id/object/sub_object/classic_context/theme_link/shape_hint/theme_tag]
+    }
+    
+    Args:
+        product_name: Product name
+        product_description: Product description
+        language: Language (default: "en")
+        max_retries: Maximum retry attempts
+    
+    Returns:
+        Dict with ad_goal, difficulty_score, object_list
+    """
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    model_name = os.environ.get("OPENAI_TEXT_MODEL", "o4-mini")
+    
+    prompt = f"""Generate a complete advertising bundle in one JSON response.
+
+Product name: {product_name}
+Product description: {product_description}
+Language: English
+
+TASK:
+1) Generate AD_GOAL:
+   - One sentence, 6-12 words, English
+   - Clear commercial intent
+
+2) Generate DIFFICULTY_SCORE:
+   - Number 0-100
+   - Represents: "How difficult is it to generate 150 items that are all directly related to ad_goal?"
+   - 0 = easy (generic products, everyday items)
+   - 100 = nearly impossible (highly abstract services, very niche)
+   - Abstract services (AI, analytics, SaaS) typically score 70-90
+
+3) Generate OBJECT_LIST:
+   - EXACTLY 150 items
+   - Each item must contain:
+     {{
+       "id": "unique_snake_case_id",
+       "object": "main physical object",
+       "sub_object": "secondary physical object",
+       "classic_context": "3-12 words describing physical interaction",
+       "theme_link": "short direct link to ad_goal (5-12 words)",
+       "shape_hint": "short silhouette hint (e.g., round, oval, elongated, rectangular, triangular, curved_organic, cylindrical, irregular)",
+       "theme_tag": "1-2 words theme tag"
+     }}
+
+CRITICAL RULES FOR OBJECT_LIST:
+- Each item MUST be MAIN_OBJECT + SUB_OBJECT (physical sub-object, NOT environment)
+- sub_object MUST be a concrete physical object, NOT an environment
+- FORBIDDEN as sub_object: "nature", "environment", "world", "background", "scene", "forest", "ocean", "sky", "space", "ecosystem", "habitat", "setting", "context"
+- classic_context MUST include a physical preposition: "on", "in", "under", "next to", "attached to", "inside", "resting on", "landing on", "with", "lying on", "inserted into", "hanging from", "touching", "holding", "opening", "closing"
+- classic_context MUST explicitly mention sub_object
+- theme_link MUST directly link the object to ad_goal (not generic marketing)
+- No logos, brand names, labels, printed text, numbers, barcodes, signage, packaging graphics
+- All objects must be generic and unbranded
+
+Return JSON only:
+{{
+  "ad_goal": "...",
+  "difficulty_score": 0-100,
+  "object_list": [150 items]
+}}"""
+    
+    max_attempts = max_retries + 1
+    for attempt in range(max_attempts):
+        try:
+            logger.info(f"STEP0_BUNDLE attempt={attempt+1} model={model_name} product={product_name[:50]}")
+            
+            # Use Responses API for o* models
+            is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
+            if is_o_model:
+                response = client.responses.create(model=model_name, input=prompt)
+                response_text = response.output_text.strip()
+            else:
+                # Fallback to Chat Completions
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": "You are an advertising content generator. Output must be in English only. Return JSON only without additional text."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=8000
+                )
+                response_text = response.choices[0].message.content.strip()
+            
+            # Parse JSON
+            if response_text.startswith("```"):
+                lines = response_text.split('\n')
+                response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+            if response_text.startswith("```json"):
+                lines = response_text.split('\n')
+                response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+            
+            bundle = json.loads(response_text)
+            
+            # Validation
+            if not isinstance(bundle, dict):
+                raise ValueError("Response is not a dict")
+            
+            ad_goal = bundle.get("ad_goal", "").strip()
+            if not ad_goal:
+                raise ValueError("Missing ad_goal")
+            
+            difficulty_score = bundle.get("difficulty_score")
+            if difficulty_score is None:
+                raise ValueError("Missing difficulty_score")
+            try:
+                difficulty_score = float(difficulty_score)
+                if difficulty_score < 0 or difficulty_score > 100:
+                    raise ValueError(f"difficulty_score out of range: {difficulty_score}")
+            except (ValueError, TypeError):
+                raise ValueError(f"Invalid difficulty_score: {difficulty_score}")
+            
+            object_list = bundle.get("object_list", [])
+            if not isinstance(object_list, list):
+                raise ValueError("object_list is not a list")
+            
+            if len(object_list) == 0:
+                raise ValueError("OBJECT_LIST_EMPTY")
+            
+            if len(object_list) != OBJECT_LIST_TARGET:
+                logger.warning(f"STEP0_BUNDLE: object_list length={len(object_list)}, expected={OBJECT_LIST_TARGET}")
+            
+            # Validate each item has required fields
+            for i, item in enumerate(object_list):
+                if not isinstance(item, dict):
+                    raise ValueError(f"Item {i} is not a dict")
+                if not item.get("id") or not item.get("object") or not item.get("sub_object") or not item.get("classic_context"):
+                    raise ValueError(f"Item {i} missing required fields (id/object/sub_object/classic_context)")
+            
+            hard_mode = difficulty_score > 80
+            logger.info(f"AD_GOAL={ad_goal}")
+            logger.info(f"DIFFICULTY_SCORE={difficulty_score} HARD_MODE={hard_mode}")
+            logger.info(f"STEP0_BUNDLE SUCCESS: ad_goal={ad_goal[:50]}, difficulty_score={difficulty_score}, object_list_size={len(object_list)}")
+            
+            return {
+                "ad_goal": ad_goal,
+                "difficulty_score": difficulty_score,
+                "object_list": object_list
+            }
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"STEP0_BUNDLE JSON parse error (attempt {attempt+1}/{max_attempts}): {e}")
+            if attempt < max_attempts - 1:
+                prompt = f"""Fix JSON only. Return valid JSON:
+{{
+  "ad_goal": "...",
+  "difficulty_score": 0-100,
+  "object_list": [150 items]
+}}"""
+                continue
+            raise ValueError(f"STEP0_BUNDLE_PARSE_ERROR: Failed to parse JSON after {max_attempts} attempts: {e}")
+        except ValueError as e:
+            error_msg = str(e)
+            if "STEP0_BUNDLE_PARSE_ERROR" in error_msg or "OBJECT_LIST_EMPTY" in error_msg:
+                raise
+            logger.warning(f"STEP0_BUNDLE validation error (attempt {attempt+1}/{max_attempts}): {error_msg}")
+            if attempt < max_attempts - 1:
+                prompt = f"""Fix JSON only. Return valid JSON with:
+- ad_goal (string)
+- difficulty_score (number 0-100)
+- object_list (array of 150 items, each with id/object/sub_object/classic_context/theme_link/shape_hint/theme_tag)"""
+                continue
+            raise ValueError(f"STEP0_BUNDLE_VALIDATION_ERROR: {error_msg}")
+        except Exception as e:
+            logger.error(f"STEP0_BUNDLE failed (attempt {attempt+1}/{max_attempts}): {e}")
+            if attempt < max_attempts - 1:
+                continue
+            raise
+    
+    raise ValueError("STEP0_BUNDLE_FAILED: Failed after all retries")
 
 
 def build_object_list_from_ad_goal(
@@ -1642,7 +1829,29 @@ After response (server-side validation):
                 
                 validated_pairs.append({"a_id": a_id, "b_id": b_id})
             
+            # Final validation: ensure exactly 3 pairs, all ids exist, no repeated main objects
+            if len(validated_pairs) != 3:
+                raise ValueError(f"PAIRSET_INVALID: Expected 3 pairs, got {len(validated_pairs)}")
+            
+            # Validate all ids exist
+            for pair in validated_pairs:
+                if pair.get("a_id") not in id_to_item or pair.get("b_id") not in id_to_item:
+                    raise ValueError(f"PAIRSET_INVALID: Invalid id in pair {pair}")
+            
+            # Validate no repeated main objects across all pairs
+            all_main_objects = []
+            for pair in validated_pairs:
+                a_id = pair.get("a_id")
+                b_id = pair.get("b_id")
+                a_main = id_to_main_object.get(a_id, "")
+                b_main = id_to_main_object.get(b_id, "")
+                all_main_objects.extend([a_main, b_main])
+            
+            if len(all_main_objects) != len(set(all_main_objects)):
+                raise ValueError(f"PAIRSET_INVALID: Repeated main objects found: {all_main_objects}")
+            
             logger.info(f"SELECT_THREE_PAIRS SUCCESS: pairs={validated_pairs}")
+            logger.info(f"PAIRSET_PICKED ids={[(p.get('a_id'), p.get('b_id')) for p in validated_pairs]}")
             return validated_pairs
             
         except json.JSONDecodeError as e:
@@ -1675,14 +1884,14 @@ LIST:
 
 Return JSON array only."""
                 continue
-            raise ValueError(f"PARSE_ERROR: Validation failed after {max_retries} attempts: {error_msg}")
+            raise ValueError(f"PAIRSET_INVALID: Validation failed after {max_retries} attempts: {error_msg}")
         except Exception as e:
             logger.error(f"SELECT_THREE_PAIRS failed (attempt {attempt+1}/{max_retries}): {e}")
             if attempt < max_retries - 1:
                 continue
-            raise
+            raise ValueError(f"PAIRSET_INVALID: Failed after all retries: {e}")
     
-    raise ValueError("PARSE_ERROR: Failed to select 3 pairs after all retries")
+    raise ValueError("PAIRSET_INVALID: Failed to select 3 pairs after all retries")
 
 
 def select_pair_from_three_pairs(
@@ -1747,20 +1956,27 @@ def select_pair_from_three_pairs(
             _three_pairs_cache[cache_key] = (three_pairs, time.time())
         logger.info(f"THREE_PAIRS_CACHE miss=true key={cache_key[:16]}... generated 3 pairs")
     
+    # Guard: Validate three_pairs is not empty
+    if not three_pairs or len(three_pairs) == 0:
+        raise ValueError("PAIRSET_EMPTY_FOR_AD_INDEX: No pairs available")
+    
     # Get the pair for this ad_index
     if pair_index >= len(three_pairs):
-        raise ValueError(f"Pair index {pair_index} out of range (got {len(three_pairs)} pairs)")
+        raise ValueError(f"PAIRSET_EMPTY_FOR_AD_INDEX: Pair index {pair_index} out of range (got {len(three_pairs)} pairs) for ad_index={ad_index}")
     
     selected_pair = three_pairs[pair_index]
-    a_id = selected_pair["a_id"]
-    b_id = selected_pair["b_id"]
+    a_id = selected_pair.get("a_id")
+    b_id = selected_pair.get("b_id")
+    
+    if not a_id or not b_id:
+        raise ValueError(f"PAIRSET_EMPTY_FOR_AD_INDEX: Invalid pair at index {pair_index}: missing a_id or b_id")
     
     # Find items in object_list
     item_a = next((item for item in object_list if item.get("id") == a_id), None)
     item_b = next((item for item in object_list if item.get("id") == b_id), None)
     
     if not item_a or not item_b:
-        raise ValueError(f"Could not find items for ids: {a_id}, {b_id}")
+        raise ValueError(f"PAIRSET_EMPTY_FOR_AD_INDEX: Could not find items for ids: {a_id}, {b_id}")
     
     object_a_name = item_a.get("object", "")
     object_b_name = item_b.get("object", "")
@@ -2641,13 +2857,154 @@ Requirements:
     raise Exception("Failed to select shape pair after retries")
 
 
+def generate_marketing_copy(
+    product_name: str,
+    product_description: str,
+    ad_goal: str,
+    max_retries: int = 2
+) -> str:
+    """
+    Generate marketing copy: 45-55 words, English, product-specific, with CTA.
+    
+    Args:
+        product_name: Product name
+        product_description: Product description
+        ad_goal: Advertising goal
+        max_retries: Maximum retry attempts
+    
+    Returns:
+        str: Marketing copy (45-55 words)
+    """
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    model_name = os.environ.get("OPENAI_TEXT_MODEL", "o4-mini")
+    
+    prompt = f"""Generate marketing copy for an advertisement.
+
+Product name: {product_name}
+Product description: {product_description}
+Advertising goal: {ad_goal}
+
+Requirements:
+- English only
+- Exactly 45-55 words (count carefully)
+- Must include product name
+- Must be product-specific (not generic marketing language)
+- Must include one short CTA (call-to-action) at the end
+- Professional, compelling, clear
+- No fluff, no generic phrases
+
+Marketing copy:"""
+    
+    max_attempts = max_retries + 1
+    for attempt in range(max_attempts):
+        try:
+            logger.info(f"MARKETING_COPY attempt={attempt+1} model={model_name} product={product_name[:50]}")
+            
+            # Use Responses API for o* models
+            is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
+            if is_o_model:
+                response = client.responses.create(model=model_name, input=prompt)
+                copy_text = response.output_text.strip()
+            else:
+                # Fallback to Chat Completions
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": "You are a marketing copywriter. Output must be in English only. Return only the marketing copy text, no JSON, no quotes."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=200
+                )
+                copy_text = response.choices[0].message.content.strip()
+            
+            # Clean copy
+            copy_text = copy_text.strip('"\'')
+            
+            # Count words
+            words = copy_text.split()
+            word_count = len(words)
+            
+            # Validate word count
+            if word_count < 45:
+                if attempt < max_attempts - 1:
+                    logger.warning(f"MARKETING_COPY: word_count={word_count} < 45, retrying...")
+                    prompt = f"""Generate marketing copy for an advertisement.
+
+Product name: {product_name}
+Product description: {product_description}
+Advertising goal: {ad_goal}
+
+Requirements:
+- English only
+- MUST be 45-55 words (current attempt was {word_count} words - too short)
+- Must include product name
+- Must be product-specific (not generic marketing language)
+- Must include one short CTA (call-to-action) at the end
+- Professional, compelling, clear
+- No fluff, no generic phrases
+
+Marketing copy:"""
+                    continue
+                else:
+                    # Final attempt: pad with product-specific content
+                    logger.warning(f"MARKETING_COPY: word_count={word_count} < 45, padding...")
+                    needed = 45 - word_count
+                    padding = f"{product_name} delivers on {ad_goal.lower()}. " * (needed // 3 + 1)
+                    copy_text = f"{copy_text} {padding}".strip()
+                    words = copy_text.split()
+                    copy_text = " ".join(words[:55])  # Cap at 55
+            elif word_count > 55:
+                if attempt < max_attempts - 1:
+                    logger.warning(f"MARKETING_COPY: word_count={word_count} > 55, retrying...")
+                    prompt = f"""Generate marketing copy for an advertisement.
+
+Product name: {product_name}
+Product description: {product_description}
+Advertising goal: {ad_goal}
+
+Requirements:
+- English only
+- MUST be 45-55 words (current attempt was {word_count} words - too long)
+- Must include product name
+- Must be product-specific (not generic marketing language)
+- Must include one short CTA (call-to-action) at the end
+- Professional, compelling, clear
+- No fluff, no generic phrases
+
+Marketing copy:"""
+                    continue
+                else:
+                    # Final attempt: truncate to 55 words
+                    logger.warning(f"MARKETING_COPY: word_count={word_count} > 55, truncating...")
+                    words = copy_text.split()
+                    copy_text = " ".join(words[:55])
+            
+            final_word_count = len(copy_text.split())
+            logger.info(f"MARKETING_COPY SUCCESS: word_count={final_word_count} copy='{copy_text[:100]}...'")
+            return copy_text
+            
+        except Exception as e:
+            logger.error(f"MARKETING_COPY failed (attempt {attempt+1}/{max_attempts}): {e}")
+            if attempt < max_attempts - 1:
+                continue
+            # Fallback: return minimal copy
+            logger.warning(f"MARKETING_COPY: Using fallback copy")
+            return f"{product_name} helps you achieve {ad_goal.lower()}. Discover how {product_name} can transform your workflow. Get started today."
+    
+    # Final fallback
+    return f"{product_name} helps you achieve {ad_goal.lower()}. Discover how {product_name} can transform your workflow. Get started today."
+
+
 def generate_headline_only(
     product_name: str,
     message: str,
     object_a: str,
     object_b: str,
     headline_placement: Optional[str] = None,
-    max_retries: int = 3
+    max_retries: int = 3,
+    hard_mode: bool = False,
+    ad_goal: Optional[str] = None
 ) -> str:
     """
     STEP 2 - HEADLINE GENERATION
@@ -2673,23 +3030,32 @@ def generate_headline_only(
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     model_name = os.environ.get("OPENAI_TEXT_MODEL", "o4-mini")
     
-    logger.info(f"STEP 2 - HEADLINE GENERATION: text_model={model_name}, productName={product_name[:50]}, message={message[:50]}, object_a={object_a}, object_b={object_b}")
+    logger.info(f"STEP 2 - HEADLINE GENERATION: text_model={model_name}, productName={product_name[:50]}, message={message[:50]}, object_a={object_a}, object_b={object_b}, hard_mode={hard_mode}")
     
+    # HARD_MODE logic: if False, return product_name only (no model call)
+    if not hard_mode:
+        headline = product_name.upper()
+        words_count = len(headline.split())
+        logger.info(f"HEADLINE_POLICY hard_mode=False headline_words={words_count} headline='{headline}'")
+        return headline
+    
+    # HARD_MODE: Generate full headline via model
+    ad_goal_context = f"\nAdvertising goal: {ad_goal}" if ad_goal else ""
     prompt = f"""Generate a headline for an advertisement.
 
 Product name: {product_name}
-Message: {message}
+Message: {message}{ad_goal_context}
 Objects (already selected, do not change): {object_a} and {object_b}
 
 Requirements:
 - English only
 - ALL CAPS
-- Maximum 7 words INCLUDING the product name
-- Include the product name in the headline
+- Include the product name in the headline (mandatory)
 - Do NOT mention the objects ({object_a} or {object_b}) in the headline
 - Do NOT change or re-select the objects
 - No punctuation (no colons, commas, periods, etc.)
 - Return ONLY the headline text, no JSON, no quotes
+- Full headline (no word limit restriction)
 
 Headline:"""
 
@@ -2750,28 +3116,11 @@ Headline:"""
                 headline = f"{product_name_upper} {headline}".strip()
                 headline_words = headline.split()
             
-            # Validate: max 7 words including productName
-            if len(headline_words) > 7:
-                # Try to keep product name + first words
-                if len(product_words) <= 7:
-                    remaining = 7 - len(product_words)
-                    other_words = [w for w in headline_words if w not in product_words][:remaining]
-                    headline = " ".join(product_words + other_words)
-                else:
-                    # If product name itself is > 7 words, truncate to first 7 words
-                    headline = " ".join(headline_words[:7])
-            
-            # Final validation: ensure product name is still in headline after truncation
-            headline_words_final = headline.split()
-            product_in_headline_final = any(word in headline_words_final for word in product_words)
-            if not product_in_headline_final:
-                # Force add product name at the beginning (even if it exceeds 7 words)
-                headline = f"{product_name_upper} {' '.join(headline_words_final)}".strip()
-                logger.warning(f"STEP 2 - HEADLINE: Product name forced into headline (may exceed 7 words): {headline}")
+            # HARD_MODE: No truncation (full headline required)
+            # In hard_mode, we keep the full headline as generated
             
             words_count = len(headline.split())
-            placement_info = f", placement={headline_placement}" if headline_placement else ""
-            logger.info(f"STEP 2 - HEADLINE GENERATION SUCCESS: headline={headline}, words_count={words_count}{placement_info}")
+            logger.info(f"HEADLINE_POLICY hard_mode=True headline_words={words_count} headline='{headline}'")
             return headline
             
         except Exception as e:
@@ -4068,6 +4417,11 @@ def render_final_ad_bytes(
     if use_replacement_mode:
         selected_mode = "replacement"
         logger.info(f"SILHOUETTE_DECISION: overlap={silhouette_overlap}% >= {SILHOUETTE_THRESHOLD}% → REPLACEMENT mode")
+        
+        # REPLACEMENT GUARD: A.sub_object must exist
+        if not object_a_sub or object_a_sub.strip() == "":
+            raise ValueError("REPLACEMENT_MISSING_A_SUB_OBJECT: A.sub_object is missing or empty, cannot generate replacement image")
+        
         logger.info(f"REPLACEMENT_INPUT A={object_a_name} A_sub={object_a_sub} A_ctx={object_a_context} | B={object_b_name} B_sub={object_b_sub}")
     else:
         selected_mode = "side_by_side"
@@ -4193,30 +4547,56 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     history = payload_dict.get("history", [])
     object_list = payload_dict.get("objectList")
     
-    # A) Build ad_goal from productName + productDescription (NEW - not from history)
-    ad_goal = build_ad_goal(product_name, product_description)
-    logger.info(f"AD_GOAL={ad_goal}")
+    # A) STEP 0 - UNIFIED BUNDLE: ad_goal + difficulty_score + object_list(150)
+    step0_cache_hit = False
+    step0_cache_key = None
+    hard_mode = False
+    difficulty_score = 50  # Default
+    
+    if not object_list or len(object_list) < OBJECT_LIST_MIN_OK:
+        # Build step0 bundle (ad_goal + difficulty_score + object_list)
+        # Cache key includes product_name + product_description hash
+        product_hash = hashlib.sha256(f"{product_name}|{product_description}".encode()).hexdigest()[:16]
+        step0_cache_key = f"STEP0_BUNDLE|{product_hash}|{language}|{CACHE_KEY_VERSION}"
+        
+        # Check cache
+        with _step0_cache_lock:
+            if step0_cache_key in _step0_cache:
+                cached_data, timestamp = _step0_cache[step0_cache_key]
+                if time.time() - timestamp < STEP0_CACHE_TTL_SECONDS:
+                    step0_bundle = cached_data
+                    step0_cache_hit = True
+                    logger.info(f"[{request_id}] STEP0_BUNDLE_CACHE hit=true key={step0_cache_key[:16]}...")
+                else:
+                    del _step0_cache[step0_cache_key]
+        
+        if not step0_cache_hit:
+            step0_bundle = build_step0_bundle(product_name, product_description, language=language)
+            # Cache the bundle
+            with _step0_cache_lock:
+                _step0_cache[step0_cache_key] = (step0_bundle, time.time())
+            logger.info(f"[{request_id}] STEP0_BUNDLE_CACHE miss=true key={step0_cache_key[:16]}...")
+        
+        ad_goal = step0_bundle["ad_goal"]
+        difficulty_score = step0_bundle["difficulty_score"]
+        object_list = step0_bundle["object_list"]
+        hard_mode = difficulty_score > 80
+    else:
+        # Use provided object_list, but still need ad_goal and difficulty_score
+        # For now, build ad_goal separately (fallback)
+        ad_goal = build_ad_goal(product_name, product_description)
+        difficulty_score = 50  # Default if not provided
+        hard_mode = difficulty_score > 80
+        logger.warning(f"[{request_id}] Using provided object_list, difficulty_score defaulted to {difficulty_score}")
     
     message = product_description if product_description else "Make a difference"
     
     # Validate and normalize
     width, height = parse_image_size(image_size_str)
     
-    # B) Build object_list in new format ({OBJECT_LIST_TARGET} items with id/object/classic_context/theme_link)
-    step0_cache_hit = False
-    if not object_list or len(object_list) < OBJECT_LIST_MIN_OK:
-        # Build from ad_goal
-        step0_cache_key = _get_cache_key_step0(ad_goal, product_name, language, session_seed=session_id)  # Shared across ads in same session
-        cached_step0_list = _get_from_step0_cache(step0_cache_key)
-        if cached_step0_list:
-            step0_cache_hit = True
-            object_list = cached_step0_list
-            logger.info(f"[{request_id}] STEP 0 - Using cached objectList (size={len(object_list)})")
-        else:
-            object_list = build_object_list_from_ad_goal(ad_goal, product_name, language=language)
-    else:
-        # Validate existing object_list (convert if needed)
-        object_list = validate_object_list(object_list, ad_goal=ad_goal, product_name=product_name, language=language)
+    # Guard: Ensure object_list is not empty
+    if not object_list or len(object_list) == 0:
+        raise ValueError("OBJECT_LIST_EMPTY")
     
     # Log objectList stats
     object_list_sha = hashlib.sha256(json.dumps(object_list, sort_keys=True).encode()).hexdigest()[:16]
@@ -4439,7 +4819,9 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                 object_a=object_a,
                 object_b=object_b,
                 headline_placement=None,  # No headline_placement in SIDE BY SIDE mode
-                max_retries=3
+                max_retries=3,
+                hard_mode=hard_mode,
+                ad_goal=ad_goal
             )
             t_headline_ms = int((time.time() - t_headline_start) * 1000)
             logger.info(f"[{request_id}] STEP 2 SUCCESS: headline={headline}")
@@ -4624,30 +5006,56 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     history = payload_dict.get("history", [])
     object_list = payload_dict.get("objectList")
     
-    # A) Build ad_goal from productName + productDescription (NEW - not from history)
-    ad_goal = build_ad_goal(product_name, product_description)
-    logger.info(f"AD_GOAL={ad_goal}")
+    # A) STEP 0 - UNIFIED BUNDLE: ad_goal + difficulty_score + object_list(150)
+    step0_cache_hit = False
+    step0_cache_key = None
+    hard_mode = False
+    difficulty_score = 50  # Default
+    
+    if not object_list or len(object_list) < OBJECT_LIST_MIN_OK:
+        # Build step0 bundle (ad_goal + difficulty_score + object_list)
+        # Cache key includes product_name + product_description hash
+        product_hash = hashlib.sha256(f"{product_name}|{product_description}".encode()).hexdigest()[:16]
+        step0_cache_key = f"STEP0_BUNDLE|{product_hash}|{language}|{CACHE_KEY_VERSION}"
+        
+        # Check cache
+        with _step0_cache_lock:
+            if step0_cache_key in _step0_cache:
+                cached_data, timestamp = _step0_cache[step0_cache_key]
+                if time.time() - timestamp < STEP0_CACHE_TTL_SECONDS:
+                    step0_bundle = cached_data
+                    step0_cache_hit = True
+                    logger.info(f"[{request_id}] STEP0_BUNDLE_CACHE hit=true key={step0_cache_key[:16]}...")
+                else:
+                    del _step0_cache[step0_cache_key]
+        
+        if not step0_cache_hit:
+            step0_bundle = build_step0_bundle(product_name, product_description, language=language)
+            # Cache the bundle
+            with _step0_cache_lock:
+                _step0_cache[step0_cache_key] = (step0_bundle, time.time())
+            logger.info(f"[{request_id}] STEP0_BUNDLE_CACHE miss=true key={step0_cache_key[:16]}...")
+        
+        ad_goal = step0_bundle["ad_goal"]
+        difficulty_score = step0_bundle["difficulty_score"]
+        object_list = step0_bundle["object_list"]
+        hard_mode = difficulty_score > 80
+    else:
+        # Use provided object_list, but still need ad_goal and difficulty_score
+        # For now, build ad_goal separately (fallback)
+        ad_goal = build_ad_goal(product_name, product_description)
+        difficulty_score = 50  # Default if not provided
+        hard_mode = difficulty_score > 80
+        logger.warning(f"[{request_id}] Using provided object_list, difficulty_score defaulted to {difficulty_score}")
     
     message = product_description if product_description else "Make a difference"
     
     # Validate and normalize
     width, height = parse_image_size(image_size_str)
     
-    # B) Build object_list in new format ({OBJECT_LIST_TARGET} items with id/object/classic_context/theme_link)
-    step0_cache_hit = False
-    if not object_list or len(object_list) < OBJECT_LIST_MIN_OK:
-        # Build from ad_goal
-        step0_cache_key = _get_cache_key_step0(ad_goal, product_name, language, session_seed=session_id)  # Shared across ads in same session
-        cached_step0_list = _get_from_step0_cache(step0_cache_key)
-        if cached_step0_list:
-            step0_cache_hit = True
-            object_list = cached_step0_list
-            logger.info(f"[{request_id}] STEP 0 - Using cached objectList (size={len(object_list)})")
-        else:
-            object_list = build_object_list_from_ad_goal(ad_goal, product_name, language=language)
-    else:
-        # Validate existing object_list (convert if needed)
-        object_list = validate_object_list(object_list, ad_goal=ad_goal, product_name=product_name, language=language)
+    # Guard: Ensure object_list is not empty
+    if not object_list or len(object_list) == 0:
+        raise ValueError("OBJECT_LIST_EMPTY")
     
     # Log objectList stats
     object_list_sha = hashlib.sha256(json.dumps(object_list, sort_keys=True).encode()).hexdigest()[:16]
