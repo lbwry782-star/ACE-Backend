@@ -1706,55 +1706,55 @@ def select_three_pairs_single_call(
     
     object_list_formatted = "\n".join(object_list_lines)
     
-    prompt = f"""Refactor shape selection to a single model call over the full list.
-
-Critical rule:
-Silhouette similarity MUST be judged ONLY by the MAIN OBJECT (field: "object").
-The sub_object and classic_context must be ignored for similarity scoring.
-
-However:
-sub_object is mandatory for every item and will be used later in image generation (scene lock),
-so do not remove it and do not return items without sub_object.
-
-INPUT LIST ({len(object_list)} items):
-Each item has:
-id, object (MAIN), sub_object, classic_context, shape_hint
+    prompt = f"""Return JSON ONLY. Do not include any commentary, markdown, code fences, or extra text.
 
 TASK:
 Select exactly 3 pairs of items with the highest silhouette similarity of the MAIN OBJECTS ONLY.
 
-RULES:
-1) Compare ONLY the outer contour / silhouette of "object" (MAIN object).
-   Ignore sub_object, classic_context, theme_link, theme_tag for similarity.
-2) Return 3 pairs:
-   [
-     {{"a_id":"...", "b_id":"..."}},
-     {{"a_id":"...", "b_id":"..."}},
-     {{"a_id":"...", "b_id":"..."}}
-   ]
-3) Each pair must have two DIFFERENT main objects (object strings must differ).
-4) No main object may appear in more than one pair (no reuse across the 3 pairs).
-5) Prefer shape_score equivalent of 80+ (internally), but you MUST still return 3 pairs.
-   If perfect matches are unavailable, choose the best available matches.
-6) Output JSON only. No extra text.
+DEFINITION - MAIN OBJECT:
+MAIN OBJECT is the value of the 'object' field (not id). Two items share the same main object if their 'object' strings are equal after lowercasing and trimming.
+
+CRITICAL RULES:
+1) Within each pair: a.object != b.object (the two main objects must be different)
+2) Across all 3 pairs: no 'object' value may repeat (each main object appears at most once across all pairs)
+3) Output exactly 3 pairs
+4) Use only ids that exist in the provided list
+5) Prefer high silhouette similarity of MAIN OBJECT only (ignore sub_object, classic_context, theme_link, theme_tag)
+
+SIMILARITY CRITERION:
+Compare ONLY the outer contour / silhouette of the "object" field (MAIN object).
+Ignore sub_object, classic_context, theme_link, theme_tag for similarity scoring.
+
+OUTPUT FORMAT (EXACT):
+[
+  {{"a_id":"id1", "b_id":"id2"}},
+  {{"a_id":"id3", "b_id":"id4"}},
+  {{"a_id":"id5", "b_id":"id6"}}
+]
+
+EXAMPLE OUTPUT:
+[
+  {{"a_id":"leaf_1", "b_id":"petal_2"}},
+  {{"a_id":"coin_3", "b_id":"button_4"}},
+  {{"a_id":"wheel_5", "b_id":"ring_6"}}
+]
+
+INPUT LIST ({len(object_list)} items):
+Each item has: id, object (MAIN), sub_object, classic_context, shape_hint
 
 LIST:
 {object_list_formatted}
 
-NOTE:
-Do not include sub_object in the matching decision, but all selected ids must exist in the original list.
-
-After response (server-side validation):
-- Ensure exactly 3 pairs
-- Ensure ids exist
-- Ensure unique main objects across pairs
-- If invalid JSON -> retry once, otherwise fail with PARSE_ERROR."""
+Return ONLY a JSON array as specified. No other text."""
     
     # Build ID to item mapping for validation
     id_to_item = {item.get("id"): item for item in object_list}
-    id_to_main_object = {item.get("id"): item.get("object", "") for item in object_list}
+    id_to_main_object = {item.get("id"): item.get("object", "").lower().strip() for item in object_list}  # Normalized for comparison
     
-    max_retries = 2
+    max_retries = 3  # Increased from 2 to 3
+    last_raw_response = None
+    last_parse_error = None
+    
     for attempt in range(max_retries):
         try:
             logger.info(f"SELECT_THREE_PAIRS attempt={attempt+1} model={model_name} object_list_size={len(object_list)}")
@@ -1763,7 +1763,7 @@ After response (server-side validation):
             is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
             if is_o_model:
                 response = client.responses.create(model=model_name, input=prompt)
-                response_text = response.output_text.strip()
+                response_text = response.output_text
             else:
                 # Fallback to Chat Completions
                 response = client.chat.completions.create(
@@ -1775,17 +1775,42 @@ After response (server-side validation):
                     temperature=0.3,
                     max_tokens=2000
                 )
-                response_text = response.choices[0].message.content.strip()
+                response_text = response.choices[0].message.content
             
-            # Parse JSON
+            # Log raw response length
+            raw_len = len(response_text) if response_text else 0
+            logger.info(f"SELECT_THREE_PAIRS_RAW_LEN={raw_len}")
+            last_raw_response = response_text
+            
+            # Robust JSON extraction
+            response_text = response_text.strip() if response_text else ""
+            
+            # If empty, treat as parse failure
+            if not response_text:
+                raise json.JSONDecodeError("Empty response", response_text, 0)
+            
+            # Remove markdown code fences if present
             if response_text.startswith("```"):
                 lines = response_text.split('\n')
                 response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
             if response_text.startswith("```json"):
                 lines = response_text.split('\n')
                 response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+            response_text = response_text.strip()
             
-            pairs_data = json.loads(response_text)
+            # Attempt to extract JSON array if there's leading/trailing text
+            extracted_json = response_text
+            if '[' in response_text and ']' in response_text:
+                first_bracket = response_text.find('[')
+                last_bracket = response_text.rfind(']')
+                if first_bracket >= 0 and last_bracket > first_bracket:
+                    extracted_json = response_text[first_bracket:last_bracket+1]
+                    if len(extracted_json) != len(response_text):
+                        extracted_len = len(extracted_json)
+                        logger.info(f"SELECT_THREE_PAIRS_EXTRACTED_JSON_LEN={extracted_len} (extracted from {raw_len} chars)")
+            
+            # Parse JSON
+            pairs_data = json.loads(extracted_json)
             
             if not isinstance(pairs_data, list):
                 raise ValueError(f"Expected list, got {type(pairs_data)}")
@@ -1810,13 +1835,13 @@ After response (server-side validation):
                 if b_id not in id_to_item:
                     raise ValueError(f"b_id '{b_id}' not found in object_list")
                 
-                # Get main objects
-                a_main = id_to_main_object.get(a_id, "")
-                b_main = id_to_main_object.get(b_id, "")
+                # Get main objects (normalized for comparison)
+                a_main = id_to_main_object.get(a_id, "").lower().strip()
+                b_main = id_to_main_object.get(b_id, "").lower().strip()
                 
-                # Check different main objects
+                # Check different main objects within pair
                 if a_main == b_main:
-                    raise ValueError(f"Pair has same main object: {a_main} (a_id={a_id}, b_id={b_id})")
+                    raise ValueError(f"Pair has same main object: '{a_main}' (a_id={a_id}, b_id={b_id})")
                 
                 # Check no reuse across pairs
                 if a_main in used_main_objects:
@@ -1838,13 +1863,13 @@ After response (server-side validation):
                 if pair.get("a_id") not in id_to_item or pair.get("b_id") not in id_to_item:
                     raise ValueError(f"PAIRSET_INVALID: Invalid id in pair {pair}")
             
-            # Validate no repeated main objects across all pairs
+            # Validate no repeated main objects across all pairs (normalized comparison)
             all_main_objects = []
             for pair in validated_pairs:
                 a_id = pair.get("a_id")
                 b_id = pair.get("b_id")
-                a_main = id_to_main_object.get(a_id, "")
-                b_main = id_to_main_object.get(b_id, "")
+                a_main = id_to_main_object.get(a_id, "").lower().strip()
+                b_main = id_to_main_object.get(b_id, "").lower().strip()
                 all_main_objects.extend([a_main, b_main])
             
             if len(all_main_objects) != len(set(all_main_objects)):
@@ -1855,34 +1880,79 @@ After response (server-side validation):
             return validated_pairs
             
         except json.JSONDecodeError as e:
+            last_parse_error = str(e)
             logger.error(f"SELECT_THREE_PAIRS JSON parse error (attempt {attempt+1}/{max_retries}): {e}")
             if attempt < max_retries - 1:
-                continue
-            raise ValueError(f"PARSE_ERROR: Failed to parse JSON after {max_retries} attempts: {e}")
-        except ValueError as e:
-            error_msg = str(e)
-            if "PARSE_ERROR" in error_msg:
-                raise
-            logger.warning(f"SELECT_THREE_PAIRS validation error (attempt {attempt+1}/{max_retries}): {error_msg}")
-            if attempt < max_retries - 1:
-                # Retry with stricter prompt
-                prompt = f"""You must return EXACTLY 3 pairs in this format:
-[
-  {{"a_id":"<id1>", "b_id":"<id2>"}},
-  {{"a_id":"<id3>", "b_id":"<id4>"}},
-  {{"a_id":"<id5>", "b_id":"<id6>"}}
-]
+                # Retry with fix prompt including error details
+                raw_response_snippet = (last_raw_response[:200] + "...") if last_raw_response and len(last_raw_response) > 200 else (last_raw_response or "empty")
+                prompt = f"""Return JSON ONLY. Do not include any commentary, markdown, code fences, or extra text.
+
+PREVIOUS ATTEMPT FAILED:
+Error: {last_parse_error}
+Raw response (truncated): {raw_response_snippet}
+
+TASK:
+Select exactly 3 pairs of items with the highest silhouette similarity of the MAIN OBJECTS ONLY.
+
+DEFINITION - MAIN OBJECT:
+MAIN OBJECT is the value of the 'object' field (not id). Two items share the same main object if their 'object' strings are equal after lowercasing and trimming.
 
 CRITICAL RULES:
-- Each pair must have DIFFERENT main objects (check the "object" field).
-- No main object may appear in more than one pair.
-- All a_id and b_id must exist in the provided list.
-- Compare ONLY the "object" field for silhouette similarity (ignore sub_object).
+1) Within each pair: a.object != b.object (the two main objects must be different)
+2) Across all 3 pairs: no 'object' value may repeat (each main object appears at most once across all pairs)
+3) Output exactly 3 pairs
+4) Use only ids that exist in the provided list
+5) Prefer high silhouette similarity of MAIN OBJECT only (ignore sub_object, classic_context, theme_link, theme_tag)
+
+OUTPUT FORMAT (EXACT):
+[
+  {{"a_id":"id1", "b_id":"id2"}},
+  {{"a_id":"id3", "b_id":"id4"}},
+  {{"a_id":"id5", "b_id":"id6"}}
+]
 
 LIST:
 {object_list_formatted}
 
-Return JSON array only."""
+Return ONLY a JSON array as specified. No other text."""
+                continue
+            raise ValueError(f"PAIRSET_INVALID: Failed to parse JSON after {max_retries} attempts: {last_parse_error}")
+        except ValueError as e:
+            error_msg = str(e)
+            if "PAIRSET_INVALID" in error_msg:
+                raise
+            logger.warning(f"SELECT_THREE_PAIRS validation error (attempt {attempt+1}/{max_retries}): {error_msg}")
+            if attempt < max_retries - 1:
+                # Retry with stricter prompt
+                prompt = f"""Return JSON ONLY. Do not include any commentary, markdown, code fences, or extra text.
+
+PREVIOUS ATTEMPT FAILED:
+Validation error: {error_msg}
+
+TASK:
+Select exactly 3 pairs of items with the highest silhouette similarity of the MAIN OBJECTS ONLY.
+
+DEFINITION - MAIN OBJECT:
+MAIN OBJECT is the value of the 'object' field (not id). Two items share the same main object if their 'object' strings are equal after lowercasing and trimming.
+
+CRITICAL RULES:
+1) Within each pair: a.object != b.object (the two main objects must be different)
+2) Across all 3 pairs: no 'object' value may repeat (each main object appears at most once across all pairs)
+3) Output exactly 3 pairs
+4) Use only ids that exist in the provided list
+5) Prefer high silhouette similarity of MAIN OBJECT only (ignore sub_object, classic_context, theme_link, theme_tag)
+
+OUTPUT FORMAT (EXACT):
+[
+  {{"a_id":"id1", "b_id":"id2"}},
+  {{"a_id":"id3", "b_id":"id4"}},
+  {{"a_id":"id5", "b_id":"id6"}}
+]
+
+LIST:
+{object_list_formatted}
+
+Return ONLY a JSON array as specified. No other text."""
                 continue
             raise ValueError(f"PAIRSET_INVALID: Validation failed after {max_retries} attempts: {error_msg}")
         except Exception as e:
