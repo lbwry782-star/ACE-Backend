@@ -4121,9 +4121,9 @@ def create_image_prompt(
     """
     # Determine mode: use force_mode if provided, otherwise use ACE_IMAGE_MODE
     effective_mode = force_mode if force_mode else ACE_IMAGE_MODE
-    logger.info(f"IMAGE_PROMPT_MODE={effective_mode} (force_mode={force_mode}, ACE_IMAGE_MODE={ACE_IMAGE_MODE})")
+    # Log is handled in MODE_APPLIED in render_final_ad_bytes, so we don't duplicate here
     
-    # MODE 1 — REPLACEMENT (ONLY IF ≥ 85% silhouette overlap)
+    # MODE 1 — REPLACEMENT (ONLY IF ≥ 85% silhouette similarity)
     if effective_mode == "replacement":
         # Get A.sub_object directly from object_a_item (NEVER use B.sub_object)
         scene_context = object_a_context or f"{object_a} in its classic situation"
@@ -4407,15 +4407,17 @@ def _generate_final_image_unified(
     )
 
 
-def evaluate_silhouette_overlap(
+def evaluate_silhouette_similarity(
     object_a: str,
     object_b: str,
     model_name: Optional[str] = None
 ) -> float:
     """
-    Evaluate silhouette overlap between Object A and Object B.
+    Evaluate silhouette similarity between Object A and Object B.
     
-    Critical rule: Overlap must be based on the main object bodies only.
+    This metric is used to decide between REPLACEMENT mode (>=85%) and SIDE_BY_SIDE mode (<85%).
+    
+    Critical rule: Similarity must be based on the main object bodies only.
     Ignore sub-objects completely. Ignore background and composition.
     Compare only the pure outer contour (dominant silhouette).
     
@@ -4425,16 +4427,16 @@ def evaluate_silhouette_overlap(
         model_name: Model to use (default: OPENAI_SHAPE_MODEL)
     
     Returns:
-        float: Silhouette overlap percentage (0-100)
+        float: Silhouette similarity percentage (0-100)
     """
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     if model_name is None:
         model_name = os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
     
-    prompt = f"""Evaluate the silhouette overlap between two objects.
+    prompt = f"""Evaluate the silhouette similarity between two objects.
 
 CRITICAL RULES:
-- Overlap must be based on the main object bodies ONLY.
+- Similarity must be based on the main object bodies ONLY.
 - Ignore sub-objects completely.
 - Ignore background and composition.
 - Compare ONLY the pure outer contour (dominant silhouette).
@@ -4444,18 +4446,18 @@ Objects:
 - Object B: {object_b}
 
 Task:
-Calculate the silhouette overlap percentage between Object A and Object B.
+Calculate the silhouette similarity percentage between Object A and Object B.
 
 Consider:
 - The dominant outer contour/shape of each main object
-- How much of Object A's silhouette would overlap with Object B's silhouette if placed in the same position
+- How similar are the geometric shapes/silhouettes of the main objects
 - Only the main object body, not any attached or nearby objects
 - Pure geometric shape comparison
 
 Return JSON only:
 {{
-  "silhouette_overlap_percentage": 0-100,
-  "reason": "brief explanation of the overlap calculation"
+  "silhouette_similarity_percentage": 0-100,
+  "reason": "brief explanation of the similarity calculation"
 }}
 
 The percentage must be a number between 0 and 100."""
@@ -4463,7 +4465,7 @@ The percentage must be a number between 0 and 100."""
     max_retries = 2
     for attempt in range(max_retries):
         try:
-            logger.info(f"SILHOUETTE_OVERLAP_EVAL attempt={attempt+1} A={object_a} B={object_b} model={model_name}")
+            logger.info(f"SILHOUETTE_SIMILARITY_EVAL attempt={attempt+1} A={object_a} B={object_b} model={model_name}")
             
             # Use Responses API for o* models
             is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
@@ -4492,31 +4494,32 @@ The percentage must be a number between 0 and 100."""
                 response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
             
             result = json.loads(response_text)
-            overlap = float(result.get("silhouette_overlap_percentage", 0))
+            # Support both old and new field names for backward compatibility
+            similarity = float(result.get("silhouette_similarity_percentage") or result.get("silhouette_overlap_percentage", 0))
             
             # Validate range
-            if overlap < 0:
-                overlap = 0
-            if overlap > 100:
-                overlap = 100
+            if similarity < 0:
+                similarity = 0
+            if similarity > 100:
+                similarity = 100
             
             reason = result.get("reason", "")
-            logger.info(f"SILHOUETTE_OVERLAP_EVAL SUCCESS: A={object_a} B={object_b} overlap={overlap}% reason={reason}")
-            return overlap
+            logger.info(f"SILHOUETTE_SIMILARITY_EVAL SUCCESS: A={object_a} B={object_b} similarity={similarity}% reason={reason}")
+            return similarity
             
         except json.JSONDecodeError as e:
-            logger.error(f"SILHOUETTE_OVERLAP_EVAL JSON parse error (attempt {attempt+1}/{max_retries}): {e}")
+            logger.error(f"SILHOUETTE_SIMILARITY_EVAL JSON parse error (attempt {attempt+1}/{max_retries}): {e}")
             if attempt < max_retries - 1:
                 continue
-            # Fallback: assume low overlap if parsing fails
-            logger.warning(f"SILHOUETTE_OVERLAP_EVAL: Failed to parse, defaulting to 0% overlap")
+            # Fallback: assume low similarity if parsing fails
+            logger.warning(f"SILHOUETTE_SIMILARITY_EVAL: Failed to parse, defaulting to 0% similarity")
             return 0.0
         except Exception as e:
-            logger.error(f"SILHOUETTE_OVERLAP_EVAL failed (attempt {attempt+1}/{max_retries}): {e}")
+            logger.error(f"SILHOUETTE_SIMILARITY_EVAL failed (attempt {attempt+1}/{max_retries}): {e}")
             if attempt < max_retries - 1:
                 continue
-            # Fallback: assume low overlap if evaluation fails
-            logger.warning(f"SILHOUETTE_OVERLAP_EVAL: Failed, defaulting to 0% overlap")
+            # Fallback: assume low similarity if evaluation fails
+            logger.warning(f"SILHOUETTE_SIMILARITY_EVAL: Failed, defaulting to 0% similarity")
             return 0.0
     
     # Final fallback
@@ -4557,28 +4560,40 @@ def render_final_ad_bytes(
     object_a_sub = object_a_item.get("sub_object", "") if object_a_item else ""
     object_b_sub = object_b_item.get("sub_object", "") if object_b_item else ""
     
-    # SILHOUETTE DECISION RULE: Evaluate overlap to determine mode
-    silhouette_overlap = evaluate_silhouette_overlap(
+    # SILHOUETTE SIMILARITY DECISION: Evaluate similarity to determine mode
+    silhouette_similarity_pct = evaluate_silhouette_similarity(
         object_a=object_a_name,
         object_b=object_b_name
     )
     
-    # Determine mode based on silhouette overlap threshold (85%)
+    # Determine mode based on silhouette similarity threshold (85%)
     SILHOUETTE_THRESHOLD = 85.0
-    use_replacement_mode = silhouette_overlap >= SILHOUETTE_THRESHOLD
+    use_replacement_mode = silhouette_similarity_pct >= SILHOUETTE_THRESHOLD
     
     if use_replacement_mode:
-        selected_mode = "replacement"
-        logger.info(f"SILHOUETTE_DECISION: overlap={silhouette_overlap}% >= {SILHOUETTE_THRESHOLD}% → REPLACEMENT mode")
-        
+        final_mode = "replacement"
+    else:
+        final_mode = "side_by_side"
+    
+    # Log mode decision
+    logger.info(f"MODE_DECISION SILHOUETTE_SIMILARITY_PCT={silhouette_similarity_pct} threshold={SILHOUETTE_THRESHOLD} final_mode={final_mode}")
+    
+    if final_mode == "replacement":
         # REPLACEMENT GUARD: A.sub_object must exist
         if not object_a_sub or object_a_sub.strip() == "":
             raise ValueError("REPLACEMENT_MISSING_A_SUB_OBJECT: A.sub_object is missing or empty, cannot generate replacement image")
         
         logger.info(f"REPLACEMENT_INPUT A={object_a_name} A_sub={object_a_sub} A_ctx={object_a_context} | B={object_b_name} B_sub={object_b_sub}")
     else:
-        selected_mode = "side_by_side"
-        logger.info(f"SILHOUETTE_DECISION: overlap={silhouette_overlap}% < {SILHOUETTE_THRESHOLD}% → SIDE_BY_SIDE mode (auto fallback)")
+        # SIDE_BY_SIDE mode: Visual overlap is handled in the image prompt (geometry/layout)
+        # Note: SIDE_BY_SIDE_OVERLAP is a separate geometry metric for side-by-side layout,
+        # not the silhouette similarity metric used for mode decision.
+        # The prompt will handle visual overlap rules (e.g., "partially overlap visually in the center").
+        # We don't compute a separate overlap percentage here, as it's a visual composition rule, not a metric.
+        pass
+    
+    # Log mode application before image generation
+    logger.info(f"MODE_APPLIED final_mode={final_mode} ACE_LAYOUT_MODE={ACE_LAYOUT_MODE} STEP3_MODE={final_mode.upper()}")
     
     # Create prompt with determined mode
     prompt_used = create_image_prompt(
@@ -4594,7 +4609,7 @@ def render_final_ad_bytes(
         object_a_item=object_a_item,
         object_b_item=object_b_item,
         product_name=product_name,
-        force_mode=selected_mode  # Pass determined mode
+        force_mode=final_mode  # Pass determined mode
     )
     
     # Generate image
